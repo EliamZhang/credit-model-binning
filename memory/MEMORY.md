@@ -1,0 +1,1 @@
+- [SQL 申请信息提取](reference_sql_application_extract.md) — scr/application_info_extract.sql 从 ba.customer_profile_rawdata 提取申请信息
