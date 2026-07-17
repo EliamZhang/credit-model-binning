@@ -20,7 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## SQL 脚本
 
-[scr/application_info_extract.sql](scr/application_info_extract.sql) 从 `ba.customer_profile_rawdata` 提取申请信息字段，筛选 `application_time >= '2025-01-01'`。
+- [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息字段，筛选 `application_time >= '2025-01-01'`
+- [scr/conversion_rate_analysis.md](scr/conversion_rate_analysis.md) — 转换率分析公式与指标定义（完成率、通过率、自动/人工通过率、放款率），含新老模型分箱映射和 AUC/逾期率/转化率矩阵等分析维度
 
 ## 文档风格
 
