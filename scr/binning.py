@@ -21,11 +21,17 @@ from scipy.stats import spearmanr, chi2_contingency, norm
 # ============================================================
 LABEL_COL = "duedate_3m_30"
 SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
+SCORE_HIGHER_IS_RISKIER = True
 N_BINS = 20
 OOT_CUT_DATE = "2025-10-21"
+FPD7_REF_DATE = "2026-07-20"     # FPD7 计算参考日期
 
 # ChiMerge 参数
-CHIMERGE_MIN_BINS = 6          # 合并目标箱数
+CHIMERGE_MIN_BINS = 6          # 最少保留箱数
+CHIMERGE_MAX_BINS = 10         # 超过该箱数时继续合并，避免最终等级过碎
+CHIMERGE_P_THRESHOLD = 0.05    # 低于该 p 值时认为相邻箱风险差异显著
+MIN_BIN_SIZE = 3000            # 单箱最低样本量，低于该值优先考虑合并
+MIN_BAD_COUNT = 100            # 单箱最低坏样本数，低于该值优先考虑合并
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RES_DIR = os.path.join(BASE_DIR, "res")
@@ -34,6 +40,52 @@ RES_DIR = os.path.join(BASE_DIR, "res")
 # ============================================================
 # 0. 工具函数
 # ============================================================
+
+def pass_mask(scores, threshold, higher_is_riskier=True):
+    """返回阈值通过人群：高分高风险时 score <= threshold，否则 score >= threshold。"""
+    return scores <= threshold if higher_is_riskier else scores >= threshold
+
+
+def reject_mask(scores, threshold, higher_is_riskier=True):
+    """返回阈值拒绝人群：高分高风险时 score > threshold，否则 score < threshold。"""
+    return scores > threshold if higher_is_riskier else scores < threshold
+
+
+def risk_ordered_bins(stats_df, higher_is_riskier=True):
+    """按风险从低到高排列分箱统计。"""
+    return stats_df if higher_is_riskier else stats_df.iloc[::-1].reset_index(drop=True)
+
+
+def make_open_ended_bins(bins):
+    """将首尾切点改成开口边界，避免 OOT 或线上样本因超出调优集范围被丢弃。"""
+    open_bins = list(bins)
+    open_bins[0] = -np.inf
+    open_bins[-1] = np.inf
+    return open_bins
+
+
+def format_threshold_rule(threshold, kind, higher_is_riskier=True):
+    """生成策略阈值文案。"""
+    if kind == "pass":
+        op = "≤" if higher_is_riskier else "≥"
+    else:
+        op = ">" if higher_is_riskier else "<"
+    return f"score {op} {threshold:.4f}"
+
+
+def format_review_rule(auto_threshold, review_threshold, higher_is_riskier=True):
+    """生成三段式策略中的人工审核区间文案。"""
+    if higher_is_riskier:
+        return f"{auto_threshold:.4f} < score ≤ {review_threshold:.4f}"
+    return f"{review_threshold:.4f} ≤ score < {auto_threshold:.4f}"
+
+
+def format_score_range(min_score, max_score):
+    """生成分数区间文案。"""
+    if np.isnan(min_score) or np.isnan(max_score):
+        return "—"
+    return f"[{min_score:.4f}, {max_score:.4f})"
+
 
 def compute_bin_stats(df, score_col, label_col, bin_col="bin"):
     """汇总分箱指标。"""
@@ -118,15 +170,27 @@ def compute_adjacent_tests(stats_df):
     return results
 
 
-def chimerge(df, score_col, label_col, initial_bins, min_bins=6):
+def chimerge(
+    df,
+    score_col,
+    label_col,
+    initial_bins,
+    min_bins=6,
+    max_bins=10,
+    p_threshold=0.05,
+    min_bin_size=3000,
+    min_bad_count=100,
+    higher_is_riskier=True,
+):
     """
-    ChiMerge: 迭代合并坏账率分布最相似的相邻箱。
+    ChiMerge: 迭代合并相邻箱。
 
-    每轮计算所有相邻箱对的卡方 p 值，合并 p 值最大（最相似）的一对，
-    直到箱数降至 min_bins。
+    优先把箱数压到 max_bins 以内；之后仅在相邻箱统计差异不显著、局部倒挂、
+    或样本/坏样本不足时继续合并，最低不低于 min_bins。
     """
     bins = list(initial_bins)
     merge_history = []
+    stop_reason = ""
 
     while len(bins) - 1 > min_bins:
         df["_merge_bin"] = pd.cut(df[score_col], bins=bins, duplicates="drop", include_lowest=True)
@@ -135,15 +199,15 @@ def chimerge(df, score_col, label_col, initial_bins, min_bins=6):
         if len(stats) <= min_bins:
             break
 
-        best_p = -1.0
-        best_i = -1
-        best_chi2 = 0.0
+        force_by_count = len(stats) > max_bins
+        candidates = []
 
         for i in range(len(stats) - 1):
             row_a = stats.iloc[i]
             row_b = stats.iloc[i + 1]
             B_a, n_a = int(row_a["B"]), int(row_a["n"])
             B_b, n_b = int(row_b["B"]), int(row_b["n"])
+            r_a, r_b = row_a["bad_rate"], row_b["bad_rate"]
             table = [[B_a, n_a - B_a], [B_b, n_b - B_b]]
             try:
                 chi2, p_value = chi2_contingency(table, correction=False)[:2]
@@ -152,25 +216,62 @@ def chimerge(df, score_col, label_col, initial_bins, min_bins=6):
             except ValueError:
                 chi2, p_value = 0.0, 0.0
 
-            if p_value > best_p:
-                best_p = p_value
-                best_chi2 = chi2
-                best_i = i
+            small_sample = n_a < min_bin_size or n_b < min_bin_size
+            sparse_bad = B_a < min_bad_count or B_b < min_bad_count
+            inversion = r_b < r_a if higher_is_riskier else r_b > r_a
+            not_significant = p_value >= p_threshold
+
+            reasons = []
+            if force_by_count:
+                reasons.append("箱数超过上限")
+            if not_significant:
+                reasons.append("相邻箱差异不显著")
+            if inversion:
+                reasons.append("局部倒挂")
+            if small_sample:
+                reasons.append("样本量不足")
+            if sparse_bad:
+                reasons.append("坏样本不足")
+
+            if reasons:
+                candidates.append({
+                    "i": i,
+                    "chi2": chi2,
+                    "p_value": p_value,
+                    "reasons": reasons,
+                    "n_pair": n_a + n_b,
+                    "bad_pair": B_a + B_b,
+                })
+
+        if not candidates:
+            stop_reason = (
+                f"剩余 {len(stats)} 箱已满足约束：箱数不超过 {max_bins}，"
+                f"且无不显著相邻箱、局部倒挂或低样本箱。"
+            )
+            break
+
+        candidates.sort(key=lambda x: (x["p_value"], -x["n_pair"]), reverse=True)
+        best = candidates[0]
+        best_i = best["i"]
 
         merge_history.append({
             "step": len(merge_history) + 1,
             "merged_pair": f"箱{best_i+1} + 箱{best_i+2}",
             "boundary": round(bins[best_i + 1], 6),
-            "chi2": round(best_chi2, 4),
-            "p_value": best_p,
+            "chi2": round(best["chi2"], 4),
+            "p_value": best["p_value"],
             "bins_remaining": len(bins) - 2,
+            "reason": "、".join(dict.fromkeys(best["reasons"])),
         })
         del bins[best_i + 1]
 
     if "_merge_bin" in df.columns:
         df.drop(columns=["_merge_bin"], inplace=True)
 
-    return bins, merge_history
+    if not stop_reason:
+        stop_reason = f"达到最少保留箱数 {min_bins}。"
+
+    return bins, merge_history, stop_reason
 
 
 def compute_psi(stats_tuning, stats_oot):
@@ -184,10 +285,57 @@ def compute_psi(stats_tuning, stats_oot):
     return float(np.sum((a - e) * np.log(a / e)))
 
 
-def compute_threshold_curve(df, score_col, label_col, principal_col=None, n_thresholds=20):
+def compute_auc_ks(scores, labels, higher_is_riskier=True):
+    """计算 AUC（梯形法）和 KS 统计量。
+
+    AUC/KS 均按“坏样本在高风险端更靠前”计算。
+    """
+    scores = np.asarray(scores, dtype=float)
+    labels = np.asarray(labels, dtype=int)
+    valid = ~(np.isnan(scores) | np.isnan(labels))
+    scores = scores[valid]
+    labels = labels[valid]
+
+    n = len(scores)
+    if n == 0:
+        return float("nan"), float("nan")
+
+    total_bad = labels.sum()
+    total_good = n - total_bad
+    if total_bad == 0 or total_good == 0:
+        return float("nan"), float("nan")
+
+    # 按风险从高到低排列
+    risk_scores = scores if higher_is_riskier else -scores
+    order = np.argsort(-risk_scores)
+    labels_sorted = labels[order]
+
+    cum_bad = np.cumsum(labels_sorted)
+    cum_good = np.cumsum(1 - labels_sorted)
+
+    tpr = np.concatenate([[0.0], cum_bad / total_bad])
+    fpr = np.concatenate([[0.0], cum_good / total_good])
+
+    ks = float(np.max(np.abs(tpr - fpr)))
+
+    # 梯形法 AUC
+    auc = float(np.sum((tpr[1:] + tpr[:-1]) / 2 * np.diff(fpr)))
+
+    return auc, ks
+
+
+def compute_threshold_curve(
+    df,
+    score_col,
+    label_col,
+    principal_col=None,
+    n_thresholds=20,
+    candidate_bins=None,
+    higher_is_riskier=True,
+):
     """在调优集上逐阈值计算累计指标。
 
-    假设分数越高风险越高，累计方向为 score <= threshold。
+    高分高风险时累计方向为 score <= threshold；高分低风险时为 score >= threshold。
     若提供 principal_col，则同时计算金额口径坏账率。
     """
     scores = df[score_col].values
@@ -195,12 +343,18 @@ def compute_threshold_curve(df, score_col, label_col, principal_col=None, n_thre
 
     percentiles = np.linspace(100 / n_thresholds, 100, n_thresholds)
     thresholds = np.percentile(scores, percentiles)
+    if candidate_bins is not None:
+        finite_bins = [b for b in candidate_bins if np.isfinite(b)]
+        thresholds = np.concatenate([thresholds, finite_bins])
     thresholds = np.unique(np.round(thresholds, 8))
+    thresholds = np.sort(thresholds)
+    if not higher_is_riskier:
+        thresholds = thresholds[::-1]
 
     total_N = len(df)
     results = []
     for thr in thresholds:
-        mask = scores <= thr
+        mask = pass_mask(scores, thr, higher_is_riskier=higher_is_riskier)
         cum_n = mask.sum()
         cum_B = labels[mask].sum()
         row = {
@@ -209,6 +363,8 @@ def compute_threshold_curve(df, score_col, label_col, principal_col=None, n_thre
             "cum_pass_rate": cum_n / total_N,
             "cum_B": cum_B,
             "cum_bad_rate_count": cum_B / cum_n if cum_n > 0 else float("nan"),
+            "marginal_n": float("nan"),
+            "marginal_bad_rate_count": float("nan"),
         }
         if principal_col and principal_col in df.columns:
             principal = df[principal_col].values
@@ -222,7 +378,18 @@ def compute_threshold_curve(df, score_col, label_col, principal_col=None, n_thre
             )
         results.append(row)
 
-    return pd.DataFrame(results)
+    curve = pd.DataFrame(results)
+    if len(curve) > 1:
+        curve["marginal_n"] = curve["cum_n"].diff()
+        curve["marginal_B"] = curve["cum_B"].diff()
+        curve.loc[curve.index[0], "marginal_n"] = curve.loc[curve.index[0], "cum_n"]
+        curve.loc[curve.index[0], "marginal_B"] = curve.loc[curve.index[0], "cum_B"]
+        curve["marginal_bad_rate_count"] = np.where(
+            curve["marginal_n"] > 0,
+            curve["marginal_B"] / curve["marginal_n"],
+            np.nan,
+        )
+    return curve
 
 
 def compute_conversion_funnel(df, score_col, bins):
@@ -306,15 +473,27 @@ def format_triple(row):
     )
 
 
-def compute_scheme_stats(df, score_col, label_col, auto_max, review_max, principal_col=None):
+def compute_scheme_stats(
+    df,
+    score_col,
+    label_col,
+    auto_threshold,
+    review_threshold,
+    principal_col=None,
+    higher_is_riskier=True,
+):
     """Compute segment stats for a single scheme."""
-    labels = df[label_col].astype(int)
     scores = df[score_col]
     total = len(df)
 
-    seg_auto = df[scores <= auto_max]
-    seg_review = df[(scores > auto_max) & (scores <= review_max)]
-    seg_reject = df[scores > review_max]
+    if higher_is_riskier:
+        seg_auto = df[scores <= auto_threshold]
+        seg_review = df[(scores > auto_threshold) & (scores <= review_threshold)]
+        seg_reject = df[scores > review_threshold]
+    else:
+        seg_auto = df[scores >= auto_threshold]
+        seg_review = df[(scores < auto_threshold) & (scores >= review_threshold)]
+        seg_reject = df[scores < review_threshold]
 
     rows = []
     for seg_name, seg_df in [("自动通过", seg_auto), ("人工审核", seg_review), ("拒绝", seg_reject)]:
@@ -335,54 +514,91 @@ def compute_scheme_stats(df, score_col, label_col, auto_max, review_max, princip
             valid = principal.notna() & (principal > 0)
             if valid.sum() > 0:
                 principal_sum = principal[valid].sum()
-                bad_principal_sum = (principal[valid] * labels[seg_df.index[valid]].astype(int)).sum()
+                bad_principal_sum = (principal[valid] * seg_df.loc[valid, label_col].astype(int)).sum()
                 row["bad_rate_amount"] = bad_principal_sum / principal_sum
         rows.append(row)
     return rows
 
 
-def design_three_schemes(df, merged_stats, score_col, label_col, principal_col=None):
+def boundary_for_risk_bins(risk_stats, n_risk_bins, higher_is_riskier=True):
+    """返回覆盖前 n_risk_bins 个低风险箱的策略阈值。"""
+    n_risk_bins = min(max(1, n_risk_bins), len(risk_stats))
+    row = risk_stats.iloc[n_risk_bins - 1]
+    return row["score_max"] if higher_is_riskier else row["score_min"]
+
+
+def design_three_schemes(
+    df,
+    merged_stats,
+    score_col,
+    label_col,
+    principal_col=None,
+    higher_is_riskier=True,
+):
     """基于合并箱边界设计三套方案。
 
-    保守方案: 低风险 bins 自动通过，中间 bins 人工审核，高风险 bins 拒绝
-    平衡方案: 更多 bins 自动通过，仅最高风险 bin 拒绝
-    增长方案: 最大范围自动通过，最高风险 bin 人工审核，不做硬拒绝
+    根据实际合并箱数自动切分，不再依赖固定 6 箱。
     """
-    assert len(merged_stats) == 6, "三套方案设计依赖 6 箱合并结果"
+    risk_stats = risk_ordered_bins(merged_stats, higher_is_riskier=higher_is_riskier)
+    n_bins = len(risk_stats)
+    if n_bins < 3:
+        raise RuntimeError("三套方案设计至少需要 3 个风险等级。")
 
-    bin_maxes = merged_stats["score_max"].values  # [b1_max, b2_max, ..., b6_max]
+    conservative_auto_bins = max(1, int(np.floor(n_bins / 3)))
+    conservative_review_bins = max(conservative_auto_bins + 1, int(np.floor(2 * n_bins / 3)))
+    balance_auto_bins = max(1, int(np.floor(n_bins / 2)))
+    balance_review_bins = max(balance_auto_bins + 1, n_bins - 1)
+    growth_auto_bins = max(1, n_bins - 1)
+    growth_review_bins = n_bins
 
     schemes = {
         "保守方案": {
-            "auto_max": bin_maxes[1],   # bins 1-2
-            "review_max": bin_maxes[3], # bins 3-4
+            "auto_max": boundary_for_risk_bins(
+                risk_stats, conservative_auto_bins, higher_is_riskier
+            ),
+            "review_max": boundary_for_risk_bins(
+                risk_stats, conservative_review_bins, higher_is_riskier
+            ),
             "reject": True,
-            "description": "仅自动通过最低风险的 2 个箱，人工审核中间 2 箱，拒绝高风险的 2 箱。坏账率最低，抗风险能力最强。",
+            "description": f"自动通过最低风险的 {conservative_auto_bins} 个箱，前 {conservative_review_bins} 个箱进入通过范围，其余高风险箱拒绝。坏账率最低，抗风险能力最强。",
         },
         "平衡方案（推荐）": {
-            "auto_max": bin_maxes[2],   # bins 1-3
-            "review_max": bin_maxes[4], # bins 4-5
+            "auto_max": boundary_for_risk_bins(
+                risk_stats, balance_auto_bins, higher_is_riskier
+            ),
+            "review_max": boundary_for_risk_bins(
+                risk_stats, balance_review_bins, higher_is_riskier
+            ),
             "reject": True,
-            "description": "自动通过前 3 箱，人工审核中间 2 箱，拒绝最高风险 1 箱。在通过率、风险和审核量之间取得平衡。",
+            "description": f"自动通过最低风险的 {balance_auto_bins} 个箱，人工审核中间风险箱，仅拒绝最高风险 {n_bins - balance_review_bins} 个箱。在通过率、风险和审核量之间取得平衡。",
         },
         "增长方案": {
-            "auto_max": bin_maxes[4],   # bins 1-5
-            "review_max": bin_maxes[5], # bin 6
+            "auto_max": boundary_for_risk_bins(
+                risk_stats, growth_auto_bins, higher_is_riskier
+            ),
+            "review_max": boundary_for_risk_bins(
+                risk_stats, growth_review_bins, higher_is_riskier
+            ),
             "reject": False,
-            "description": "自动通过前 5 箱，仅最高风险的 1 箱进入人工审核，不做硬拒绝。通过率最高，适合激进获客扩张。",
+            "description": "除最高风险箱外自动通过，最高风险箱进入人工审核，不做硬拒绝。通过率最高，适合激进获客扩张。",
         },
     }
 
     results = {}
     for name, cfg in schemes.items():
-        review_max = cfg["review_max"] if cfg["reject"] else float("inf")
         segments = compute_scheme_stats(
-            df, score_col, label_col, cfg["auto_max"], review_max, principal_col
+            df,
+            score_col,
+            label_col,
+            cfg["auto_max"],
+            cfg["review_max"],
+            principal_col,
+            higher_is_riskier,
         )
         # summary row
         total = len(df)
         if cfg["reject"]:
-            approved = df[df[score_col] <= cfg["review_max"]]
+            approved = df[pass_mask(df[score_col], cfg["review_max"], higher_is_riskier)]
             reject_n = total - len(approved)
             reject_rate = reject_n / total
         else:
@@ -464,11 +680,26 @@ print(f"  模型分表: {len(score_df):,} 条")
 print(f"  申请表:   {len(info_df):,} 条")
 
 merged = score_df.merge(
-    info_df[["application_id", LABEL_COL, "principal", "status", "application_status"]],
+    info_df[[
+        "application_id", LABEL_COL, "principal", "status", "application_status",
+        "first_payment_scheduled_date", "first_payment_days_past_due_ever",
+    ]],
     on="application_id",
     how="inner",
 )
 print(f"  关联后:   {len(merged):,} 条")
+
+# FPD7 标签
+merged["fpd7_flag"] = np.nan
+fpd7_ref = pd.Timestamp(FPD7_REF_DATE)
+first_pay_date = pd.to_datetime(merged["first_payment_scheduled_date"], errors="coerce")
+funded_mask = merged["application_status"] == "4.Funded"
+fpd7_eligible = funded_mask & first_pay_date.notna() & (first_pay_date < fpd7_ref - pd.Timedelta(days=7))
+merged.loc[fpd7_eligible & (merged["first_payment_days_past_due_ever"] > 7), "fpd7_flag"] = 1
+merged.loc[fpd7_eligible & (merged["first_payment_days_past_due_ever"] <= 7), "fpd7_flag"] = 0
+fpd7_valid_n = fpd7_eligible.sum()
+fpd7_bad_n = int((merged["fpd7_flag"] == 1).sum())
+print(f"  FPD7 有效样本: {fpd7_valid_n:,}，坏样本: {fpd7_bad_n:,}（FPD7 = {fpd7_bad_n/fpd7_valid_n:.4%}）" if fpd7_valid_n > 0 else "  FPD7 有效样本: 0")
 
 # ============================================================
 # 2. 样本划分
@@ -513,6 +744,7 @@ print(f"  目标箱数: {N_BINS}，实际箱数: {actual_bins}")
 if actual_bins < N_BINS:
     print(f"  注意: 因同分集中，实际箱数减少为 {actual_bins} 箱")
 print(f"  切点: {[round(b, 6) for b in bins]}")
+initial_bins_for_scoring = make_open_ended_bins(bins)
 
 # ============================================================
 # 4. 策略调优集初始分箱指标
@@ -533,6 +765,13 @@ print(f"  Spearman ρ = {rho:.4f}（p = {p_value:.4f}）")
 if abs(rho) < 0.9:
     print("  ⚠ 单调性较差，可能存在局部倒挂。")
 
+tuning_auc, tuning_ks = compute_auc_ks(
+    tuning_valid[SCORE_COL],
+    tuning_valid[LABEL_COL],
+    higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
+)
+print(f"  AUC = {tuning_auc:.4f}，KS = {tuning_ks:.4f}")
+
 # ============================================================
 # 5. OOT 集初始分箱
 # ============================================================
@@ -542,7 +781,12 @@ print("=" * 60)
 
 if len(oot_valid) > 0:
     oot_labels = oot_valid[LABEL_COL].astype(int)
-    oot_valid["bin"] = pd.cut(oot_valid[SCORE_COL], bins=bins, duplicates="drop", include_lowest=True)
+    oot_valid["bin"] = pd.cut(
+        oot_valid[SCORE_COL],
+        bins=initial_bins_for_scoring,
+        duplicates="drop",
+        include_lowest=True,
+    )
     oot_valid_binned = oot_valid[oot_valid["bin"].notna()].copy()
 
     if len(oot_valid_binned) > 0:
@@ -567,6 +811,16 @@ else:
     oot_bad_rate = None
     print("  OOT 集无有效标签，可能尚不成熟。")
 
+if oot_stats is not None:
+    oot_auc, oot_ks = compute_auc_ks(
+        oot_valid_binned[SCORE_COL],
+        oot_valid_binned[LABEL_COL],
+        higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
+    )
+    print(f"  OOT AUC = {oot_auc:.4f}，KS = {oot_ks:.4f}")
+else:
+    oot_auc, oot_ks = float("nan"), float("nan")
+
 # ============================================================
 # 6. 相邻箱差异检验
 # ============================================================
@@ -587,15 +841,22 @@ print("\n" + "=" * 60)
 print("7. ChiMerge 合并")
 print("=" * 60)
 
-merged_bins, merge_history = chimerge(
+merged_bins, merge_history, merge_stop_reason = chimerge(
     tuning_valid, SCORE_COL, LABEL_COL, bins,
     min_bins=CHIMERGE_MIN_BINS,
+    max_bins=CHIMERGE_MAX_BINS,
+    p_threshold=CHIMERGE_P_THRESHOLD,
+    min_bin_size=MIN_BIN_SIZE,
+    min_bad_count=MIN_BAD_COUNT,
+    higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
 )
+merged_bins_for_scoring = make_open_ended_bins(merged_bins)
 
 print(f"  初始 {len(bins)-1} 箱 → 合并后 {len(merged_bins)-1} 箱")
 print(f"  合并次数: {len(merge_history)}")
 for h in merge_history:
-    print(f"    第{h['step']:2d}步: 合并 {h['merged_pair']}（p={h['p_value']:.4f}），剩余 {h['bins_remaining']} 箱")
+    print(f"    第{h['step']:2d}步: 合并 {h['merged_pair']}（p={h['p_value']:.4f}，原因={h['reason']}），剩余 {h['bins_remaining']} 箱")
+print(f"  停止原因: {merge_stop_reason}")
 
 # ============================================================
 # 8. 合并后分箱指标（策略调优集）
@@ -604,7 +865,12 @@ print("\n" + "=" * 60)
 print("8. 合并后分箱指标（策略调优集）")
 print("=" * 60)
 
-tuning_valid["merged_bin"] = pd.cut(tuning_valid[SCORE_COL], bins=merged_bins, duplicates="drop", include_lowest=True)
+tuning_valid["merged_bin"] = pd.cut(
+    tuning_valid[SCORE_COL],
+    bins=merged_bins_for_scoring,
+    duplicates="drop",
+    include_lowest=True,
+)
 tuning_merged_stats, tuning_merged_N, tuning_merged_B = compute_bin_stats(
     tuning_valid, SCORE_COL, LABEL_COL, bin_col="merged_bin"
 )
@@ -627,7 +893,12 @@ print("9. OOT 集合并后分箱验证")
 print("=" * 60)
 
 if len(oot_valid) > 0:
-    oot_valid["merged_bin"] = pd.cut(oot_valid[SCORE_COL], bins=merged_bins, duplicates="drop", include_lowest=True)
+    oot_valid["merged_bin"] = pd.cut(
+        oot_valid[SCORE_COL],
+        bins=merged_bins_for_scoring,
+        duplicates="drop",
+        include_lowest=True,
+    )
     oot_merged_binned = oot_valid[oot_valid["merged_bin"].notna()].copy()
 
     if len(oot_merged_binned) > 0:
@@ -670,7 +941,13 @@ print("10. 累计阈值曲线")
 print("=" * 60)
 
 threshold_curve = compute_threshold_curve(
-    tuning_valid, SCORE_COL, LABEL_COL, principal_col="principal", n_thresholds=20
+    tuning_valid,
+    SCORE_COL,
+    LABEL_COL,
+    principal_col="principal",
+    n_thresholds=20,
+    candidate_bins=merged_bins[1:-1],
+    higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
 )
 
 print(f"  阈值点数: {len(threshold_curve)}")
@@ -689,19 +966,41 @@ print("\n" + "=" * 60)
 print("11. 三套方案设计")
 print("=" * 60)
 
-schemes = design_three_schemes(tuning_valid, tuning_merged_stats, SCORE_COL, LABEL_COL, principal_col="principal")
+schemes = design_three_schemes(
+    tuning_valid,
+    tuning_merged_stats,
+    SCORE_COL,
+    LABEL_COL,
+    principal_col="principal",
+    higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
+)
 
 for name, s in schemes.items():
     if s["reject"]:
-        print(f"  {name}: 自动通过 ≤ {s['auto_max']:.4f}, 审核 ≤ {s['review_max']:.4f}, 拒绝 > {s['review_max']:.4f}")
+        print(
+            f"  {name}: 自动通过 {format_threshold_rule(s['auto_max'], 'pass', SCORE_HIGHER_IS_RISKIER)}, "
+            f"人工审核 {format_review_rule(s['auto_max'], s['review_max'], SCORE_HIGHER_IS_RISKIER)}, "
+            f"拒绝 {format_threshold_rule(s['review_max'], 'reject', SCORE_HIGHER_IS_RISKIER)}"
+        )
     else:
-        print(f"  {name}: 自动通过 ≤ {s['auto_max']:.4f}, 审核 ≤ {s['review_max']:.4f}, 不做硬拒绝")
+        print(
+            f"  {name}: 自动通过 {format_threshold_rule(s['auto_max'], 'pass', SCORE_HIGHER_IS_RISKIER)}, "
+            f"人工审核 {format_review_rule(s['auto_max'], s['review_max'], SCORE_HIGHER_IS_RISKIER)}, "
+            "不做硬拒绝"
+        )
     print(f"    通过率 {s['pass_rate']:.2%}, 通过人群坏账率 {s['pass_bad_rate_count']:.4%}, 拒绝率 {s['reject_rate']:.2%}")
 
 # OOT 验证三套方案
 schemes_oot = None
-if len(oot_valid) > 0:
-    schemes_oot = design_three_schemes(oot_valid, oot_merged_stats, SCORE_COL, LABEL_COL, principal_col="principal")
+if len(oot_valid) > 0 and oot_merged_stats is not None:
+    schemes_oot = design_three_schemes(
+        oot_valid,
+        oot_merged_stats,
+        SCORE_COL,
+        LABEL_COL,
+        principal_col="principal",
+        higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
+    )
 
 # ============================================================
 # 12. 转化率分析（全量申请，不区分调优/OOT）
@@ -710,7 +1009,7 @@ print("\n" + "=" * 60)
 print("12. 转化率分析")
 print("=" * 60)
 
-funnel_metrics, funnel_bins = compute_conversion_funnel(merged, SCORE_COL, merged_bins)
+funnel_metrics, funnel_bins = compute_conversion_funnel(merged, SCORE_COL, merged_bins_for_scoring)
 
 print(f"  申请: {funnel_metrics['apply_cnt']:,}")
 print(f"  完成率: {funnel_metrics['completion_rate']:.2%}")
@@ -720,19 +1019,76 @@ print(f"  放款率（通过中）: {funnel_metrics['funding_rate']:.2%}")
 print(f"  整体放款率（申请 → 放款）: {funnel_metrics['overall_funding_rate']:.2%}")
 
 # ============================================================
-# 13. 输出 Markdown
+# 13. FPD7 标签对比分析
 # ============================================================
 print("\n" + "=" * 60)
-print("13. 输出结果")
+print("13. FPD7 标签对比分析")
+print("=" * 60)
+
+FPD7_LABEL = "fpd7_flag"
+
+# 在 tuning 和 OOT 中筛选 FPD7 有效样本
+tuning_fpd7 = tuning_valid[tuning_valid[FPD7_LABEL].notna()].copy()
+oot_fpd7 = oot_valid[oot_valid[FPD7_LABEL].notna()].copy() if len(oot_valid) > 0 else pd.DataFrame()
+
+print(f"  调优集 FPD7 有效: {len(tuning_fpd7):,}，坏样本: {int(tuning_fpd7[FPD7_LABEL].sum()):,}")
+if len(tuning_fpd7) > 0:
+    fpd7_tuning_auc, fpd7_tuning_ks = compute_auc_ks(
+        tuning_fpd7[SCORE_COL],
+        tuning_fpd7[FPD7_LABEL],
+        higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
+    )
+    print(f"  调优集 FPD7 AUC = {fpd7_tuning_auc:.4f}，KS = {fpd7_tuning_ks:.4f}")
+
+if len(oot_fpd7) > 0:
+    fpd7_oot_auc, fpd7_oot_ks = compute_auc_ks(
+        oot_fpd7[SCORE_COL],
+        oot_fpd7[FPD7_LABEL],
+        higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
+    )
+    print(f"  OOT 集 FPD7 AUC = {fpd7_oot_auc:.4f}，KS = {fpd7_oot_ks:.4f}")
+else:
+    fpd7_oot_auc, fpd7_oot_ks = float("nan"), float("nan")
+
+# 合并后分箱 × FPD7（调优集）
+fpd7_bin_stats = None
+if len(tuning_fpd7) > 0:
+    tuning_fpd7["merged_bin"] = pd.cut(
+        tuning_fpd7[SCORE_COL],
+        bins=merged_bins_for_scoring,
+        duplicates="drop",
+        include_lowest=True,
+    )
+    fpd7_bin_stats, fpd7_bin_N, fpd7_bin_B = compute_bin_stats(
+        tuning_fpd7, SCORE_COL, FPD7_LABEL, bin_col="merged_bin"
+    )
+    fpd7_overall = fpd7_bin_B / fpd7_bin_N
+    print(f"  FPD7 整体坏账率（调优）: {fpd7_overall:.4%}")
+    for row in fpd7_bin_stats.itertuples():
+        print(f"    箱{row.Index}: FPD7={row.bad_rate:.4%}, n={row.n:,}")
+
+# ============================================================
+# 14. 输出 Markdown
+# ============================================================
+print("\n" + "=" * 60)
+print("14. 输出结果")
 print("=" * 60)
 
 md = []
+score_direction_text = "分数越高风险越高" if SCORE_HIGHER_IS_RISKIER else "分数越高风险越低"
+threshold_pass_expr = "score <= threshold" if SCORE_HIGHER_IS_RISKIER else "score >= threshold"
+auto_header = "自动通过 ≤" if SCORE_HIGHER_IS_RISKIER else "自动通过 ≥"
+review_header = "审核 ≤" if SCORE_HIGHER_IS_RISKIER else "审核 ≥"
 
 # 标题
 md.append("# 分箱结果：等频 20 箱 → ChiMerge 合并")
 md.append("")
 md.append(f"> 模型: `{SCORE_COL}` | 标签: `{LABEL_COL}` | 样本切分: `< {OOT_CUT_DATE}` vs `>= {OOT_CUT_DATE}`")
-md.append(f"> 合并参数: 目标箱数 = {CHIMERGE_MIN_BINS}")
+md.append(f"> 分数方向: {score_direction_text}")
+md.append(
+    f"> 合并参数: 最少保留 {CHIMERGE_MIN_BINS} 箱，超过 {CHIMERGE_MAX_BINS} 箱优先合并；"
+    f"相邻箱 p >= {CHIMERGE_P_THRESHOLD}、局部倒挂或低样本箱继续合并"
+)
 md.append("")
 
 # ---- 摘要 ----
@@ -759,6 +1115,9 @@ md.append(f"| IV | {tuning_IV:.4f} | {oot_IV:.4f} "
 md.append(f"| Spearman ρ | {rho:.4f} | {oot_rho:.4f} "
          f"| {tuning_merged_rho:.4f} "
          f"| {oot_merged_rho:.4f} |" if oot_stats is not None and oot_merged_stats is not None else "")
+md.append(f"| AUC | {tuning_auc:.4f} | {oot_auc:.4f} | — | — |")
+md.append(f"| KS | {tuning_ks:.4f} | {oot_ks:.4f} | — | — |")
+md.append("> AUC/KS 为分数级排序指标，不随分箱变化，合并前后一致，故合并后不再重复列出。")
 if merged_psi is not None:
     md.append(f"| PSI（tuning vs OOT） | — | — | — | {merged_psi:.4f} |")
 md.append("")
@@ -800,10 +1159,10 @@ md.append("")
 # ---- ChiMerge 合并过程 ----
 md.append("## 四、ChiMerge 合并过程")
 md.append("")
-md.append(f"从 {len(bins)-1} 箱开始，每轮合并卡方 p 值最大（分布最相似）的相邻箱对，直至 {CHIMERGE_MIN_BINS} 箱。")
+md.append(f"从 {len(bins)-1} 箱开始，优先将箱数压到 {CHIMERGE_MAX_BINS} 箱以内；之后仅在相邻箱差异不显著、局部倒挂或样本不足时继续合并，最低不低于 {CHIMERGE_MIN_BINS} 箱。")
 md.append("")
-md.append("| 步骤 | 合并对 | 被合并边界 | χ² | p 值 | 剩余箱数 |")
-md.append("|---:|---:|---:|---:|---:|---:|")
+md.append("| 步骤 | 合并对 | 被合并边界 | χ² | p 值 | 剩余箱数 | 合并原因 |")
+md.append("|---:|---:|---:|---:|---:|---:|:---|")
 for h in merge_history:
     md.append(
         f"| {h['step']} "
@@ -811,8 +1170,11 @@ for h in merge_history:
         f"| {h['boundary']} "
         f"| {h['chi2']:.2f} "
         f"| {h['p_value']:.4f} "
-        f"| {h['bins_remaining']} |"
+        f"| {h['bins_remaining']} "
+        f"| {h['reason']} |"
     )
+md.append("")
+md.append(f"> 停止原因：{merge_stop_reason}")
 md.append("")
 
 # ---- 合并后分箱 ----
@@ -832,7 +1194,7 @@ if oot_merged_stats is not None:
 # ---- 合并后结论 ----
 md.append("## 六、合并后结论")
 md.append("")
-md.append(f"- 合并后保留 **{len(tuning_merged_stats)} 个风险等级**，各箱坏账率严格单调（ρ = {tuning_merged_rho:.4f}）")
+md.append(f"- 合并后保留 **{len(tuning_merged_stats)} 个风险等级**，单调性指标 Spearman ρ = {tuning_merged_rho:.4f}")
 md.append(f"- 调优集 IV = {tuning_merged_IV:.4f}，区分能力保持良好")
 if oot_merged_stats is not None:
     md.append(f"- OOT 集 IV = {oot_merged_IV:.4f}，跨期排序能力确认")
@@ -843,17 +1205,16 @@ md.append("")
 # ---- 累计阈值曲线 ----
 md.append("## 七、累计阈值曲线")
 md.append("")
-md.append("> 在策略调优集上，从低分到高分逐阈值计算累计通过率和累计坏账率。")
-md.append("> 分数越高风险越高，累计方向为 `score <= threshold`（从最安全到最危险逐段累加）。")
-md.append("> 即：阈值 = 通过线，分数 ≤ 阈值的人通过（自动通过或人工审核），分数 > 阈值的人拒绝。")
-md.append("> 合并箱边界行以 **粗体** 标注。")
+md.append("> 在策略调优集上，按低风险到高风险方向逐阈值计算累计通过率和累计坏账率。")
+md.append(f"> {score_direction_text}，累计通过规则为 `{threshold_pass_expr}`。")
+md.append("> 候选阈值由 20 个等分位点和合并箱边界共同组成，合并箱边界行以 **粗体** 标注。")
 md.append("")
 
 # 构建合并边界集合用于标注
 merged_boundary_set = set(round(b, 8) for b in merged_bins[1:-1])
 
-md.append("| 阈值 | 累计通过率 | 累计坏账率（笔数） | 累计坏账率（金额） | 备注 |")
-md.append("|---:|---:|---:|---:|:---|")
+md.append("| 阈值 | 累计通过率 | 累计坏账率（笔数） | 边际坏账率（笔数） | 累计坏账率（金额） | 备注 |")
+md.append("|---:|---:|---:|---:|---:|:---|")
 for row in threshold_curve.itertuples():
     thr = row.threshold
     is_boundary = round(thr, 8) in merged_boundary_set
@@ -866,6 +1227,7 @@ for row in threshold_curve.itertuples():
         f"| {thr:.4f} "
         f"| {row.cum_pass_rate:.2%} "
         f"| {bad_count_str} "
+        f"| {row.marginal_bad_rate_count:.4%} "
         f"| {bad_amt_str} "
         f"| {marker} |"
     )
@@ -874,18 +1236,20 @@ md.append("")
 # 合并边界参考
 md.append("### 合并箱边界参考")
 md.append("")
-md.append("| 箱序 | 分数区间 | 阈值（上限） |")
+edge_desc = "上限" if SCORE_HIGHER_IS_RISKIER else "下限"
+md.append(f"| 箱序 | 分数区间 | 阈值（{edge_desc}） |")
 md.append("|---:|---:|---:|")
 for i, row in enumerate(tuning_merged_stats.itertuples()):
-    md.append(f"| {i+1} | [{row.score_min:.4f}, {row.score_max:.4f}) | {row.score_max:.4f} |")
+    threshold_edge = row.score_max if SCORE_HIGHER_IS_RISKIER else row.score_min
+    md.append(f"| {i+1} | [{row.score_min:.4f}, {row.score_max:.4f}) | {threshold_edge:.4f} |")
 md.append("")
-md.append("> 每个合并箱的上限即为一个可选策略阈值。例如，以箱 1 上限为拒绝线，则仅通过分数 ≤ 该阈值的低风险人群。")
+md.append(f"> 每个合并箱的{edge_desc}即为一个可选策略阈值。")
 md.append("")
 
 # ---- 三套方案设计 ----
 md.append("## 八、三套方案设计")
 md.append("")
-md.append("> 基于合并后的 6 个风险等级，设计增长/平衡/保守三套方案。")
+md.append(f"> 基于合并后的 {len(tuning_merged_stats)} 个风险等级，设计增长/平衡/保守三套方案。")
 md.append("> 每套方案将分数段划分为三区：**自动通过**（低风险）、**人工审核**（中风险）、**拒绝**（高风险）。")
 md.append("> 目前基于通过率与坏账率做 trade-off 选择；EL/收入/UE 待补充经济数据后扩展。")
 md.append("> **注**：金额口径坏账率仅覆盖已放款样本（`principal` 非空且 > 0），与笔数口径的人群不完全一致，两者不能直接对比。")
@@ -898,12 +1262,12 @@ for scheme_name, s in schemes.items():
     md.append("")
     md.append(f"> {s['description']}")
     md.append("")
-    md.append(f"- **自动通过阈值**: score ≤ {s['auto_max']:.4f}")
+    md.append(f"- **自动通过阈值**: {format_threshold_rule(s['auto_max'], 'pass', SCORE_HIGHER_IS_RISKIER)}")
     if s["reject"]:
-        md.append(f"- **人工审核区间**: {s['auto_max']:.4f} < score ≤ {s['review_max']:.4f}")
-        md.append(f"- **拒绝阈值**: score > {s['review_max']:.4f}")
+        md.append(f"- **人工审核区间**: {format_review_rule(s['auto_max'], s['review_max'], SCORE_HIGHER_IS_RISKIER)}")
+        md.append(f"- **拒绝阈值**: {format_threshold_rule(s['review_max'], 'reject', SCORE_HIGHER_IS_RISKIER)}")
     else:
-        md.append(f"- **人工审核区间**: {s['auto_max']:.4f} < score ≤ {s['review_max']:.4f}")
+        md.append(f"- **人工审核区间**: {format_review_rule(s['auto_max'], s['review_max'], SCORE_HIGHER_IS_RISKIER)}")
         md.append(f"- **拒绝阈值**: 无（不做硬拒绝）")
     md.append("")
 
@@ -921,7 +1285,7 @@ for scheme_name, s in schemes.items():
     for seg in s["segments"]:
         if seg["n"] == 0:
             continue  # skip empty segments (e.g. reject in growth scheme)
-        score_range = f"[{seg['score_min']:.4f}, {seg['score_max']:.4f})" if not np.isnan(seg['score_min']) else "—"
+        score_range = format_score_range(seg["score_min"], seg["score_max"])
         line = (
             f"| {seg['segment']} "
             f"| {score_range} "
@@ -963,7 +1327,7 @@ for scheme_name, s in schemes.items():
 # 方案对比总结表
 md.append("### 三套方案对比")
 md.append("")
-compare_headers = "| 方案 | 自动通过 ≤ | 审核 ≤ | 通过率 | 坏账率（笔数） "
+compare_headers = f"| 方案 | {auto_header} | {review_header} | 通过率 | 坏账率（笔数） "
 compare_sep = "|---:|---:|---:|---:|---:"
 if has_amount:
     compare_headers += "| 坏账率（金额） "
@@ -1001,7 +1365,7 @@ md.append("")
 # ---- 转化率漏斗 ----
 md.append("## 九、转化率漏斗")
 md.append("")
-md.append("> 在全量申请（不分调优/OOT）上，按合并后的 6 个风险等级拆分审批漏斗。")
+md.append(f"> 在全量申请（不分调优/OOT）上，按合并后的 {len(tuning_merged_stats)} 个风险等级拆分审批漏斗。")
 md.append("> 漏斗路径：申请 → 完成（排除 Incomplete）→ 通过（status 以 3/4 开头）→ 放款（4.Funded）。")
 md.append("")
 
@@ -1040,6 +1404,60 @@ md.append("")
 md.append("> **解读**：低分箱（低风险）的完成率和通过率应更高；若低风险客群拒绝率异常偏高，说明风控策略可能过于严苛。")
 md.append("")
 
+# ---- FPD7 标签对比 ----
+md.append("## 十、FPD7 标签对比")
+md.append("")
+md.append(f"> FPD7：首期支付逾期 7 天。计算口径：`application_status = '4.Funded'` 且 `first_payment_scheduled_date < {FPD7_REF_DATE} - 7` 天。")
+md.append("> 满足条件但 `first_payment_days_past_due_ever <= 7` 的为 0，`> 7` 的为 1，其余为 NULL。")
+md.append(f"> FPD7 有效样本仅覆盖已放款且首期到期满 7 天的订单，样本量远小于 `{LABEL_COL}`，但作为更早期的风险信号可提供补充视角。")
+md.append("")
+
+# FPD7 overall metrics
+md.append("### FPD7 整体指标")
+md.append("")
+md.append("| 指标 | 调优集 | OOT 集 |")
+md.append("|---:|---:|---:|")
+md.append(f"| 有效样本 | {len(tuning_fpd7):,} | {len(oot_fpd7):,} |" if len(oot_fpd7) > 0 else f"| 有效样本 | {len(tuning_fpd7):,} | — |")
+if len(tuning_fpd7) > 0:
+    md.append(f"| FPD7 坏账率 | {int(tuning_fpd7[FPD7_LABEL].sum())/len(tuning_fpd7):.4%} "
+             f"| {int(oot_fpd7[FPD7_LABEL].sum())/len(oot_fpd7):.4%} |" if len(oot_fpd7) > 0 else f"| FPD7 坏账率 | {int(tuning_fpd7[FPD7_LABEL].sum())/len(tuning_fpd7):.4%} | — |")
+    md.append(f"| AUC | {fpd7_tuning_auc:.4f} | {fpd7_oot_auc:.4f} |" if not np.isnan(fpd7_oot_auc) else f"| AUC | {fpd7_tuning_auc:.4f} | — |")
+    md.append(f"| KS | {fpd7_tuning_ks:.4f} | {fpd7_oot_ks:.4f} |" if not np.isnan(fpd7_oot_ks) else f"| KS | {fpd7_tuning_ks:.4f} | — |")
+md.append("")
+
+# FPD7 vs duedate_3m_30 comparison
+md.append("### AUC / KS 对比（调优集）")
+md.append("")
+md.append("| 标签 | AUC | KS | 有效样本 | 坏账率 |")
+md.append("|---:|---:|---:|---:|---:|")
+md.append(f"| `{LABEL_COL}` | {tuning_auc:.4f} | {tuning_ks:.4f} | {tuning_N:,} | {tuning_bad_rate:.4%} |")
+if len(tuning_fpd7) > 0:
+    fpd7_rate = int(tuning_fpd7[FPD7_LABEL].sum()) / len(tuning_fpd7)
+    md.append(f"| `{FPD7_LABEL}` | {fpd7_tuning_auc:.4f} | {fpd7_tuning_ks:.4f} | {len(tuning_fpd7):,} | {fpd7_rate:.4%} |")
+md.append("")
+md.append("> FPD7 作为早期风险信号，其 AUC/KS 通常低于成熟期标签（3m_30），但若差异过大，说明模型对早期风险的排序能力不足。")
+md.append("")
+
+# FPD7 by merged bins
+if fpd7_bin_stats is not None and len(fpd7_bin_stats) > 0:
+    md.append("### 合并后分箱 × FPD7（调优集）")
+    md.append("")
+    md.append("| 箱序 | 分数区间 | FPD7 有效样本 | FPD7 坏样本 | FPD7 坏账率 | 3m_30 坏账率（同箱） |")
+    md.append("|---:|---:|---:|---:|---:|---:|")
+    for i, (f_row, t_row) in enumerate(zip(fpd7_bin_stats.itertuples(), tuning_merged_stats.itertuples())):
+        score_range = f"[{f_row.score_min:.4f}, {f_row.score_max:.4f})"
+        md.append(
+            f"| {i+1} "
+            f"| {score_range} "
+            f"| {f_row.n:>6,} "
+            f"| {int(f_row.B):>6,} "
+            f"| {f_row.bad_rate:.4%} "
+            f"| {t_row.bad_rate:.4%} |"
+        )
+    md.append("")
+    md.append("> 对比同一分箱内 FPD7 与 3m_30 的坏账率，可观察早期风险信号与成熟期风险的一致性。若某箱 FPD7 显著低于 3m_30，说明该客群的首期表现较好但后续恶化（或反之）。")
+    md.append("")
+
 # 写入文件
 out_path = os.path.join(RES_DIR, "binning_result.md")
 with open(out_path, "w", encoding="utf-8") as f:
@@ -1047,11 +1465,13 @@ with open(out_path, "w", encoding="utf-8") as f:
 print(f"  输出: res/binning_result.md")
 
 # 控制台摘要
-print(f"\n  初分 20 箱: 调优 {tuning_N:,} 条，坏账率 {tuning_bad_rate:.4%}，IV {tuning_IV:.4f}，ρ {rho:.4f}")
+print(f"\n  初分 20 箱: 调优 {tuning_N:,} 条，坏账率 {tuning_bad_rate:.4%}，IV {tuning_IV:.4f}，ρ {rho:.4f}，AUC {tuning_auc:.4f}，KS {tuning_ks:.4f}")
 print(f"  合并后 {len(tuning_merged_stats)} 箱: 调优 {tuning_merged_N:,} 条，坏账率 {tuning_merged_bad_rate:.4%}，IV {tuning_merged_IV:.4f}，ρ {tuning_merged_rho:.4f}")
 if oot_merged_bad_rate is not None:
-    print(f"  OOT（合并后）: {oot_merged_N:,} 条，坏账率 {oot_merged_bad_rate:.4%}，IV {oot_merged_IV:.4f}，ρ {oot_merged_rho:.4f}")
+    print(f"  OOT（合并后）: {oot_merged_N:,} 条，坏账率 {oot_merged_bad_rate:.4%}，IV {oot_merged_IV:.4f}，ρ {oot_merged_rho:.4f}，AUC {oot_auc:.4f}，KS {oot_ks:.4f}")
     if merged_psi is not None:
         print(f"  PSI = {merged_psi:.4f}")
+if len(tuning_fpd7) > 0:
+    print(f"  FPD7（调优）: 有效 {len(tuning_fpd7):,}，坏账率 {int(tuning_fpd7[FPD7_LABEL].sum())/len(tuning_fpd7):.4%}，AUC {fpd7_tuning_auc:.4f}，KS {fpd7_tuning_ks:.4f}")
 
 print("\n完成。")
