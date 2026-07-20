@@ -71,6 +71,11 @@ def compute_bin_stats(df, score_col, label_col, bin_col="bin"):
 
     stats["IV_component"] = (stats["B_pct"] - stats["G_pct"]) * stats["WOE"]
 
+    # Lift: bad_rate / overall_bad_rate (>1 = 比平均更差)
+    overall_bad_rate = total_B / total_N
+    stats["lift"] = stats["bad_rate"] / overall_bad_rate
+    stats["cum_lift"] = stats["cum_bad_rate"] / overall_bad_rate
+
     return stats, total_N, total_B
 
 
@@ -426,7 +431,9 @@ def format_bin_row(row):
         f"| {row.SE:.4%} "
         f"| {row.cum_pass_rate:.2%} "
         f"| {row.cum_bad_rate:.4%} "
-        f"| {row.WOE:+.4f} |"
+        f"| {row.WOE:+.4f} "
+        f"| {row.lift:.2f}x "
+        f"| {row.cum_lift:.2f}x |"
     )
 
 
@@ -435,8 +442,8 @@ def format_bin_table(stats_df, title, level=3):
     lines = []
     lines.append(f"{'#' * level} {title}")
     lines.append("")
-    lines.append("| 箱序 | 分数区间 | 样本量 | 坏样本 | 坏账率 | SE | 累计通过率 | 累计坏账率 | WOE |")
-    lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| 箱序 | 分数区间 | 样本量 | 坏样本 | 坏账率 | SE | 累计通过率 | 累计坏账率 | WOE | Lift | 累计Lift |")
+    lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in stats_df.itertuples():
         lines.append(format_bin_row(row))
     lines.append("")

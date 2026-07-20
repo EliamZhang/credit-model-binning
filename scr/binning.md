@@ -55,6 +55,18 @@
 | `cum_pass_rate` | `cum_n / total_N` | 累计通过率 |
 | `cum_bad_rate` | `cum_B / cum_n` | 累计坏账率 |
 
+#### Lift
+
+\[
+Lift = \frac{bad\_rate}{overall\_bad\_rate}
+\]
+
+\[
+Cumulative\ Lift = \frac{cum\_bad\_rate}{overall\_bad\_rate}
+\]
+
+> 1 表示与平均水平一致；> 1 表示该箱坏样本浓度高于平均（风险偏高）；< 1 表示低于平均。
+
 #### WOE（Weight of Evidence）
 
 \[
