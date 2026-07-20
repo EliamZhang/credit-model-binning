@@ -20,6 +20,8 @@ from scipy.stats import spearmanr, chi2_contingency, norm
 # 参数配置
 # ============================================================
 LABEL_COL = "duedate_3m_30"
+LABEL_COL_1M30 = "duedate_1m_30"
+CHIMERGE_LABEL_COLS = ["duedate_3m_30", "duedate_1m_30"]  # ChiMerge 合并时同时考虑这两个标签
 SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 SCORE_HIGHER_IS_RISKIER = True
 N_BINS = 20
@@ -131,8 +133,18 @@ def compute_bin_stats(df, score_col, label_col, bin_col="bin"):
     return stats, total_N, total_B
 
 
-def compute_adjacent_tests(stats_df):
-    """计算相邻箱的卡方检验和 Z 检验，用于判断哪些相邻箱可合并。"""
+def compute_adjacent_tests(stats_df, df=None, score_col=None, bins=None, label_cols=None):
+    """计算相邻箱的卡方检验和 Z 检验，用于判断哪些相邻箱可合并。
+
+    若提供 df/score_col/bins/label_cols，则对每个标签分别计算卡方 p 值，
+    结果中额外包含 label_p_values 字段。
+    """
+    extra_labels = None
+    if df is not None and bins is not None and label_cols is not None:
+        extra_labels = label_cols if isinstance(label_cols, list) else [label_cols]
+        df = df.copy()
+        df["_adj_bin"] = pd.cut(df[score_col], bins=bins, duplicates="drop", include_lowest=True)
+
     results = []
     for i in range(len(stats_df) - 1):
         row_a = stats_df.iloc[i]
@@ -155,7 +167,7 @@ def compute_adjacent_tests(stats_df):
         else:
             z, p_z = 0.0, 1.0
 
-        results.append({
+        entry = {
             "pair": f"箱{i+1} vs 箱{i+2}",
             "bad_a": r_a,
             "bad_b": r_b,
@@ -166,8 +178,50 @@ def compute_adjacent_tests(stats_df):
             "p_z": p_z,
             "significant_chi2": p_chi2 < 0.05,
             "significant_z": p_z < 0.05,
-        })
+        }
+
+        if extra_labels:
+            bin_labels = sorted(df["_adj_bin"].dropna().unique())
+            if i < len(bin_labels) - 1:
+                bin_a_label = bin_labels[i]
+                bin_b_label = bin_labels[i + 1]
+                label_p_values = {}
+                for lbl in extra_labels:
+                    B_a_lbl = int(df.loc[df["_adj_bin"] == bin_a_label, lbl].astype(int).sum())
+                    B_b_lbl = int(df.loc[df["_adj_bin"] == bin_b_label, lbl].astype(int).sum())
+                    _, p_val = _chi2_for_table(B_a_lbl, n_a, B_b_lbl, n_b)
+                    label_p_values[lbl] = p_val
+                entry["label_p_values"] = label_p_values
+            else:
+                entry["label_p_values"] = {lbl: float("nan") for lbl in extra_labels}
+
+        results.append(entry)
     return results
+
+
+def _label_short(label_col):
+    """将 label_col 列名转为简短显示名，如 duedate_3m_30 → 3m30。"""
+    parts = label_col.split("_")
+    return "_".join(p for p in parts if p not in ("duedate",))
+
+
+def _normalize_label_cols(label_col):
+    """将 label_col 统一转为列表，兼容单标签字符串和历史调用。"""
+    if isinstance(label_col, list):
+        return label_col
+    return [label_col]
+
+
+def _chi2_for_table(B_a, n_a, B_b, n_b):
+    """对相邻两箱的 (bad, good) 联表做卡方检验，返回 (chi2, p_value)。"""
+    table = [[B_a, n_a - B_a], [B_b, n_b - B_b]]
+    try:
+        chi2, p_value = chi2_contingency(table, correction=False)[:2]
+        if np.isnan(p_value):
+            p_value = 0.0
+    except ValueError:
+        chi2, p_value = 0.0, 0.0
+    return chi2, p_value
 
 
 def chimerge(
@@ -185,16 +239,22 @@ def chimerge(
     """
     ChiMerge: 迭代合并相邻箱。
 
+    label_col 可以是单个标签列名字符串或列名列表。传入列表时，每个相邻箱对
+    必须所有标签的卡方 p 值都 >= p_threshold 才视为"差异不显著"允许合并。
+
     优先把箱数压到 max_bins 以内；之后仅在相邻箱统计差异不显著、局部倒挂、
     或样本/坏样本不足时继续合并，最低不低于 min_bins。
     """
+    label_cols = _normalize_label_cols(label_col)
+    primary_label = label_cols[0]
+
     bins = list(initial_bins)
     merge_history = []
     stop_reason = ""
 
     while len(bins) - 1 > min_bins:
         df["_merge_bin"] = pd.cut(df[score_col], bins=bins, duplicates="drop", include_lowest=True)
-        stats, _, _ = compute_bin_stats(df, score_col, label_col, bin_col="_merge_bin")
+        stats, _, _ = compute_bin_stats(df, score_col, primary_label, bin_col="_merge_bin")
 
         if len(stats) <= min_bins:
             break
@@ -205,42 +265,47 @@ def chimerge(
         for i in range(len(stats) - 1):
             row_a = stats.iloc[i]
             row_b = stats.iloc[i + 1]
-            B_a, n_a = int(row_a["B"]), int(row_a["n"])
-            B_b, n_b = int(row_b["B"]), int(row_b["n"])
+            n_a, n_b = int(row_a["n"]), int(row_b["n"])
             r_a, r_b = row_a["bad_rate"], row_b["bad_rate"]
-            table = [[B_a, n_a - B_a], [B_b, n_b - B_b]]
-            try:
-                chi2, p_value = chi2_contingency(table, correction=False)[:2]
-                if np.isnan(p_value):
-                    p_value = 0.0
-            except ValueError:
-                chi2, p_value = 0.0, 0.0
+
+            # 对每个标签分别计算卡方
+            label_p_values = {}
+            all_not_significant = True
+            min_p = 1.0
+            bin_a_label = row_a["_merge_bin"]
+            bin_b_label = row_b["_merge_bin"]
+            for lbl in label_cols:
+                B_a_lbl = int(df.loc[df["_merge_bin"] == bin_a_label, lbl].astype(int).sum())
+                B_b_lbl = int(df.loc[df["_merge_bin"] == bin_b_label, lbl].astype(int).sum())
+                _, p_val = _chi2_for_table(B_a_lbl, n_a, B_b_lbl, n_b)
+                label_p_values[lbl] = p_val
+                min_p = min(min_p, p_val)
+                if p_val < p_threshold:
+                    all_not_significant = False
 
             small_sample = n_a < min_bin_size or n_b < min_bin_size
-            sparse_bad = B_a < min_bad_count or B_b < min_bad_count
+            sparse_bad_primary = int(row_a["B"]) < min_bad_count or int(row_b["B"]) < min_bad_count
             inversion = r_b < r_a if higher_is_riskier else r_b > r_a
-            not_significant = p_value >= p_threshold
 
             reasons = []
             if force_by_count:
                 reasons.append("箱数超过上限")
-            if not_significant:
+            if all_not_significant:
                 reasons.append("相邻箱差异不显著")
             if inversion:
                 reasons.append("局部倒挂")
             if small_sample:
                 reasons.append("样本量不足")
-            if sparse_bad:
+            if sparse_bad_primary:
                 reasons.append("坏样本不足")
 
             if reasons:
                 candidates.append({
                     "i": i,
-                    "chi2": chi2,
-                    "p_value": p_value,
+                    "label_p_values": label_p_values,
+                    "p_value": min_p,
                     "reasons": reasons,
                     "n_pair": n_a + n_b,
-                    "bad_pair": B_a + B_b,
                 })
 
         if not candidates:
@@ -258,7 +323,7 @@ def chimerge(
             "step": len(merge_history) + 1,
             "merged_pair": f"箱{best_i+1} + 箱{best_i+2}",
             "boundary": round(bins[best_i + 1], 6),
-            "chi2": round(best["chi2"], 4),
+            "label_p_values": best["label_p_values"],
             "p_value": best["p_value"],
             "bins_remaining": len(bins) - 2,
             "reason": "、".join(dict.fromkeys(best["reasons"])),
@@ -681,7 +746,7 @@ print(f"  申请表:   {len(info_df):,} 条")
 
 merged = score_df.merge(
     info_df[[
-        "application_id", LABEL_COL, "principal", "status", "application_status",
+        "application_id", LABEL_COL, LABEL_COL_1M30, "principal", "status", "application_status",
         "first_payment_scheduled_date", "first_payment_days_past_due_ever",
     ]],
     on="application_id",
@@ -715,6 +780,10 @@ tuning = merged[merged["sample_datetime"] < oot_cut].copy()
 oot = merged[merged["sample_datetime"] >= oot_cut].copy()
 
 tuning_valid = tuning[tuning[LABEL_COL].notna()].copy()
+# 确保 ChiMerge 多标签列没有 NaN（取不到标签的视为 0）
+for lbl in CHIMERGE_LABEL_COLS:
+    if lbl in tuning_valid.columns:
+        tuning_valid[lbl] = tuning_valid[lbl].fillna(0).astype(int)
 oot_valid = oot[oot[LABEL_COL].notna()].copy()
 
 print(f"  策略调优集（< {OOT_CUT_DATE}）: {len(tuning):,} 条，有效标签 {len(tuning_valid):,} 条")
@@ -828,7 +897,7 @@ print("\n" + "=" * 60)
 print("6. 相邻箱差异检验")
 print("=" * 60)
 
-adjacent_tests = compute_adjacent_tests(tuning_stats)
+adjacent_tests = compute_adjacent_tests(tuning_stats, tuning_valid, SCORE_COL, bins, CHIMERGE_LABEL_COLS)
 not_sig_chi2 = sum(1 for t in adjacent_tests if not t["significant_chi2"])
 not_sig_z = sum(1 for t in adjacent_tests if not t["significant_z"])
 print(f"  卡方检验不显著（p>=0.05）的相邻对: {not_sig_chi2}/{len(adjacent_tests)}")
@@ -842,7 +911,7 @@ print("7. ChiMerge 合并")
 print("=" * 60)
 
 merged_bins, merge_history, merge_stop_reason = chimerge(
-    tuning_valid, SCORE_COL, LABEL_COL, bins,
+    tuning_valid, SCORE_COL, CHIMERGE_LABEL_COLS, bins,
     min_bins=CHIMERGE_MIN_BINS,
     max_bins=CHIMERGE_MAX_BINS,
     p_threshold=CHIMERGE_P_THRESHOLD,
@@ -855,7 +924,8 @@ merged_bins_for_scoring = make_open_ended_bins(merged_bins)
 print(f"  初始 {len(bins)-1} 箱 → 合并后 {len(merged_bins)-1} 箱")
 print(f"  合并次数: {len(merge_history)}")
 for h in merge_history:
-    print(f"    第{h['step']:2d}步: 合并 {h['merged_pair']}（p={h['p_value']:.4f}，原因={h['reason']}），剩余 {h['bins_remaining']} 箱")
+    p_detail = ", ".join(f"{_label_short(lbl)} p={p:.4f}" for lbl, p in h["label_p_values"].items())
+    print(f"    第{h['step']:2d}步: 合并 {h['merged_pair']}（{p_detail}，原因={h['reason']}），剩余 {h['bins_remaining']} 箱")
 print(f"  停止原因: {merge_stop_reason}")
 
 # ============================================================
@@ -1134,19 +1204,17 @@ if oot_stats is not None:
 # ---- 相邻箱差异检验 ----
 md.append("## 三、相邻箱差异检验")
 md.append("")
-md.append("| 相邻箱对 | 坏账率 A | 坏账率 B | 差异 | χ² | p(χ²) | 显著(χ²) | z | p(z) | 显著(z) |")
-md.append("|---:|---:|---:|---:|---:|---:|:---:|---:|---:|:---:|")
+md.append("| 相邻箱对 | 坏账率 A | 坏账率 B | 差异 | " + " | ".join(f"p({_label_short(lbl)})" for lbl in CHIMERGE_LABEL_COLS) + " | z | p(z) | 显著(z) |")
+md.append("|---:|---:|---:|---:" + "|---:" * len(CHIMERGE_LABEL_COLS) + "|---:|---:|:---:|")
 for t in adjacent_tests:
-    sig_chi2 = "✓" if t["significant_chi2"] else ""
+    p_cells = " | ".join(f"{t.get('label_p_values', {}).get(lbl, float('nan')):.4f}" for lbl in CHIMERGE_LABEL_COLS)
     sig_z = "✓" if t["significant_z"] else ""
     md.append(
         f"| {t['pair']} "
         f"| {t['bad_a']:.4%} "
         f"| {t['bad_b']:.4%} "
         f"| {t['diff']:+.4%} "
-        f"| {t['chi2']:.2f} "
-        f"| {t['p_chi2']:.4f} "
-        f"| {sig_chi2} "
+        f"| {p_cells} "
         f"| {t['z']:+.2f} "
         f"| {t['p_z']:.4f} "
         f"| {sig_z} |"
@@ -1161,15 +1229,15 @@ md.append("## 四、ChiMerge 合并过程")
 md.append("")
 md.append(f"从 {len(bins)-1} 箱开始，优先将箱数压到 {CHIMERGE_MAX_BINS} 箱以内；之后仅在相邻箱差异不显著、局部倒挂或样本不足时继续合并，最低不低于 {CHIMERGE_MIN_BINS} 箱。")
 md.append("")
-md.append("| 步骤 | 合并对 | 被合并边界 | χ² | p 值 | 剩余箱数 | 合并原因 |")
-md.append("|---:|---:|---:|---:|---:|---:|:---|")
+md.append("| 步骤 | 合并对 | 被合并边界 | " + " | ".join(f"{_label_short(lbl)} p 值" for lbl in CHIMERGE_LABEL_COLS) + " | 剩余箱数 | 合并原因 |")
+md.append("|---:|---:|---:" + "|---:" * len(CHIMERGE_LABEL_COLS) + "|---:|:---|")
 for h in merge_history:
+    p_cells = " | ".join(f"{h['label_p_values'][lbl]:.4f}" for lbl in CHIMERGE_LABEL_COLS)
     md.append(
         f"| {h['step']} "
         f"| {h['merged_pair']} "
         f"| {h['boundary']} "
-        f"| {h['chi2']:.2f} "
-        f"| {h['p_value']:.4f} "
+        f"| {p_cells} "
         f"| {h['bins_remaining']} "
         f"| {h['reason']} |"
     )
