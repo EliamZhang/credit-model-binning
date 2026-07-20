@@ -751,7 +751,7 @@ def format_bin_table(stats_df, title, level=3):
 
 
 def append_scheme_comparison_table(md, schemes, schemes_oot, has_amount, higher_is_riskier):
-    """追加管理层方案对比表。"""
+    """追加方案对比表。"""
     headers = "| 方案 | 自动通过规则 | 人工审核区间 | 拒绝规则 | 通过率 | 坏账率（笔数） "
     sep = "|---|---|---|---|---:|---:"
     if has_amount:
@@ -822,7 +822,7 @@ def append_key_decision_section(
     has_amount,
     higher_is_riskier,
 ):
-    """追加报告最前面的决策摘要。"""
+    """追加报告最前面的摘要。"""
     recommended = schemes["平衡方案（推荐）"]
     recommended_oot = schemes_oot.get("平衡方案（推荐）") if schemes_oot else None
 
@@ -847,14 +847,14 @@ def append_key_decision_section(
             f"- 平衡方案调优集通过率 {recommended['pass_rate']:.2%}、坏账率 {recommended['pass_bad_rate_count']:.4%}；"
             f"OOT 通过率 {recommended_oot['pass_rate']:.2%}、坏账率 {recommended_oot['pass_bad_rate_count']:.4%}。"
         )
-    md.append("- 当前方案仍是坏账率口径的策略建议，EL、收入、风险后收入和 UE 需要补充经济数据后再做最终经营决策。")
+    md.append("- 当前方案仍是坏账率口径的策略建议，EL、收入、风险后收入和 UE 需要补充经济数据后再做进一步测算。")
     md.append("")
 
-    md.append("### 管理层决策表")
+    md.append("### 方案对比")
     md.append("")
     append_scheme_comparison_table(md, schemes, schemes_oot, has_amount, higher_is_riskier)
 
-    md.append("### 最终风险等级速览")
+    md.append("### 风险等级速览")
     md.append("")
     append_final_grade_overview(md, tuning_merged_stats, oot_merged_stats)
 
