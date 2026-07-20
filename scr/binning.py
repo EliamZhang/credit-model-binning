@@ -273,7 +273,7 @@ def design_three_schemes(df, merged_stats, score_col, label_col, principal_col=N
 
     保守方案: 低风险 bins 自动通过，中间 bins 人工审核，高风险 bins 拒绝
     平衡方案: 更多 bins 自动通过，仅最高风险 bin 拒绝
-    增长方案: 最大范围自动通过，人工审核覆盖最后一个中间 bin
+    增长方案: 最大范围自动通过，最高风险 bin 人工审核，不做硬拒绝
     """
     assert len(merged_stats) == 6, "三套方案设计依赖 6 箱合并结果"
 
@@ -283,41 +283,53 @@ def design_three_schemes(df, merged_stats, score_col, label_col, principal_col=N
         "保守方案": {
             "auto_max": bin_maxes[1],   # bins 1-2
             "review_max": bin_maxes[3], # bins 3-4
+            "reject": True,
             "description": "仅自动通过最低风险的 2 个箱，人工审核中间 2 箱，拒绝高风险的 2 箱。坏账率最低，抗风险能力最强。",
         },
         "平衡方案（推荐）": {
             "auto_max": bin_maxes[2],   # bins 1-3
             "review_max": bin_maxes[4], # bins 4-5
+            "reject": True,
             "description": "自动通过前 3 箱，人工审核中间 2 箱，拒绝最高风险 1 箱。在通过率、风险和审核量之间取得平衡。",
         },
         "增长方案": {
-            "auto_max": bin_maxes[3],   # bins 1-4
-            "review_max": bin_maxes[4], # bin 5
-            "description": "自动通过前 4 箱，仅人工审核 1 箱，拒绝最高风险 1 箱。通过率最高，适合获客扩张。",
+            "auto_max": bin_maxes[4],   # bins 1-5
+            "review_max": bin_maxes[5], # bin 6
+            "reject": False,
+            "description": "自动通过前 5 箱，仅最高风险的 1 箱进入人工审核，不做硬拒绝。通过率最高，适合激进获客扩张。",
         },
     }
 
     results = {}
     for name, cfg in schemes.items():
+        review_max = cfg["review_max"] if cfg["reject"] else float("inf")
         segments = compute_scheme_stats(
-            df, score_col, label_col, cfg["auto_max"], cfg["review_max"], principal_col
+            df, score_col, label_col, cfg["auto_max"], review_max, principal_col
         )
-        # summary row: all non-rejected
+        # summary row
         total = len(df)
-        approved = df[df[score_col] <= cfg["review_max"]]
+        if cfg["reject"]:
+            approved = df[df[score_col] <= cfg["review_max"]]
+            reject_n = total - len(approved)
+            reject_rate = reject_n / total
+        else:
+            approved = df
+            reject_n = 0
+            reject_rate = 0.0
         n_approved = len(approved)
         B_approved = int(approved[label_col].astype(int).sum())
         summary = {
             "name": name,
             "auto_max": cfg["auto_max"],
             "review_max": cfg["review_max"],
+            "reject": cfg["reject"],
             "description": cfg["description"],
             "segments": segments,
             "pass_n": n_approved,
             "pass_rate": n_approved / total,
             "pass_bad_rate_count": B_approved / n_approved if n_approved > 0 else float("nan"),
-            "reject_n": total - n_approved,
-            "reject_rate": (total - n_approved) / total,
+            "reject_n": reject_n,
+            "reject_rate": reject_rate,
         }
         if principal_col and principal_col in df.columns:
             principal = approved[principal_col]
@@ -605,7 +617,10 @@ print("=" * 60)
 schemes = design_three_schemes(tuning_valid, tuning_merged_stats, SCORE_COL, LABEL_COL, principal_col="principal")
 
 for name, s in schemes.items():
-    print(f"  {name}: 自动通过 ≤ {s['auto_max']:.4f}, 审核 ≤ {s['review_max']:.4f}, 拒绝 > {s['review_max']:.4f}")
+    if s["reject"]:
+        print(f"  {name}: 自动通过 ≤ {s['auto_max']:.4f}, 审核 ≤ {s['review_max']:.4f}, 拒绝 > {s['review_max']:.4f}")
+    else:
+        print(f"  {name}: 自动通过 ≤ {s['auto_max']:.4f}, 审核 ≤ {s['review_max']:.4f}, 不做硬拒绝")
     print(f"    通过率 {s['pass_rate']:.2%}, 通过人群坏账率 {s['pass_bad_rate_count']:.4%}, 拒绝率 {s['reject_rate']:.2%}")
 
 # OOT 验证三套方案
@@ -738,7 +753,9 @@ md.append("")
 md.append("## 七、累计阈值曲线")
 md.append("")
 md.append("> 在策略调优集上，从低分到高分逐阈值计算累计通过率和累计坏账率。")
-md.append("> 分数越高风险越高，累计方向为 `score <= threshold`。合并箱边界行以 **粗体** 标注。")
+md.append("> 分数越高风险越高，累计方向为 `score <= threshold`（从最安全到最危险逐段累加）。")
+md.append("> 即：阈值 = 通过线，分数 ≤ 阈值的人通过（自动通过或人工审核），分数 > 阈值的人拒绝。")
+md.append("> 合并箱边界行以 **粗体** 标注。")
 md.append("")
 
 # 构建合并边界集合用于标注
@@ -780,6 +797,7 @@ md.append("")
 md.append("> 基于合并后的 6 个风险等级，设计增长/平衡/保守三套方案。")
 md.append("> 每套方案将分数段划分为三区：**自动通过**（低风险）、**人工审核**（中风险）、**拒绝**（高风险）。")
 md.append("> 目前基于通过率与坏账率做 trade-off 选择；EL/收入/UE 待补充经济数据后扩展。")
+md.append("> **注**：金额口径坏账率仅覆盖已放款样本（`principal` 非空且 > 0），与笔数口径的人群不完全一致，两者不能直接对比。")
 md.append("")
 
 has_amount = "principal" in tuning_valid.columns
@@ -790,11 +808,15 @@ for scheme_name, s in schemes.items():
     md.append(f"> {s['description']}")
     md.append("")
     md.append(f"- **自动通过阈值**: score ≤ {s['auto_max']:.4f}")
-    md.append(f"- **人工审核区间**: {s['auto_max']:.4f} < score ≤ {s['review_max']:.4f}")
-    md.append(f"- **拒绝阈值**: score > {s['review_max']:.4f}")
+    if s["reject"]:
+        md.append(f"- **人工审核区间**: {s['auto_max']:.4f} < score ≤ {s['review_max']:.4f}")
+        md.append(f"- **拒绝阈值**: score > {s['review_max']:.4f}")
+    else:
+        md.append(f"- **人工审核区间**: {s['auto_max']:.4f} < score ≤ {s['review_max']:.4f}")
+        md.append(f"- **拒绝阈值**: 无（不做硬拒绝）")
     md.append("")
 
-    # Segment detail table
+    # Segment detail table — skip empty reject segment for growth scheme
     seg_headers = "| 策略段 | 分数区间 | 样本量 | 占比 | 坏账率（笔数） "
     seg_sep = "|---:|---:|---:|---:|---:"
     if has_amount:
@@ -806,6 +828,8 @@ for scheme_name, s in schemes.items():
     md.append(seg_sep)
 
     for seg in s["segments"]:
+        if seg["n"] == 0:
+            continue  # skip empty segments (e.g. reject in growth scheme)
         score_range = f"[{seg['score_min']:.4f}, {seg['score_max']:.4f})" if not np.isnan(seg['score_min']) else "—"
         line = (
             f"| {seg['segment']} "
@@ -822,9 +846,14 @@ for scheme_name, s in schemes.items():
     md.append("")
 
     # Summary row
-    md.append(f"**方案汇总**：通过率 {s['pass_rate']:.2%}（{s['pass_n']:,} 人），"
-              f"通过人群坏账率 {s['pass_bad_rate_count']:.4%}，"
-              f"拒绝率 {s['reject_rate']:.2%}（{s['reject_n']:,} 人）")
+    if s["reject"]:
+        md.append(f"**方案汇总**：通过率 {s['pass_rate']:.2%}（{s['pass_n']:,} 人），"
+                  f"通过人群坏账率 {s['pass_bad_rate_count']:.4%}，"
+                  f"拒绝率 {s['reject_rate']:.2%}（{s['reject_n']:,} 人）")
+    else:
+        md.append(f"**方案汇总**：通过率 {s['pass_rate']:.2%}（{s['pass_n']:,} 人），"
+                  f"通过人群坏账率 {s['pass_bad_rate_count']:.4%}，"
+                  f"不做硬拒绝，最高风险客群经人工审核后决策")
     if has_amount and not np.isnan(s.get('pass_bad_rate_amount', float('nan'))):
         md[-1] += f"，金额口径坏账率 {s['pass_bad_rate_amount']:.4%}"
     md.append("")
@@ -875,7 +904,7 @@ for scheme_name, s in schemes.items():
     line += "|"
     md.append(line)
 md.append("")
-md.append("> **推荐**：平衡方案自动通过 55.4% 的申请人（坏账率 4.40%），人工审核 39.7%，整体通过率 95.1%。在自动审批效率、风险控制和审核产能之间取得平衡，建议作为默认方案。若审核产能紧张可倾向增长方案（自动通过 80.1%），若风险偏好收紧可倾向保守方案（整体通过率 80.1%）。")
+md.append("> **推荐**：平衡方案自动通过 55.4% 低风险客群（坏账率 4.40%），人工审核 39.7%，仅拒绝最高风险 4.9%。三套方案形成清晰梯度——保守（通过率 80%，坏账率最低）、平衡（通过率 95%，风险与审核兼顾）、增长（通过率 100%，不做硬拒绝，以审核替代拒绝），建议常态使用平衡方案，根据风险偏好和审核产能切换。")
 md.append("")
 
 # 写入文件
