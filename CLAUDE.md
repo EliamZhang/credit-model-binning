@@ -49,7 +49,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - [scr/binning.py](scr/binning.py) — 分箱主脚本。读取 mlt 模型分和申请表，按 `application_id` 关联获取标签 `duedate_3m_30`，以 2025-10-21 划分策略调优集/OOT 集，输出 `res/binning_result.md`
 - [scr/binning.md](scr/binning.md) — 分箱方法论文档，与 binning.py 逻辑同步更新
-- [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息的原始 SQL。筛选 `application_time >= '2025-01-01'`。当前本地 `application_info.csv` 由 Spark 导出，非此 SQL 产出，SQL 仅作字段参考
+- [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息的原始 SQL。筛选 `application_time ≥ '2025-01-01'`。当前本地 `application_info.csv` 由 Spark 导出，非此 SQL 产出，SQL 仅作字段参考
 
 ## 风险指标公式
 
@@ -92,7 +92,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 笔数坏账标签 | `duedate_3m_30` | MOB3 是否逾期 ≥ 30 天（0/1/NULL） | 分箱逻辑 | 笔数坏账率、AUC、KS、Spearman ρ、ChiMerge 合并判断 |
 | 金额坏账标签 | `dpd_days_ever_mob3` | MOB3 内历史最大逾期天数 ≥ 30 时记为 1 | 展示 | 金额坏账率（累计 / 分段 / 方案） |
 
-> 两个标签的数据来源和业务含义不同，不可互换。`duedate_3m_30` 反映**标的逾期**（第三期到期的逾期状态），`dpd_days_ever_mob3 >= 30` 反映**资产逾期**（MOB3 内是否曾逾期 ≥ 30 天），后者更匹配金额口径的风险敞口。
+> 两个标签的数据来源和业务含义不同，不可互换。`duedate_3m_30` 反映**标的逾期**（第三期到期的逾期状态），`dpd_days_ever_mob3 ≥ 30` 反映**资产逾期**（MOB3 内是否曾逾期 ≥ 30 天），后者更匹配金额口径的风险敞口。
 
 ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS = ["duedate_3m_30", "duedate_1m_30"]`，相邻箱必须在两个标签上均不显著（p ≥ 0.05）才允许合并。
 
@@ -108,7 +108,7 @@ ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS
 | 申请信息表 | `application_info.csv` | `application_id` | 关联主键 |
 | 申请信息表 | 同上 | `duedate_3m_30` | 笔数坏账标签（主标签，0/1/NULL，分箱逻辑唯一标签） |
 | 申请信息表 | 同上 | `duedate_1m_30` | 辅助标签（ChiMerge 双标签卡方检验） |
-| 申请信息表 | 同上 | `dpd_days_ever_mob3` | 金额坏账标签（`>= 30` 记为 1） |
+| 申请信息表 | 同上 | `dpd_days_ever_mob3` | 金额坏账标签（`≥ 30` 记为 1） |
 | 申请信息表 | 同上 | `principal` | 原贷本金（金额坏账率分母） |
 | 申请信息表 | 同上 | `estimate_principal_remaining_mob3` | MOB3 剩余本金（金额坏账率分子） |
 
@@ -131,7 +131,7 @@ ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS
 | 好样本占比 | `G_pct` | `该箱 (n − B) / 全样本 (total_N − total_B)` | 展示 | 该箱好样本占全部好样本的比例 |
 | WOE | `WOE` | `ln(B_pct / G_pct)` | 展示 | 箱内好坏比的对数，正值表示坏样本集中 |
 | 单箱 IV | `IV_component` | `(B_pct − G_pct) × WOE` | 展示 | 该箱对总 IV 的贡献，总 IV = Σ IV_component |
-| Lift | `lift` | `该箱 bad_rate / 全样本 bad_rate（全样本 = SUM(duedate_3m_30) / COUNT(duedate_3m_30)）` | 展示 | `>1` 表示该箱风险高于整体平均水平 |
+| Lift | `lift` | `该箱 bad_rate / 全样本 bad_rate（全样本 = SUM(duedate_3m_30) / COUNT(duedate_3m_30)）` | 展示 | `大于 1` 表示该箱风险高于整体平均水平 |
 
 ### 二、累计指标（低风险到高风险逐箱累加）
 
@@ -154,20 +154,20 @@ ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS
 | 指标 | 代码变量 | 公式 | 用途 | 业务含义 |
 |---|---|---|---|
 | 阈值 | `threshold` | `模型分等分位点（20 个）∪ 合并箱上界` | 展示 | 策略切点候选值 |
-| 累计样本量 | `cum_n` | `COUNT(*) WHERE 模型分 <= threshold AND duedate_3m_30 IS NOT NULL` | 展示 | 该阈值下的通过样本数 |
+| 累计样本量 | `cum_n` | `COUNT(*) WHERE 模型分 ≤ threshold AND duedate_3m_30 IS NOT NULL` | 展示 | 该阈值下的通过样本数 |
 | 累计通过率 | `cum_pass_rate` | `cum_n / 全样本 COUNT(duedate_3m_30 IS NOT NULL)` | 展示 | 该阈值下的通过占比 |
-| 累计笔数坏账率 | `cum_bad_rate_count` | `SUM(duedate_3m_30 WHERE 模型分 <= threshold) / cum_n` | 展示 | 通过人群的笔数坏账率 |
-| 边际笔数坏账率 | `marginal_bad_rate_count` | `SUM(duedate_3m_30 WHERE prev_threshold < 模型分 <= threshold) / COUNT(*) WHERE prev_threshold < 模型分 <= threshold` | 展示 | 相邻阈值间新增通过人群的坏账率 |
-| 累计金额坏账率 | `cum_bad_rate_amount` | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30 AND 模型分 <= threshold) / SUM(principal WHERE 模型分 <= threshold)，仅计分子分母均非空且 > 0` | 展示 | 通过人群的金额口径坏账率 |
+| 累计笔数坏账率 | `cum_bad_rate_count` | `SUM(duedate_3m_30 WHERE 模型分 ≤ threshold) / cum_n` | 展示 | 通过人群的笔数坏账率 |
+| 边际笔数坏账率 | `marginal_bad_rate_count` | `SUM(duedate_3m_30 WHERE prev_threshold 低于 模型分 ≤ threshold) / COUNT(*) WHERE prev_threshold 低于 模型分 ≤ threshold` | 展示 | 相邻阈值间新增通过人群的坏账率 |
+| 累计金额坏账率 | `cum_bad_rate_amount` | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 ≥ 30 AND 模型分 ≤ threshold) / SUM(principal WHERE 模型分 ≤ threshold)，仅计分子分母均非空且 大于 0` | 展示 | 通过人群的金额口径坏账率 |
 
-> 金额坏账率公式：分子 = `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30)`，分母 = `SUM(principal)`，仅计分子分母均非空且 `> 0` 的样本。分子分母的对应人群不完全一致（剩余本金可能为空），不能与笔数坏账率直接对比绝对值。
+> 金额坏账率公式：分子 = `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 ≥ 30)`，分母 = `SUM(principal)`，仅计分子分母均非空且 `大于 0` 的样本。分子分母的对应人群不完全一致（剩余本金可能为空），不能与笔数坏账率直接对比绝对值。
 
 ### 四、模型级排序指标
 
 | 指标 | 代码位置 | 公式 | 用途 | 业务含义 |
 |---|---|---|---|
 | 整体笔数坏账率 | `total_B / total_N` | `全样本 SUM(duedate_3m_30) / COUNT(duedate_3m_30 IS NOT NULL)` | 展示 | 全样本的笔数坏账率 |
-| 总 IV | `tuning_IV` | `Σ 各箱 (B_pct − G_pct) × ln(B_pct / G_pct)` | 展示 | 模型分的整体区分能力，`> 0.5` 为强 |
+| 总 IV | `tuning_IV` | `Σ 各箱 (B_pct − G_pct) × ln(B_pct / G_pct)` | 展示 | 模型分的整体区分能力，`高于 0.5` 为强 |
 | AUC | `compute_auc_ks()` | `在原始 aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score 上，以 duedate_3m_30 为标签，梯形法：Σ((TPRᵢ + TPRᵢ₋₁) / 2 × (FPRᵢ − FPRᵢ₋₁))` | 展示 | 模型排序能力，0.5 为随机，1.0 为完美 |
 | KS | `compute_auc_ks()` | `在原始模型分上，以 duedate_3m_30 为标签，max(|TPR − FPR|)` | 展示 | 好坏样本分布的最大分离度 |
 | Spearman ρ | `spearmanr(bin_index, bad_rate)` | `spearmanr(分箱序 1..k, 各箱 SUM(duedate_3m_30) / COUNT(*))` | 分箱逻辑 | 分箱序与笔数坏账率的单调性，合并后必须越接近 1 越好，倒挂则需回溯合并 |
@@ -178,8 +178,8 @@ ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS
 
 | 指标 | 代码函数 | 公式 | 用途 | 业务含义 |
 |---|---|---|---|
-| PSI | `compute_psi()` | `Σ((OOT各箱占比 − tuning各箱占比) × ln(OOT各箱占比 / tuning各箱占比))，各箱占比 = 模型分落入该箱的 COUNT(*) / 全样本 COUNT(*)` | 展示 | 模型分分布跨期稳定性。`< 0.1` 稳定，`0.1~0.25` 轻微漂移，`> 0.25` 明显漂移 |
-| 卡方检验 | `compute_adjacent_tests()` / `_chi2_for_table()` | `相邻两箱 [[SUM(duedate_3m_30)_a, n_a − SUM(duedate_3m_30)_a], [SUM(duedate_3m_30)_b, n_b − SUM(duedate_3m_30)_b]] 的 χ² 独立性检验（ChiMerge 同时检验 duedate_1m_30）` | 分箱逻辑 | 判断相邻两箱的好坏分布是否独立，p `< 0.05` 表示差异显著不可合并 |
+| PSI | `compute_psi()` | `Σ((OOT各箱占比 − tuning各箱占比) × ln(OOT各箱占比 / tuning各箱占比))，各箱占比 = 模型分落入该箱的 COUNT(*) / 全样本 COUNT(*)` | 展示 | 模型分分布跨期稳定性。`低于 0.1` 稳定，`0.1~0.25` 轻微漂移，`高于 0.25` 明显漂移 |
+| 卡方检验 | `compute_adjacent_tests()` / `_chi2_for_table()` | `相邻两箱 [[SUM(duedate_3m_30)_a, n_a − SUM(duedate_3m_30)_a], [SUM(duedate_3m_30)_b, n_b − SUM(duedate_3m_30)_b]] 的 χ² 独立性检验（ChiMerge 同时检验 duedate_1m_30）` | 分箱逻辑 | 判断相邻两箱的好坏分布是否独立，p `低于 0.05` 表示差异显著不可合并 |
 | Z 检验 | `compute_adjacent_tests()` | `(bad_rate_b − bad_rate_a) / sqrt(bad_rate_a(1−bad_rate_a)/n_a + bad_rate_b(1−bad_rate_b)/n_b)，其中 bad_rate = SUM(duedate_3m_30) / COUNT(*)` | 展示 | 判断相邻两箱笔数坏账率差异是否显著，p = 2 × (1 − Φ(|z|)) |
 
 > ChiMerge 合并时对 `CHIMERGE_LABEL_COLS` 中的每个标签分别计算卡方检验，所有标签均不显著（p ≥ 0.05）才允许合并。
@@ -193,8 +193,8 @@ ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS
 | 参数 | 代码变量 | 含义 |
 |---|---|---|
 | 自动通过上限 | `auto_max` | score ≤ auto_max 自动通过 |
-| 审核上限 | `review_max` | `auto_max < score ≤ review_max 人工审核` |
-| 是否拒绝 | `reject` | `score > review_max 的客群是否直接拒绝（增长方案不拒绝）` |
+| 审核上限 | `review_max` | `auto_max 低于 score ≤ review_max 人工审核` |
+| 是否拒绝 | `reject` | `score 高于 review_max 的客群是否直接拒绝（增长方案不拒绝）` |
 
 **方案分段指标**（`compute_scheme_stats()`，对每个策略段分别计算）：
 
@@ -203,16 +203,16 @@ ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS
 | 分段样本量 | `n` | `COUNT(*) WHERE 模型分在策略段内 AND duedate_3m_30 IS NOT NULL` | 展示 | 该策略段的样本数 |
 | 分段占比 | `pct` | `分段 n / 全样本 COUNT(duedate_3m_30 IS NOT NULL)` | 展示 | 该策略段占全样本的比例 |
 | 分段笔数坏账率 | `bad_rate_count` | `SUM(duedate_3m_30 WHERE 模型分在段内) / 分段 n` | 展示 | 段内的笔数坏账率 |
-| 分段金额坏账率 | `bad_rate_amount` | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30 AND 模型分在段内) / SUM(principal WHERE 模型分在段内)，仅计均非空且 > 0` | 展示 | 段内的金额口径坏账率 |
+| 分段金额坏账率 | `bad_rate_amount` | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 ≥ 30 AND 模型分在段内) / SUM(principal WHERE 模型分在段内)，仅计均非空且 大于 0` | 展示 | 段内的金额口径坏账率 |
 
 **方案汇总指标**（通过人群 = score ≤ review_max）：
 
 | 指标 | 代码变量 | 公式 | 用途 | 业务含义 |
 |---|---|---|---|
-| 方案通过样本量 | `pass_n` | `COUNT(*) WHERE 模型分 <= review_max AND duedate_3m_30 IS NOT NULL` | 展示 | 通过（自动+审核）的总样本数 |
+| 方案通过样本量 | `pass_n` | `COUNT(*) WHERE 模型分 ≤ review_max AND duedate_3m_30 IS NOT NULL` | 展示 | 通过（自动+审核）的总样本数 |
 | 方案通过率 | `pass_rate` | `pass_n / 全样本 COUNT(duedate_3m_30 IS NOT NULL)` | 展示 | 通过样本占全样本比例 |
-| 通过人群笔数坏账率 | `pass_bad_rate_count` | `SUM(duedate_3m_30 WHERE 模型分 <= review_max) / pass_n` | 展示 | 通过人群的笔数坏账率 |
-| 通过人群金额坏账率 | `pass_bad_rate_amount` | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30 AND 模型分 <= review_max) / SUM(principal WHERE 模型分 <= review_max)，仅计均非空且 > 0` | 展示 | 通过人群的金额口径坏账率 |
+| 通过人群笔数坏账率 | `pass_bad_rate_count` | `SUM(duedate_3m_30 WHERE 模型分 ≤ review_max) / pass_n` | 展示 | 通过人群的笔数坏账率 |
+| 通过人群金额坏账率 | `pass_bad_rate_amount` | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 ≥ 30 AND 模型分 ≤ review_max) / SUM(principal WHERE 模型分 ≤ review_max)，仅计均非空且 大于 0` | 展示 | 通过人群的金额口径坏账率 |
 | 方案拒绝样本量 | `reject_n` | `全样本 COUNT(duedate_3m_30 IS NOT NULL) − pass_n` | 展示 | 拒绝的样本数 |
 | 方案拒绝率 | `reject_rate` | `reject_n / 全样本 COUNT(duedate_3m_30 IS NOT NULL)` | 展示 | 拒绝样本占全样本比例 |
 
