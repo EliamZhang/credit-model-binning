@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 推荐方案：**等频 20 箱 → 单调/统计合并 → 业务调整 → 收益阈值优化**。
 
-[scr/binning.py](scr/binning.py) 是本方法论的程序实现载体，沿文档的 8 步流程（0.定义口径 → 7.上线治理）逐步落地。当前完成步骤 2-5（等频 20 箱初分、ChiMerge 合并、累计阈值曲线、三套方案）及转化率漏斗。修改脚本前先看文档对应章节了解业务口径，新增功能后同步更新 [scr/binning.md](scr/binning.md)。
+[scr/binning.py](scr/binning.py) 是本方法论的程序实现载体，沿文档的 8 步流程（0.定义口径 → 7.上线治理）逐步落地。当前完成步骤 2-5（等频 20 箱初分、ChiMerge 合并、累计阈值曲线、三套方案）及转化率漏斗、FPD7 标签对比。修改脚本前先看文档对应章节了解业务口径，新增功能后同步更新 [scr/binning.md](scr/binning.md)。
 
 三个模型分的关系：`aus_old_risk_apply_appmodel`（申请模型）和 `aus_old_risk_bid_submodel`（交易特征子模型）是子模型，融合后得到 `aus_old_risk_bid_mltmodel`（多头融合模型），分箱以 mlt 模型为主。
 
@@ -28,10 +28,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 中 | 监控看板指标输出 | 还没有线上监控表：缺失率、异常率、PSI/CSI、通过率、拒绝率、审核率、规则命中率、实际损失、实际收入、UE 等。 |
 | 中 | CSI / 特征漂移 | 当前只算了模型分 PSI，没有单变量 CSI 或分字段缺失、异常漂移。 |
 | 中 | 样本划分更完整 | 方法论文档里的训练集、校准集、策略调优集、OOT、线上成熟样本，目前代码只切了 tuning 和 OOT。 |
-| 中 | 业务调整与人工边界治理 | 当前 ChiMerge 后直接用 6 箱，没有业务取整、对齐既有评级、记录调整原因和影响的流程。 |
+| 中 | 业务调整与人工边界治理 | 当前 ChiMerge 后直接使用合并结果，没有业务取整、对齐既有评级、记录调整原因和影响的流程。 |
 | 低 | 拒绝推断 / 审批选择偏差处理 | 文档提醒历史已通过客户会有选择偏差；当前没有探索样本、外部表现或拒绝推断敏感性分析。 |
 | 低 | 最终管理层决策表补全 | 现在三套方案表缺 EL、收入、总 UE、审核量、主要风险这些核心管理层字段。 |
-| 低 | 分数方向显式配置 | 主文档默认“分数越高风险越低”，但当前脚本按“分数越高风险越高”处理。建议加 `SCORE_HIGHER_IS_RISKIER = True/False`，避免以后换模型时反向用错。 |
 
 ## 数据文件
 
@@ -48,13 +47,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 脚本
 
-- [scr/binning.py](scr/binning.py) — 分箱主脚本。读取 mlt 模型分和申请表，按 `application_id` 关联获取标签 `duedate_3m_30`，以 2026-01-01 划分策略调优集/OOT 集，输出 `res/binning_result.md`
+- [scr/binning.py](scr/binning.py) — 分箱主脚本。读取 mlt 模型分和申请表，按 `application_id` 关联获取标签 `duedate_3m_30`，以 2025-10-21 划分策略调优集/OOT 集，输出 `res/binning_result.md`
 - [scr/binning.md](scr/binning.md) — 分箱方法论文档，与 binning.py 逻辑同步更新
 - [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息的原始 SQL。筛选 `application_time >= '2025-01-01'`。当前本地 `application_info.csv` 由 Spark 导出，非此 SQL 产出，SQL 仅作字段参考
 
 ## 转化率计算（原始 SQL 口径参考）
 
-> 注意：以下字段（`application_status`、`assessment_status`、`status`）来自 `ba.customer_profile_rawdata`，当前本地 `application_info.csv` 不包含这些字段，仅作口径参考。
+> 注意：以下字段（`application_status`、`assessment_status`、`status`）来自 `ba.customer_profile_rawdata`。当前本地 `application_info.csv` 已包含 `application_status` 和 `status` 字段，`assessment_status` 未纳入本地数据。
 
 ### 状态字段说明
 
@@ -146,7 +145,7 @@ CASE
 END AS fpd7_flag
 ```
 
-> 注意：本地数据无 `application_status` 列，需根据 `dispersal_date` 是否非空判断是否放款。
+> 注意：脚本中 FPD7 计算使用 `application_status == '4.Funded'` 判断是否放款，与原始 SQL 口径一致。
 
 ### Servicing Vintage（资产表现）
 
