@@ -18,7 +18,7 @@
 | `LABEL_COL` | `duedate_3m_30` | 风险标签（三期 30 DPD） |
 | `SCORE_COL` | `aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score` | 模型分字段 |
 | `N_BINS` | `20` | 目标分箱数 |
-| `OOT_CUT_DATE` | `2026-01-01` | OOT 切分日期，`>=` 此日期划入 OOT 集 |
+| `OOT_CUT_DATE` | `2025-10-21` | OOT 切分日期，`>=` 此日期划入 OOT 集 |
 | `CHIMERGE_MIN_BINS` | `6` | ChiMerge 合并目标箱数 |
 
 ## 流程
@@ -173,7 +173,23 @@ PSI = \sum_i (a_i - e_i) \times \ln\frac{a_i}{e_i}
 
 OOT 集同步验证各方案的通过率和坏账率。
 
-### 10. 输出
+### 10. 转化率漏斗
+
+在全量申请（不分调优/OOT）上，按合并后的风险等级拆分审批漏斗：
+
+申请 → 完成（排除 0.Incomplete） → 通过（3.x / 4.x） → 放款（4.Funded）
+
+| 转化率 | 公式 | 说明 |
+|---|---|---|
+| 完成率 | completed / apply | 申请中完成审核的比例 |
+| 通过率 | approved / completed | 完成中通过的比例 |
+| 拒绝率 | declined / completed | 完成中风控拒绝的比例 |
+| 放款率 | funded / approved | 通过中成功放款的比例 |
+| 整体放款率 | funded / apply | 申请到放款的端到端转化 |
+
+输出中按 6 个风险箱拆解各阶段转化率，用于判断风控策略是否在低风险客群上过于严苛。
+
+### 11. 输出
 
 结果写入 `res/binning_result.md`，包含：
 
@@ -185,6 +201,7 @@ OOT 集同步验证各方案的通过率和坏账率。
 - 合并后结论
 - 累计阈值曲线（通过率与坏账率的 trade-off）
 - 三套方案设计（保守/平衡/增长 + 三段式策略 + OOT 验证）
+- 转化率漏斗（全量申请 → 放款，按风险等级拆解）
 
 ## 后续步骤
 

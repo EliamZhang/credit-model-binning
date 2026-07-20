@@ -5,6 +5,8 @@ SELECT
     application_date,
     application_week,
     application_month,
+    status,
+    application_status,
     dispersal_date,
     dispersal_week,
     dispersal_month,
@@ -51,4 +53,4 @@ SELECT
     original_term_avg,
     actual_term_avg
 FROM ba.customer_profile_rawdata
-WHERE application_time >= '2025-01-01';
+WHERE application_time >= '2024-01-01';

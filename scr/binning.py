@@ -22,7 +22,7 @@ from scipy.stats import spearmanr, chi2_contingency, norm
 LABEL_COL = "duedate_3m_30"
 SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 N_BINS = 20
-OOT_CUT_DATE = "2026-01-01"
+OOT_CUT_DATE = "2025-10-21"
 
 # ChiMerge 参数
 CHIMERGE_MIN_BINS = 6          # 合并目标箱数
@@ -220,6 +220,74 @@ def compute_threshold_curve(df, score_col, label_col, principal_col=None, n_thre
     return pd.DataFrame(results)
 
 
+def compute_conversion_funnel(df, score_col, bins):
+    """计算全量申请转化漏斗，按分箱拆分。
+
+    完整漏斗：申请 → 完成 → 通过 → 放款
+    返回整体和各箱的转化率明细。
+    """
+    total = len(df)
+
+    # 申请阶段标签
+    df = df.copy()
+    df["is_completed"] = ~df["application_status"].isin(["0.Incomplete"])
+    df["is_approved"] = df["application_status"].str.startswith(("3", "4"))
+    df["is_declined"] = df["application_status"] == "2.3.Risk Declined"
+    df["is_withdrawn"] = df["application_status"] == "2.1.Submitted Withdrawn"
+    df["is_funded"] = df["application_status"] == "4.Funded"
+    df["is_deal"] = df["status"].isin(["Active_Account", "Closed", "Blocked"])
+
+    metrics = {
+        "apply_cnt": total,
+        "completed_cnt": int(df["is_completed"].sum()),
+        "approved_cnt": int(df["is_approved"].sum()),
+        "declined_cnt": int(df["is_declined"].sum()),
+        "withdrawn_cnt": int(df["is_withdrawn"].sum()),
+        "funded_cnt": int(df["is_funded"].sum()),
+        "deal_cnt": int(df["is_deal"].sum()),
+        "completion_rate": df["is_completed"].mean(),
+        "approval_rate": df[df["is_completed"]]["is_approved"].mean() if df["is_completed"].sum() > 0 else 0,
+        "decline_rate": df[df["is_completed"]]["is_declined"].mean() if df["is_completed"].sum() > 0 else 0,
+        "withdraw_rate": df[df["is_completed"]]["is_withdrawn"].mean() if df["is_completed"].sum() > 0 else 0,
+        "funding_rate": df[df["is_approved"]]["is_funded"].mean() if df["is_approved"].sum() > 0 else 0,
+        "overall_funding_rate": df["is_funded"].sum() / total,
+    }
+
+    # 按分箱拆解
+    df["bin"] = pd.cut(df[score_col], bins=bins, duplicates="drop", include_lowest=True)
+    df_binned = df[df["bin"].notna()].copy()
+
+    bin_stats = []
+    for bin_name, group in df_binned.groupby("bin", observed=False):
+        n = len(group)
+        completed = group[group["is_completed"]]
+        approved = group[group["is_approved"]]
+        row = {
+            "bin": str(bin_name),
+            "apply": n,
+            "completed": len(completed),
+            "approved": len(approved),
+            "declined": int(group["is_declined"].sum()),
+            "withdrawn": int(group["is_withdrawn"].sum()),
+            "funded": int(group["is_funded"].sum()),
+            "deal": int(group["is_deal"].sum()),
+            "completion_rate": group["is_completed"].mean(),
+            "approval_rate": completed["is_approved"].mean() if len(completed) > 0 else 0,
+            "decline_rate": completed["is_declined"].mean() if len(completed) > 0 else 0,
+            "withdraw_rate": completed["is_withdrawn"].mean() if len(completed) > 0 else 0,
+            "funding_rate": approved["is_funded"].mean() if len(approved) > 0 else 0,
+            "overall_funding_rate": group["is_funded"].sum() / n,
+        }
+        bin_stats.append(row)
+
+    # Sort by bin order (low score = low risk = first bin)
+    bin_stats.sort(key=lambda x: float(x["bin"].strip("([])").split(",")[0].strip()))
+    for i, row in enumerate(bin_stats):
+        row["bin_no"] = i + 1
+
+    return metrics, bin_stats
+
+
 def format_triple(row):
     """Format a segment row for the three-scheme table."""
     score_range = f"[{row.score_min:.4f}, {row.score_max:.4f})"
@@ -389,7 +457,7 @@ print(f"  模型分表: {len(score_df):,} 条")
 print(f"  申请表:   {len(info_df):,} 条")
 
 merged = score_df.merge(
-    info_df[["application_id", LABEL_COL, "principal"]],
+    info_df[["application_id", LABEL_COL, "principal", "status", "application_status"]],
     on="application_id",
     how="inner",
 )
@@ -629,10 +697,26 @@ if len(oot_valid) > 0:
     schemes_oot = design_three_schemes(oot_valid, oot_merged_stats, SCORE_COL, LABEL_COL, principal_col="principal")
 
 # ============================================================
-# 12. 输出 Markdown
+# 12. 转化率分析（全量申请，不区分调优/OOT）
 # ============================================================
 print("\n" + "=" * 60)
-print("12. 输出结果")
+print("12. 转化率分析")
+print("=" * 60)
+
+funnel_metrics, funnel_bins = compute_conversion_funnel(merged, SCORE_COL, merged_bins)
+
+print(f"  申请: {funnel_metrics['apply_cnt']:,}")
+print(f"  完成率: {funnel_metrics['completion_rate']:.2%}")
+print(f"  通过率（完成中）: {funnel_metrics['approval_rate']:.2%}")
+print(f"  拒绝率（完成中）: {funnel_metrics['decline_rate']:.2%}")
+print(f"  放款率（通过中）: {funnel_metrics['funding_rate']:.2%}")
+print(f"  整体放款率（申请 → 放款）: {funnel_metrics['overall_funding_rate']:.2%}")
+
+# ============================================================
+# 13. 输出 Markdown
+# ============================================================
+print("\n" + "=" * 60)
+print("13. 输出结果")
 print("=" * 60)
 
 md = []
@@ -904,7 +988,49 @@ for scheme_name, s in schemes.items():
     line += "|"
     md.append(line)
 md.append("")
-md.append("> **推荐**：平衡方案自动通过 55.4% 低风险客群（坏账率 4.40%），人工审核 39.7%，仅拒绝最高风险 4.9%。三套方案形成清晰梯度——保守（通过率 80%，坏账率最低）、平衡（通过率 95%，风险与审核兼顾）、增长（通过率 100%，不做硬拒绝，以审核替代拒绝），建议常态使用平衡方案，根据风险偏好和审核产能切换。")
+md.append(f"> **推荐**：平衡方案自动通过 {schemes['平衡方案（推荐）']['segments'][0]['pct']:.1%} 低风险客群（坏账率 {schemes['平衡方案（推荐）']['segments'][0]['bad_rate_count']:.2%}），人工审核 {schemes['平衡方案（推荐）']['segments'][1]['pct']:.1%}，仅拒绝最高风险 {schemes['平衡方案（推荐）']['reject_rate']:.1%}。三套方案形成清晰梯度——保守（通过率 {schemes['保守方案']['pass_rate']:.0%}，坏账率最低）、平衡（通过率 {schemes['平衡方案（推荐）']['pass_rate']:.0%}，风险与审核兼顾）、增长（通过率 {schemes['增长方案']['pass_rate']:.0%}，不做硬拒绝，以审核替代拒绝），建议常态使用平衡方案，根据风险偏好和审核产能切换。")
+md.append("")
+
+# ---- 转化率漏斗 ----
+md.append("## 九、转化率漏斗")
+md.append("")
+md.append("> 在全量申请（不分调优/OOT）上，按合并后的 6 个风险等级拆分审批漏斗。")
+md.append("> 漏斗路径：申请 → 完成（排除 Incomplete）→ 通过（status 以 3/4 开头）→ 放款（4.Funded）。")
+md.append("")
+
+# Overall funnel
+m = funnel_metrics
+md.append("### 整体漏斗")
+md.append("")
+md.append("| 阶段 | 数量 | 占比 |")
+md.append("|---:|---:|")
+md.append(f"| 申请 | {m['apply_cnt']:,} | 100.0% |")
+md.append(f"| └ 完成（排除 0.Incomplete） | {m['completed_cnt']:,} | {m['completion_rate']:.2%} |")
+md.append(f"| 　└ 通过（3.x / 4.x） | {m['approved_cnt']:,} | {m['approval_rate']:.2%}（完成中） |")
+md.append(f"| 　　└ 放款（4.Funded） | {m['funded_cnt']:,} | {m['funding_rate']:.2%}（通过中） |")
+md.append(f"| 　└ 拒绝（2.3.Risk Declined） | {m['declined_cnt']:,} | {m['decline_rate']:.2%}（完成中） |")
+md.append(f"| 　└ 撤回（2.1.Submitted Withdrawn） | {m['withdrawn_cnt']:,} | {m['withdraw_rate']:.2%}（完成中） |")
+md.append(f"| 整体放款率（申请 → 放款） | {m['funded_cnt']:,} | {m['overall_funding_rate']:.2%} |")
+md.append("")
+
+# Per-bin funnel
+md.append("### 各风险等级转化率")
+md.append("")
+md.append("| 箱序 | 分数区间 | 申请 | 完成率 | 通过率 | 拒绝率 | 放款率 | 整体放款率 |")
+md.append("|---:|---:|---:|---:|---:|---:|---:|---:|")
+for row in funnel_bins:
+    md.append(
+        f"| {row['bin_no']} "
+        f"| {row['bin']} "
+        f"| {row['apply']:,} "
+        f"| {row['completion_rate']:.2%} "
+        f"| {row['approval_rate']:.2%} "
+        f"| {row['decline_rate']:.2%} "
+        f"| {row['funding_rate']:.2%} "
+        f"| {row['overall_funding_rate']:.2%} |"
+    )
+md.append("")
+md.append("> **解读**：低分箱（低风险）的完成率和通过率应更高；若低风险客群拒绝率异常偏高，说明风控策略可能过于严苛。")
 md.append("")
 
 # 写入文件
