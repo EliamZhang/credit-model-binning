@@ -803,7 +803,7 @@ md.append("")
 md.append(f"从 {len(bins)-1} 箱开始，每轮合并卡方 p 值最大（分布最相似）的相邻箱对，直至 {CHIMERGE_MIN_BINS} 箱。")
 md.append("")
 md.append("| 步骤 | 合并对 | 被合并边界 | χ² | p 值 | 剩余箱数 |")
-md.append("|---:|---|---:|---:|---:|")
+md.append("|---:|---:|---:|---:|---:|---:|")
 for h in merge_history:
     md.append(
         f"| {h['step']} "
@@ -1010,7 +1010,7 @@ m = funnel_metrics
 md.append("### 整体漏斗")
 md.append("")
 md.append("| 阶段 | 数量 | 占比 |")
-md.append("|---:|---:|")
+md.append("|---:|---:|---:|")
 md.append(f"| 申请 | {m['apply_cnt']:,} | 100.0% |")
 md.append(f"| └ 完成（排除 0.Incomplete） | {m['completed_cnt']:,} | {m['completion_rate']:.2%} |")
 md.append(f"| 　└ 通过（3.x / 4.x） | {m['approved_cnt']:,} | {m['approval_rate']:.2%}（完成中） |")
