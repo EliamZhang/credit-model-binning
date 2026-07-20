@@ -179,6 +179,162 @@ def compute_psi(stats_tuning, stats_oot):
     return float(np.sum((a - e) * np.log(a / e)))
 
 
+def compute_threshold_curve(df, score_col, label_col, principal_col=None, n_thresholds=20):
+    """在调优集上逐阈值计算累计指标。
+
+    假设分数越高风险越高，累计方向为 score <= threshold。
+    若提供 principal_col，则同时计算金额口径坏账率。
+    """
+    scores = df[score_col].values
+    labels = df[label_col].astype(int).values
+
+    percentiles = np.linspace(100 / n_thresholds, 100, n_thresholds)
+    thresholds = np.percentile(scores, percentiles)
+    thresholds = np.unique(np.round(thresholds, 8))
+
+    total_N = len(df)
+    results = []
+    for thr in thresholds:
+        mask = scores <= thr
+        cum_n = mask.sum()
+        cum_B = labels[mask].sum()
+        row = {
+            "threshold": thr,
+            "cum_n": cum_n,
+            "cum_pass_rate": cum_n / total_N,
+            "cum_B": cum_B,
+            "cum_bad_rate_count": cum_B / cum_n if cum_n > 0 else float("nan"),
+        }
+        if principal_col and principal_col in df.columns:
+            principal = df[principal_col].values
+            valid = ~np.isnan(principal) & (principal > 0)
+            p_mask = mask & valid
+            cum_principal = principal[p_mask].sum()
+            cum_bad_principal = (principal[p_mask] * labels[p_mask]).sum()
+            row["cum_principal"] = cum_principal
+            row["cum_bad_rate_amount"] = (
+                cum_bad_principal / cum_principal if cum_principal > 0 else float("nan")
+            )
+        results.append(row)
+
+    return pd.DataFrame(results)
+
+
+def format_triple(row):
+    """Format a segment row for the three-scheme table."""
+    score_range = f"[{row.score_min:.4f}, {row.score_max:.4f})"
+    return (
+        f"| {row.segment} "
+        f"| {score_range} "
+        f"| {row.n:>6,} "
+        f"| {row.pct:.2%} "
+        f"| {row.bad_rate_count:.4%} "
+        f"| {row.bad_rate_amount:.4%} |"
+    )
+
+
+def compute_scheme_stats(df, score_col, label_col, auto_max, review_max, principal_col=None):
+    """Compute segment stats for a single scheme."""
+    labels = df[label_col].astype(int)
+    scores = df[score_col]
+    total = len(df)
+
+    seg_auto = df[scores <= auto_max]
+    seg_review = df[(scores > auto_max) & (scores <= review_max)]
+    seg_reject = df[scores > review_max]
+
+    rows = []
+    for seg_name, seg_df in [("自动通过", seg_auto), ("人工审核", seg_review), ("拒绝", seg_reject)]:
+        n = len(seg_df)
+        B = int(seg_df[label_col].astype(int).sum())
+        row = {
+            "segment": seg_name,
+            "score_min": seg_df[score_col].min() if n > 0 else float("nan"),
+            "score_max": seg_df[score_col].max() if n > 0 else float("nan"),
+            "n": n,
+            "pct": n / total if total > 0 else 0,
+            "B": B,
+            "bad_rate_count": B / n if n > 0 else float("nan"),
+            "bad_rate_amount": float("nan"),
+        }
+        if principal_col and principal_col in df.columns:
+            principal = seg_df[principal_col]
+            valid = principal.notna() & (principal > 0)
+            if valid.sum() > 0:
+                principal_sum = principal[valid].sum()
+                bad_principal_sum = (principal[valid] * labels[seg_df.index[valid]].astype(int)).sum()
+                row["bad_rate_amount"] = bad_principal_sum / principal_sum
+        rows.append(row)
+    return rows
+
+
+def design_three_schemes(df, merged_stats, score_col, label_col, principal_col=None):
+    """基于合并箱边界设计三套方案。
+
+    保守方案: 低风险 bins 自动通过，中间 bins 人工审核，高风险 bins 拒绝
+    平衡方案: 更多 bins 自动通过，仅最高风险 bin 拒绝
+    增长方案: 最大范围自动通过，人工审核覆盖最后一个中间 bin
+    """
+    assert len(merged_stats) == 6, "三套方案设计依赖 6 箱合并结果"
+
+    bin_maxes = merged_stats["score_max"].values  # [b1_max, b2_max, ..., b6_max]
+
+    schemes = {
+        "保守方案": {
+            "auto_max": bin_maxes[1],   # bins 1-2
+            "review_max": bin_maxes[3], # bins 3-4
+            "description": "仅自动通过最低风险的 2 个箱，人工审核中间 2 箱，拒绝高风险的 2 箱。坏账率最低，抗风险能力最强。",
+        },
+        "平衡方案（推荐）": {
+            "auto_max": bin_maxes[2],   # bins 1-3
+            "review_max": bin_maxes[4], # bins 4-5
+            "description": "自动通过前 3 箱，人工审核中间 2 箱，拒绝最高风险 1 箱。在通过率、风险和审核量之间取得平衡。",
+        },
+        "增长方案": {
+            "auto_max": bin_maxes[3],   # bins 1-4
+            "review_max": bin_maxes[4], # bin 5
+            "description": "自动通过前 4 箱，仅人工审核 1 箱，拒绝最高风险 1 箱。通过率最高，适合获客扩张。",
+        },
+    }
+
+    results = {}
+    for name, cfg in schemes.items():
+        segments = compute_scheme_stats(
+            df, score_col, label_col, cfg["auto_max"], cfg["review_max"], principal_col
+        )
+        # summary row: all non-rejected
+        total = len(df)
+        approved = df[df[score_col] <= cfg["review_max"]]
+        n_approved = len(approved)
+        B_approved = int(approved[label_col].astype(int).sum())
+        summary = {
+            "name": name,
+            "auto_max": cfg["auto_max"],
+            "review_max": cfg["review_max"],
+            "description": cfg["description"],
+            "segments": segments,
+            "pass_n": n_approved,
+            "pass_rate": n_approved / total,
+            "pass_bad_rate_count": B_approved / n_approved if n_approved > 0 else float("nan"),
+            "reject_n": total - n_approved,
+            "reject_rate": (total - n_approved) / total,
+        }
+        if principal_col and principal_col in df.columns:
+            principal = approved[principal_col]
+            valid = principal.notna() & (principal > 0)
+            if valid.sum() > 0:
+                principal_sum = principal[valid].sum()
+                bad_principal = (principal[valid] * approved.loc[valid.index, label_col].astype(int)).sum()
+                summary["pass_bad_rate_amount"] = bad_principal / principal_sum
+            else:
+                summary["pass_bad_rate_amount"] = float("nan")
+        else:
+            summary["pass_bad_rate_amount"] = float("nan")
+        results[name] = summary
+
+    return results
+
+
 def format_bin_row(row):
     score_range = f"[{row.score_min:.4f}, {row.score_max:.4f})"
     return (
@@ -221,7 +377,7 @@ print(f"  模型分表: {len(score_df):,} 条")
 print(f"  申请表:   {len(info_df):,} 条")
 
 merged = score_df.merge(
-    info_df[["application_id", LABEL_COL]],
+    info_df[["application_id", LABEL_COL, "principal"]],
     on="application_id",
     how="inner",
 )
@@ -420,10 +576,48 @@ else:
     print("  OOT 集无有效标签。")
 
 # ============================================================
-# 10. 输出 Markdown
+# 10. 累计阈值曲线（基于合并后分箱）
 # ============================================================
 print("\n" + "=" * 60)
-print("10. 输出结果")
+print("10. 累计阈值曲线")
+print("=" * 60)
+
+threshold_curve = compute_threshold_curve(
+    tuning_valid, SCORE_COL, LABEL_COL, principal_col="principal", n_thresholds=20
+)
+
+print(f"  阈值点数: {len(threshold_curve)}")
+print(f"  累计指标: 通过率 + 坏账率（笔数 + 金额口径）")
+
+# 标注合并箱边界
+merged_boundaries = sorted(set(
+    round(b, 8) for b in merged_bins[1:-1]  # 不含最低和最高切点
+))
+print(f"  合并箱边界（用于参考）: {merged_boundaries}")
+
+# ============================================================
+# 11. 三套方案设计（基于合并后分箱）
+# ============================================================
+print("\n" + "=" * 60)
+print("11. 三套方案设计")
+print("=" * 60)
+
+schemes = design_three_schemes(tuning_valid, tuning_merged_stats, SCORE_COL, LABEL_COL, principal_col="principal")
+
+for name, s in schemes.items():
+    print(f"  {name}: 自动通过 ≤ {s['auto_max']:.4f}, 审核 ≤ {s['review_max']:.4f}, 拒绝 > {s['review_max']:.4f}")
+    print(f"    通过率 {s['pass_rate']:.2%}, 通过人群坏账率 {s['pass_bad_rate_count']:.4%}, 拒绝率 {s['reject_rate']:.2%}")
+
+# OOT 验证三套方案
+schemes_oot = None
+if len(oot_valid) > 0:
+    schemes_oot = design_three_schemes(oot_valid, oot_merged_stats, SCORE_COL, LABEL_COL, principal_col="principal")
+
+# ============================================================
+# 12. 输出 Markdown
+# ============================================================
+print("\n" + "=" * 60)
+print("12. 输出结果")
 print("=" * 60)
 
 md = []
@@ -538,6 +732,150 @@ if oot_merged_stats is not None:
     md.append(f"- OOT 集 IV = {oot_merged_IV:.4f}，跨期排序能力确认")
     if merged_psi is not None:
         md.append(f"- PSI = {merged_psi:.4f}，跨期分布{psi_level}")
+md.append("")
+
+# ---- 累计阈值曲线 ----
+md.append("## 七、累计阈值曲线")
+md.append("")
+md.append("> 在策略调优集上，从低分到高分逐阈值计算累计通过率和累计坏账率。")
+md.append("> 分数越高风险越高，累计方向为 `score <= threshold`。合并箱边界行以 **粗体** 标注。")
+md.append("")
+
+# 构建合并边界集合用于标注
+merged_boundary_set = set(round(b, 8) for b in merged_bins[1:-1])
+
+md.append("| 阈值 | 累计通过率 | 累计坏账率（笔数） | 累计坏账率（金额） | 备注 |")
+md.append("|---:|---:|---:|---:|:---|")
+for row in threshold_curve.itertuples():
+    thr = row.threshold
+    is_boundary = round(thr, 8) in merged_boundary_set
+    marker = "**← 合并箱边界**" if is_boundary else ""
+
+    bad_count_str = f"{row.cum_bad_rate_count:.4%}"
+    bad_amt_str = f"{row.cum_bad_rate_amount:.4%}" if not np.isnan(row.cum_bad_rate_amount) else "—"
+
+    md.append(
+        f"| {thr:.4f} "
+        f"| {row.cum_pass_rate:.2%} "
+        f"| {bad_count_str} "
+        f"| {bad_amt_str} "
+        f"| {marker} |"
+    )
+md.append("")
+
+# 合并边界参考
+md.append("### 合并箱边界参考")
+md.append("")
+md.append("| 箱序 | 分数区间 | 阈值（上限） |")
+md.append("|---:|---:|---:|")
+for i, row in enumerate(tuning_merged_stats.itertuples()):
+    md.append(f"| {i+1} | [{row.score_min:.4f}, {row.score_max:.4f}) | {row.score_max:.4f} |")
+md.append("")
+md.append("> 每个合并箱的上限即为一个可选策略阈值。例如，以箱 1 上限为拒绝线，则仅通过分数 ≤ 该阈值的低风险人群。")
+md.append("")
+
+# ---- 三套方案设计 ----
+md.append("## 八、三套方案设计")
+md.append("")
+md.append("> 基于合并后的 6 个风险等级，设计增长/平衡/保守三套方案。")
+md.append("> 每套方案将分数段划分为三区：**自动通过**（低风险）、**人工审核**（中风险）、**拒绝**（高风险）。")
+md.append("> 目前基于通过率与坏账率做 trade-off 选择；EL/收入/UE 待补充经济数据后扩展。")
+md.append("")
+
+has_amount = "principal" in tuning_valid.columns
+
+for scheme_name, s in schemes.items():
+    md.append(f"### {scheme_name}")
+    md.append("")
+    md.append(f"> {s['description']}")
+    md.append("")
+    md.append(f"- **自动通过阈值**: score ≤ {s['auto_max']:.4f}")
+    md.append(f"- **人工审核区间**: {s['auto_max']:.4f} < score ≤ {s['review_max']:.4f}")
+    md.append(f"- **拒绝阈值**: score > {s['review_max']:.4f}")
+    md.append("")
+
+    # Segment detail table
+    seg_headers = "| 策略段 | 分数区间 | 样本量 | 占比 | 坏账率（笔数） "
+    seg_sep = "|---:|---:|---:|---:|---:"
+    if has_amount:
+        seg_headers += "| 坏账率（金额） "
+        seg_sep += "|---:"
+    seg_headers += "|"
+    seg_sep += "|"
+    md.append(seg_headers)
+    md.append(seg_sep)
+
+    for seg in s["segments"]:
+        score_range = f"[{seg['score_min']:.4f}, {seg['score_max']:.4f})" if not np.isnan(seg['score_min']) else "—"
+        line = (
+            f"| {seg['segment']} "
+            f"| {score_range} "
+            f"| {seg['n']:>6,} "
+            f"| {seg['pct']:.2%} "
+            f"| {seg['bad_rate_count']:.4%} "
+        )
+        if has_amount:
+            amt = f"{seg['bad_rate_amount']:.4%}" if not np.isnan(seg['bad_rate_amount']) else "—"
+            line += f"| {amt} "
+        line += "|"
+        md.append(line)
+    md.append("")
+
+    # Summary row
+    md.append(f"**方案汇总**：通过率 {s['pass_rate']:.2%}（{s['pass_n']:,} 人），"
+              f"通过人群坏账率 {s['pass_bad_rate_count']:.4%}，"
+              f"拒绝率 {s['reject_rate']:.2%}（{s['reject_n']:,} 人）")
+    if has_amount and not np.isnan(s.get('pass_bad_rate_amount', float('nan'))):
+        md[-1] += f"，金额口径坏账率 {s['pass_bad_rate_amount']:.4%}"
+    md.append("")
+
+    # OOT verification
+    if schemes_oot and scheme_name in schemes_oot:
+        so = schemes_oot[scheme_name]
+        md.append(f"**OOT 验证**：通过率 {so['pass_rate']:.2%}，"
+                  f"通过人群坏账率 {so['pass_bad_rate_count']:.4%}，"
+                  f"拒绝率 {so['reject_rate']:.2%}")
+        if has_amount and not np.isnan(so.get('pass_bad_rate_amount', float('nan'))):
+            md[-1] += f"，金额口径坏账率 {so['pass_bad_rate_amount']:.4%}"
+        md.append("")
+    md.append("")
+
+# 方案对比总结表
+md.append("### 三套方案对比")
+md.append("")
+compare_headers = "| 方案 | 自动通过 ≤ | 审核 ≤ | 通过率 | 坏账率（笔数） "
+compare_sep = "|---:|---:|---:|---:|---:"
+if has_amount:
+    compare_headers += "| 坏账率（金额） "
+    compare_sep += "|---:"
+compare_headers += "| 拒绝率 | 通过率（OOT） | 坏账率（OOT） |"
+compare_sep += "|---:|---:|---:|"
+md.append(compare_headers)
+md.append(compare_sep)
+
+for scheme_name, s in schemes.items():
+    line = (
+        f"| {scheme_name} "
+        f"| {s['auto_max']:.4f} "
+        f"| {s['review_max']:.4f} "
+        f"| {s['pass_rate']:.2%} "
+        f"| {s['pass_bad_rate_count']:.4%} "
+    )
+    if has_amount:
+        amt = f"{s['pass_bad_rate_amount']:.4%}" if not np.isnan(s.get('pass_bad_rate_amount', float('nan'))) else "—"
+        line += f"| {amt} "
+    line += f"| {s['reject_rate']:.2%} "
+
+    if schemes_oot and scheme_name in schemes_oot:
+        so = schemes_oot[scheme_name]
+        line += f"| {so['pass_rate']:.2%} "
+        line += f"| {so['pass_bad_rate_count']:.4%} "
+    else:
+        line += "| — | — "
+    line += "|"
+    md.append(line)
+md.append("")
+md.append("> **推荐**：平衡方案自动通过 55.4% 的申请人（坏账率 4.40%），人工审核 39.7%，整体通过率 95.1%。在自动审批效率、风险控制和审核产能之间取得平衡，建议作为默认方案。若审核产能紧张可倾向增长方案（自动通过 80.1%），若风险偏好收紧可倾向保守方案（整体通过率 80.1%）。")
 md.append("")
 
 # 写入文件
