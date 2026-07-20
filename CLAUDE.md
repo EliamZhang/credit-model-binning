@@ -19,14 +19,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [res/aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score.csv](res/aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score.csv) — 申请模型分（子模型，420,519 行）。字段：`application_id, user_id, sample_datetime, aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score`
 - [res/aus_old_risk_bid_submodel_v20260323_v1_2_txn_lgb_score.csv](res/aus_old_risk_bid_submodel_v20260323_v1_2_txn_lgb_score.csv) — 交易特征子模型分（420,519 行）。字段：`application_id, user_id, sample_datetime, feature_error, aus_old_risk_bid_submodel_v20260323_v1_2_txn_lgb_score` 及 21 个交易特征列
 - [res/sample.csv](res/sample.csv) — 样本表（420,508 行）。字段：`application_id, user_id, sample_datetime`
-- [res/binning_20_equal_freq.csv](res/binning_20_equal_freq.csv) — 等频 20 箱分箱明细（由脚本生成）
-- [res/binning_20_cumulative.csv](res/binning_20_cumulative.csv) — 等频 20 箱累计指标（由脚本生成）
+- [res/binning_result.md](res/binning_result.md) — 分箱结果（由脚本生成）
 
 模型分表和申请表通过 `application_id` 关联。数据覆盖时间范围：2024-01-01 ~ 2026-05-20，仅含 `user_tag=Existing` 的老户返回申请。
 
 ## 脚本
 
-- [scr/equal_freq_binning.py](scr/equal_freq_binning.py) — 等频 20 箱初始分箱脚本。读取 mlt 模型分和申请表，按 `application_id` 关联获取标签 `duedate_3m_30`，以 2026-01-01 划分策略调优集/OOT 集，输出分箱明细和累计指标表
+- [scr/binning.py](scr/binning.py) — 分箱主脚本。读取 mlt 模型分和申请表，按 `application_id` 关联获取标签 `duedate_3m_30`，以 2026-01-01 划分策略调优集/OOT 集，输出 `res/binning_result.md`
 - [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息的原始 SQL。筛选 `application_time >= '2025-01-01'`。当前本地 `application_info.csv` 由 Spark 导出，非此 SQL 产出，SQL 仅作字段参考
 
 ## 转化率计算（原始 SQL 口径参考）

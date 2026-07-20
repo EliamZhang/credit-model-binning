@@ -7,8 +7,7 @@
     python scr/equal_freq_binning.py
 
 输出：
-    res/binning_20_equal_freq.csv          — 分箱明细表
-    res/binning_20_cumulative.csv          — 累计指标表（从低分向高分累计）
+    res/binning_result.md                  — 分箱结果 Markdown 表格
 """
 
 import pandas as pd
@@ -152,41 +151,29 @@ if abs(rho) < 0.9:
     print("  ⚠ 单调性较差，可能存在局部倒挂，后续合并步骤需关注。")
 
 # ============================================================
-# 5. 输出
+# 5. 输出 Markdown 文件
 # ============================================================
 print("\n" + "=" * 60)
 print("5. 输出结果")
 print("=" * 60)
 
-# 分箱明细表
-detail_cols = [
-    "score_min", "score_max", "n", "B", "bad_rate", "SE",
-    "cum_n", "cum_pass_rate", "cum_bad_rate", "WOE", "IV_component",
-]
-detail_df = bin_stats[detail_cols].copy()
-detail_df.to_csv(os.path.join(RES_DIR, "binning_20_equal_freq.csv"), float_format="%.6f")
-print(f"  分箱明细: res/binning_20_equal_freq.csv")
+oot_bad_rate = oot_valid[LABEL_COL].astype(int).mean() if len(oot_valid) > 0 else None
 
-# 累计指标表
-cum_df = bin_stats[[
-    "score_min", "score_max", "cum_n", "cum_pass_rate", "cum_bad_rate", "n", "B", "bad_rate",
-]].copy()
-cum_df.to_csv(os.path.join(RES_DIR, "binning_20_cumulative.csv"), float_format="%.6f")
-print(f"  累计指标: res/binning_20_cumulative.csv")
+md_lines = []
+md_lines.append("# 等频 20 箱分箱结果")
+md_lines.append("")
+md_lines.append(f"> 策略调优集：{len(tuning_valid):,} 条（< {OOT_CUT_DATE}），OOT 集：{len(oot_valid):,} 条（>= {OOT_CUT_DATE}）")
+md_lines.append(f"> 整体坏账率 = {overall_bad_rate:.4%}，总 IV = {total_IV:.4f}，Spearman ρ = {rho:.4f}")
+if oot_bad_rate is not None:
+    md_lines.append(f"> OOT 坏账率 = {oot_bad_rate:.4%}")
+md_lines.append("")
 
-# ============================================================
-# 6. 打印 Markdown 表格
-# ============================================================
-print("\n" + "=" * 60)
-print("6. 分箱结果表格（策略调优集）")
-print("=" * 60)
-
-print(f"\n| 箱序 | 分数区间 | 样本量 | 坏样本 | 坏账率 | SE | 累计通过率 | 累计坏账率 | WOE |")
-print(f"|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+md_lines.append("| 箱序 | 分数区间 | 样本量 | 坏样本 | 坏账率 | SE | 累计通过率 | 累计坏账率 | WOE |")
+md_lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
 
 for row in bin_stats.itertuples():
     score_range = f"[{row.score_min:.4f}, {row.score_max:.4f})"
-    print(
+    md_lines.append(
         f"| {row.Index:>2} "
         f"| {score_range} "
         f"| {row.n:>6,} "
@@ -198,17 +185,15 @@ for row in bin_stats.itertuples():
         f"| {row.WOE:+.4f} |"
     )
 
-print(f"\n  整体坏账率 = {overall_bad_rate:.4%}，总 IV = {total_IV:.4f}，Spearman ρ = {rho:.4f}")
+out_path = os.path.join(RES_DIR, "binning_result.md")
+with open(out_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(md_lines))
+print(f"  输出: res/binning_20_equal_freq.md")
 
-# ============================================================
-# 7. OOT 概要（后续步骤使用，此处仅概览）
-# ============================================================
-print("\n" + "=" * 60)
-print("7. OOT 集概要")
-print("=" * 60)
-if len(oot_valid) > 0:
-    oot_bad_rate = oot_valid[LABEL_COL].astype(int).mean()
-    print(f"  OOT 样本量: {len(oot_valid):,}，坏账率: {oot_bad_rate:.4%}")
+# 控制台摘要
+print(f"\n  整体坏账率 = {overall_bad_rate:.4%}，总 IV = {total_IV:.4f}，Spearman ρ = {rho:.4f}")
+if oot_bad_rate is not None:
+    print(f"  OOT 集: {len(oot_valid):,} 条，坏账率 = {oot_bad_rate:.4%}")
 else:
     print("  OOT 集无有效标签，可能尚不成熟。")
 
