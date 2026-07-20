@@ -8,23 +8,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 推荐方案：**等频 20 箱 → 单调/统计合并 → 业务调整 → 收益阈值优化**。
 
+三个模型分的关系：`aus_old_risk_apply_appmodel`（申请模型）和 `aus_old_risk_bid_submodel`（交易特征子模型）是子模型，融合后得到 `aus_old_risk_bid_mltmodel`（多头融合模型），分箱以 mlt 模型为主。
+
 ## 数据文件
 
 `res/` 目录存放本地数据文件（已通过 `.gitignore` 排除，不推送到 git）：
 
-- [res/model_score.csv](res/model_score.csv) — 模型分表。主键 `application_id`，字段：`user_id, application_id, sample_datetime, aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score`
-- [res/sample.csv](res/sample.csv) — 样本表（宽表）。主键 `application_id`，包含 `user_id, application_id, sample_datetime, sample_month, sample_quarter, user_type` 及各宽限期字段
-- [res/application_info.xlsx](res/application_info.xlsx) — 申请信息表
+- [res/application_info.csv](res/application_info.csv) — 申请信息表（420,508 行，47 列）。主键 `application_id`，包含 `user_id`、申请时间、放款日期、`LTI/PTI/NSTI`、`principal`、`estimate_principal_remaining_mob{0~4}`、`dpd_days_mob{0~4}`、`dpd_days_ever_mob{0~4}`、`first_payment_*`、`duedate_{1m,2m,3m}_5`、`duedate_{1m,2m,3m,4m}_30`、`application_tag/user_tag/loan_tag`、`requested_loan_*`、`payout_*`、`original_term_*`、`actual_term_*`
+- [res/aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv](res/aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv) — 多头融合模型分（分箱主模型，420,519 行）。字段：`application_id, user_id, sample_datetime, aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score`
+- [res/aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score.csv](res/aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score.csv) — 申请模型分（子模型，420,519 行）。字段：`application_id, user_id, sample_datetime, aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score`
+- [res/aus_old_risk_bid_submodel_v20260323_v1_2_txn_lgb_score.csv](res/aus_old_risk_bid_submodel_v20260323_v1_2_txn_lgb_score.csv) — 交易特征子模型分（420,519 行）。字段：`application_id, user_id, sample_datetime, feature_error, aus_old_risk_bid_submodel_v20260323_v1_2_txn_lgb_score` 及 21 个交易特征列
+- [res/sample.csv](res/sample.csv) — 样本表（420,508 行）。字段：`application_id, user_id, sample_datetime`
+- [res/binning_20_equal_freq.csv](res/binning_20_equal_freq.csv) — 等频 20 箱分箱明细（由脚本生成）
+- [res/binning_20_cumulative.csv](res/binning_20_cumulative.csv) — 等频 20 箱累计指标（由脚本生成）
 
-模型分和样本表通过 `application_id` 关联。
+模型分表和申请表通过 `application_id` 关联。数据覆盖时间范围：2024-01-01 ~ 2026-05-20，仅含 `user_tag=Existing` 的老户返回申请。
 
-## SQL 脚本
+## 脚本
 
-- [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息，包含 user_id、application_id、申请时间、放款日期、LTI/PTI/NSTI、各 MOB 的本金余额和逾期天数、首期还款信息、宽限期字段、标签字段、金额和期限字段。筛选 `application_time >= '2025-01-01'`
+- [scr/equal_freq_binning.py](scr/equal_freq_binning.py) — 等频 20 箱初始分箱脚本。读取 mlt 模型分和申请表，按 `application_id` 关联获取标签 `duedate_3m_30`，以 2026-01-01 划分策略调优集/OOT 集，输出分箱明细和累计指标表
+- [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息的原始 SQL。筛选 `application_time >= '2025-01-01'`。当前本地 `application_info.csv` 由 Spark 导出，非此 SQL 产出，SQL 仅作字段参考
 
-## 转化率计算
+## 转化率计算（原始 SQL 口径参考）
 
-基于 `ba.customer_profile_rawdata`，从申请到放款的各环节转化率。
+> 注意：以下字段（`application_status`、`assessment_status`、`status`）来自 `ba.customer_profile_rawdata`，当前本地 `application_info.csv` 不包含这些字段，仅作口径参考。
 
 ### 状态字段说明
 
@@ -83,17 +90,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 风险指标
 
-### Vintage 逾期标签（listing vintage）
+### Vintage 逾期标签
 
-| 维度 | 字段格式 | 取值范围 |
-|---|---|---|
-| 5 DPD | `duedate_{m}m_5` | 1m ~ 12m，共 12 期 |
-| 30 DPD | `duedate_{m}m_30` | 1m ~ 12m，共 12 期 |
-| 60 DPD | `duedate_{m}m_60` | 1m ~ 12m，共 12 期 |
+`application_info.csv` 中实际存在的标签字段：
 
-每条记录表示第 m 个账单日后 N 天是否逾期（0/1/NULL）。常用目标：`duedate_1m_5`（首期短期逾期）、`duedate_3m_30`（三期严重逾期）。
+| 字段 | 含义 |
+|---|---|
+| `duedate_1m_5` | 首期 5 DPD |
+| `duedate_2m_5` | 第二期 5 DPD |
+| `duedate_3m_5` | 第三期 5 DPD |
+| `duedate_1m_30` | 首期 30 DPD |
+| `duedate_2m_30` | 第二期 30 DPD |
+| `duedate_3m_30` | 第三期 30 DPD（常用目标） |
+| `duedate_4m_30` | 第四期 30 DPD |
+
+每条记录为 0/1/NULL。当前分箱脚本使用 `duedate_3m_30` 作为风险标签。
 
 ### FPD7（首期支付逾期 7 天）
+
+`application_info.csv` 中有对应字段：`first_payment_scheduled_date`、`first_payment_days_past_due_ever`。原始 SQL 逻辑：
 
 ```sql
 CASE
@@ -108,16 +123,18 @@ CASE
 END AS fpd7_flag
 ```
 
-仅对已放款（`4.Funded`）且首期还款日已过 7 天的申请计算，输出 0/1/NULL。依赖字段：`first_payment_scheduled_date`、`first_payment_days_past_due_ever`（均来自 `ba.customer_profile_rawdata`）。
+> 注意：本地数据无 `application_status` 列，需根据 `dispersal_date` 是否非空判断是否放款。
 
 ### Servicing Vintage（资产表现）
+
+`application_info.csv` 中实际存在的字段（MOB 0~4）：
 
 | 字段 | 含义 |
 |---|---|
 | `principal` | 贷款本金 |
-| `closed_flag` | 是否已结清 |
-| `estimate_principal_remaining_mob{n}` | MOB{n} 时点的剩余本金（n=0~12） |
-| `dpd_days_mob{n}` | MOB{n} 时点的逾期天数（n=0~12） |
+| `estimate_principal_remaining_mob{n}` | MOB{n} 时点的剩余本金（n=0~4） |
+| `dpd_days_mob{n}` | MOB{n} 时点的逾期天数（n=0~4） |
+| `dpd_days_ever_mob{n}` | MOB{n} 时点的历史最大逾期天数（n=0~4） |
 
 ### 风险指标公式
 
