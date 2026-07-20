@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 推荐方案：**等频 20 箱 → 单调/统计合并 → 业务调整 → 收益阈值优化**。
 
-[scr/binning.py](scr/binning.py) 是本方法论的程序实现载体，沿文档的 8 步流程（0.定义口径 → 7.上线治理）逐步落地。当前完成步骤 2-5（等频 20 箱初分、ChiMerge 合并、累计阈值曲线、三套方案）及转化率漏斗、FPD7 标签对比。修改脚本前先看文档对应章节了解业务口径，新增功能后同步更新 [scr/binning.md](scr/binning.md)。
+[scr/binning.py](scr/binning.py) 是本方法论的程序实现载体，沿文档的 8 步流程（0.定义口径 → 7.上线治理）逐步落地。当前完成步骤 2-5（等频 20 箱初分、ChiMerge 合并、累计阈值曲线、三套方案）。修改脚本前先看文档对应章节了解业务口径，新增功能后同步更新 [scr/binning.md](scr/binning.md)。
 
 三个模型分的关系：`aus_old_risk_apply_appmodel`（申请模型）和 `aus_old_risk_bid_submodel`（交易特征子模型）是子模型，融合后得到 `aus_old_risk_bid_mltmodel`（多头融合模型），分箱以 mlt 模型为主。
 
@@ -51,66 +51,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [scr/binning.md](scr/binning.md) — 分箱方法论文档，与 binning.py 逻辑同步更新
 - [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息的原始 SQL。筛选 `application_time >= '2025-01-01'`。当前本地 `application_info.csv` 由 Spark 导出，非此 SQL 产出，SQL 仅作字段参考
 
-## 转化率计算（原始 SQL 口径参考）
-
-> 注意：以下字段（`application_status`、`assessment_status`、`status`）来自 `ba.customer_profile_rawdata`。当前本地 `application_info.csv` 已包含 `application_status` 和 `status` 字段，`assessment_status` 未纳入本地数据。
-
-### 状态字段说明
-
-| 字段 | 含义 |
-|---|---|
-| `application_status` | 申请状态（`3.x`/`4.x` 开头表示通过） |
-| `assessment_status` | 审核结果（含 `Auto Approved` / `Manual Approved`） |
-| `status` | 账户状态（`Active_Account` / `Closed` / `Blocked` 表示已放款） |
-
-### 申请状态枚举
-
-| `application_status` | 含义 |
-|---|---|
-| `0.Incomplete` | 未完成申请 |
-| `1.In Progress` | 进行中 |
-| `2.1.Submitted Withdrawn` | 已撤回 |
-| `2.3.Risk Declined` | 风控拒绝 |
-| `3.x` / `4.x` | 通过（含 `4.Funded` 已放款） |
-
-### 申请状态标签（flag）
-
-| 标签 | 逻辑 |
-|---|---|
-| `completed_application_flag` | `application_status NOT IN ('0.Incomplete','1.In Progress')` |
-| `approved_application_flag` | `LEFT(application_status,1) IN ('3','4')` |
-| `auto_approved_application_flag` | 通过且 `assessment_status LIKE '%Auto Approved%'` |
-| `manual_approved_application_flag` | 通过且 `assessment_status LIKE '%Manual Approved%'` |
-| `declined_application_flag` | `application_status = '2.3.Risk Declined'` |
-| `auto_declined_application_flag` | 拒绝且 `assessment_status LIKE '%Auto Declined%'` |
-| `manual_declined_application_flag` | 拒绝且 `assessment_status LIKE '%Manual Declined%'` |
-| `withdrawn_application_flag` | `application_status = '2.1.Submitted Withdrawn'` |
-| `funded_application_flag` | `application_status = '4.Funded'` |
-
-### 计数口径
-
-| 指标 | 逻辑 |
-|---|---|
-| `apply_cnt` | 申请样本数 |
-| `completed_application_cnt` | 已完成申请数（排除 `0.Incomplete`、`1.In Progress`） |
-| `approved_application_cnt` | `application_status` 以 `3` 或 `4` 开头 |
-| `auto_approved_application_cnt` | 通过且 `assessment_status` 含 `Auto Approved` |
-| `manual_approved_application_cnt` | 通过且 `assessment_status` 含 `Manual Approved` |
-| `deal_sample_cnt` | `status IN ('Active_Account','Closed','Blocked')` |
-
-### 转化率公式
-
-| 转化率 | 公式 | 说明 |
-|---|---|---|
-| 完成率 | `completed_application_cnt / apply_cnt` | 申请中完成的比例 |
-| 通过率 | `approved_application_cnt / completed_application_cnt` | 完成中通过的比例 |
-| 自动通过率 | `auto_approved_application_cnt / completed_application_cnt` | 完成中自动通过的比例 |
-| 人工通过率 | `manual_approved_application_cnt / completed_application_cnt` | 完成中人工通过的比例 |
-| 自动通过占比 | `auto_approved_application_cnt / approved_application_cnt` | 通过中自动通过的比例 |
-| 人工通过占比 | `manual_approved_application_cnt / approved_application_cnt` | 通过中人工通过的比例 |
-| 放款率 | `deal_sample_cnt / approved_application_cnt` | 通过中成功放款的比例 |
-
-## 风险指标
+## 风险指标公式
 
 ### Vintage 逾期标签
 
@@ -131,25 +72,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `duedate_3m_30`（`LABEL_COL`）：主标签，计算坏账率、排序单调性、AUC/KS 均基于此列
 - `duedate_1m_30`：辅助标签，ChiMerge 合并时要求两列的卡方检验**同时满足**才允许合并（[scr/binning.py:24](scr/binning.py#L24) `CHIMERGE_LABEL_COLS`）
 
-### FPD7（首期支付逾期 7 天）
-
-`application_info.csv` 中有对应字段：`first_payment_scheduled_date`、`first_payment_days_past_due_ever`。原始 SQL 逻辑：
-
-```sql
-CASE
-    WHEN application_status = '4.Funded'
-     AND first_payment_scheduled_date < CURRENT_DATE() - 7
-     AND first_payment_days_past_due_ever > 7
-    THEN 1
-    WHEN application_status = '4.Funded'
-     AND first_payment_scheduled_date < CURRENT_DATE() - 7
-    THEN 0
-    ELSE NULL
-END AS fpd7_flag
-```
-
-> 注意：脚本中 FPD7 计算使用 `application_status == '4.Funded'` 判断是否放款，与原始 SQL 口径一致。
-
 ### Servicing Vintage（资产表现）
 
 `application_info.csv` 中实际存在的字段（MOB 0~4）：
@@ -161,55 +83,122 @@ END AS fpd7_flag
 | `dpd_days_mob{n}` | MOB{n} 时点的逾期天数（n=0~4） |
 | `dpd_days_ever_mob{n}` | MOB{n} 时点的历史最大逾期天数（n=0~4） |
 
-### 风险指标公式
+### 标签定义
 
-#### 分箱级指标（按箱计算）
+脚本使用两个独立标签，分别服务于不同口径的坏账率计算：
 
-| 指标 | 公式 | 说明 |
+| 标签 | 数据列 | 判断逻辑 | 适用指标 |
+|---|---|---|---|
+| 笔数坏账标签 | `duedate_3m_30` | MOB3 是否逾期 ≥ 30 天（0/1/NULL） | 笔数坏账率、AUC、KS、Spearman ρ、ChiMerge |
+| 金额坏账标签 | `dpd_days_ever_mob3` | MOB3 内历史最大逾期天数 ≥ 30 时记为 1 | 金额坏账率（累计 / 分段 / 方案） |
+
+> 两个标签的数据来源和业务含义不同，不可互换。`duedate_3m_30` 反映**标的逾期**（第三期到期的逾期状态），`dpd_days_ever_mob3 >= 30` 反映**资产逾期**（MOB3 内是否曾逾期 ≥ 30 天），后者更匹配金额口径的风险敞口。
+
+ChiMerge 合并时同时检验两个标签的卡方 p 值：`CHIMERGE_LABEL_COLS = ["duedate_3m_30", "duedate_1m_30"]`，相邻箱必须在两个标签上均不显著（p ≥ 0.05）才允许合并。
+
+---
+
+### 一、分箱内指标（单箱独立统计）
+
+`compute_bin_stats()` 对每个分箱计算以下指标。设箱内样本量为 n、坏样本数为 B（B = SUM(label)，label = `duedate_3m_30`）、好样本数为 G = n − B，整体总样本为 total_N、总坏样本为 total_B。
+
+| 指标 | 代码变量 | 公式 | 业务含义 |
+|---|---|---|---|
+| 样本量 | `n` | COUNT(箱内样本) | 箱内样本总数 |
+| 坏样本数 | `B` | SUM(label) | 箱内 label=1 的样本数 |
+| 好样本数 | `G` | n − B | 箱内 label=0 的样本数 |
+| 笔数坏账率 | `bad_rate` | B / n | 箱内坏样本占比（label = `duedate_3m_30`） |
+| 笔数坏账率标准误 | `SE` | sqrt(bad_rate × (1 − bad_rate) / n) | 坏账率的抽样标准误 |
+| 坏样本占比 | `B_pct` | B / total_B | 该箱坏样本占全部坏样本的比例 |
+| 好样本占比 | `G_pct` | G / (total_N − total_B) | 该箱好样本占全部好样本的比例 |
+| WOE | `WOE` | ln(B_pct / G_pct) | 箱内好坏比的对应数，正值表示坏样本集中 |
+| 单箱 IV | `IV_component` | (B_pct − G_pct) × WOE | 该箱对总 IV 的贡献，总 IV = Σ IV_component |
+| Lift | `lift` | bad_rate / overall_bad_rate | >1 表示该箱风险高于整体平均水平 |
+
+### 二、累计指标（低风险到高风险逐箱累加）
+
+在分箱按分数从低到高排列后，对上述分箱内指标做累加计算。累计方向为 score ≤ 当前箱上限。
+
+| 指标 | 代码变量 | 公式 | 业务含义 |
+|---|---|---|---|
+| 累计样本量 | `cum_n` | Σ n（当前箱及之前所有箱） | 截止该箱的通过样本数 |
+| 累计坏样本 | `cum_B` | Σ B（当前箱及之前所有箱） | 截止该箱的坏样本数 |
+| 累计通过率 | `cum_pass_rate` | cum_n / total_N | 截止该箱的通过样本占比 |
+| 累计笔数坏账率 | `cum_bad_rate` | cum_B / cum_n | 截止该箱的坏样本占比（label = `duedate_3m_30`） |
+| 累计 Lift | `cum_lift` | cum_bad_rate / overall_bad_rate | 截止该箱的风险与整体平均的比值 |
+
+### 三、逐阈值指标（连续分数轴上逐点计算）
+
+`compute_threshold_curve()` 不再按分箱边界，而是在连续分数轴上取 N 个阈值点（默认 20 个等分位点 + 合并箱边界点），对每个阈值计算累计通过人群的风险指标。
+
+> 累计方向：高分高风险时 `score ≤ threshold`，高分低风险时 `score ≥ threshold`。
+
+| 指标 | 代码变量 | 公式 | 业务含义 |
+|---|---|---|---|
+| 阈值 | `threshold` | 分数等分位点 / 合并箱边界 | 策略切点候选值 |
+| 累计样本量 | `cum_n` | COUNT(score ≤ threshold) | 该阈值下的通过样本数 |
+| 累计通过率 | `cum_pass_rate` | cum_n / total_N | 该阈值下的通过占比 |
+| 累计笔数坏账率 | `cum_bad_rate_count` | cum_B / cum_n | 通过人群 label=`duedate_3m_30` 的坏账率 |
+| 边际笔数坏账率 | `marginal_bad_rate_count` | marginal_B / marginal_n | 相邻阈值间新增通过人群的坏账率 |
+| 累计金额坏账率 | `cum_bad_rate_amount` | Σ(剩余本金 × 金额标签) / Σ(原贷本金) | 通过人群的金额口径坏账率，金额标签 = `dpd_days_ever_mob3` ≥ 30，仅计两列均非空且 > 0 |
+
+> 金额坏账率公式：分子 = `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30)`，分母 = `SUM(principal)`，仅计分子分母均非空且 > 0 的样本。分子分母的对应人群不完全一致（剩余本金可能为空），不能与笔数坏账率直接对比绝对值。
+
+### 四、模型级排序指标
+
+| 指标 | 代码位置 | 公式 | 业务含义 |
+|---|---|---|---|
+| 整体笔数坏账率 | `total_B / total_N` | total_B / total_N | 全样本 label=`duedate_3m_30` 的坏账率 |
+| 总 IV | `tuning_IV` | Σ 各箱 IV_component | 模型分的整体区分能力，> 0.5 为强 |
+| AUC | `compute_auc_ks()` | 梯形法：Σ((TPRᵢ + TPRᵢ₋₁) / 2 × (FPRᵢ − FPRᵢ₋₁)) | 模型排序能力，0.5 为随机，1.0 为完美 |
+| KS | `compute_auc_ks()` | max(\|TPR − FPR\|) | 好坏样本分布的最大分离度 |
+| Spearman ρ | `spearmanr(bin_index, bad_rate)` | 秩相关系数 | 分箱序与笔数坏账率的单调性，越接近 1 越好 |
+
+> AUC/KS 在原始分数上计算，不依赖分箱，合并前后数值不变。
+
+### 五、分布稳定性指标
+
+| 指标 | 代码函数 | 公式 | 业务含义 |
+|---|---|---|---|
+| PSI | `compute_psi()` | Σ((actual_pct − expected_pct) × ln(actual_pct / expected_pct)) | 模型分分布跨期稳定性，expected = 调优集各箱占比，actual = OOT 集各箱占比。< 0.1 稳定，0.1~0.25 轻微漂移，> 0.25 明显漂移 |
+| 卡方检验 | `compute_adjacent_tests()` / `_chi2_for_table()` | χ² 联表检验 [[Bₐ, Gₐ], [B_b, G_b]] | 判断相邻两箱的好坏分布是否独立，p < 0.05 表示差异显著不可合并 |
+| Z 检验 | `compute_adjacent_tests()` | z = (r_b − rₐ) / √(rₐ(1−rₐ)/nₐ + r_b(1−r_b)/n_b) | 判断相邻两箱笔数坏账率差异是否显著，p = 2 × (1 − Φ(\|z\|)) |
+
+> ChiMerge 合并时对 `CHIMERGE_LABEL_COLS` 中的每个标签分别计算卡方检验，所有标签均不显著（p ≥ 0.05）才允许合并。
+
+### 六、方案指标
+
+`design_three_schemes()` 基于合并后的风险等级生成保守/平衡/增长三套方案，每套方案将分数轴划分为三段：自动通过、人工审核、拒绝。方案边界由覆盖的低风险箱数决定。
+
+**方案边界参数：**
+
+| 参数 | 代码变量 | 含义 |
 |---|---|---|
-| 坏账率 | `bad_rate = B / n` | 箱内坏样本占比，B = SUM(label)，n = 箱内样本量 |
-| SE | `SE = sqrt(bad_rate * (1 - bad_rate) / n)` | 坏账率标准误 |
-| WOE | `WOE = ln(B_pct / G_pct)` | B_pct = 箱内坏/总坏，G_pct = 箱内好/总好 |
-| IV（单箱） | `IV_component = (B_pct - G_pct) * WOE` | 总 IV = SUM(各箱 IV_component) |
-| Lift | `lift = bad_rate / overall_bad_rate` | >1 表示该箱比平均更差 |
-| 累计 Lift | `cum_lift = cum_bad_rate / overall_bad_rate` | 累计坏账率 / 整体坏账率 |
+| 自动通过上限 | `auto_max` | 低风险客群的分数上界，score ≤ auto_max 自动通过 |
+| 审核上限 | `review_max` | 审核区间的分数上界，auto_max < score ≤ review_max 人工审核 |
+| 是否拒绝 | `reject` | score > review_max 的客群是否直接拒绝（增长方案不拒绝） |
 
-#### 累计指标（逐阈值）
+**方案分段指标**（`compute_scheme_stats()`，对每个策略段分别计算）：
 
-| 指标 | 公式 | 说明 |
-|---|---|---|
-| 累计通过率 | `cum_pass_rate = cum_n / total_N` | cum_n = score ≤ threshold 的样本量 |
-| 累计坏账率（笔数） | `cum_bad_rate = cum_B / cum_n` | cum_B = score ≤ threshold 的坏样本量 |
-| 边际坏账率 | `marginal_B / marginal_n` | marginal_n = cum_n[i] - cum_n[i-1]（阈值间增量） |
-| 累计坏账率（金额） | `SUM(estimate_principal_remaining_mob3 * label) / SUM(principal)` | 仅计两列均非空且 > 0，label = 1 iff dpd_days_ever_mob3 >= 30 |
+| 指标 | 代码变量 | 公式 | 业务含义 |
+|---|---|---|---|
+| 分段样本量 | `n` | COUNT(段内样本) | 该策略段的样本数 |
+| 分段占比 | `pct` | n / total | 该策略段占全样本的比例 |
+| 分段笔数坏账率 | `bad_rate_count` | B / n | 段内 label=`duedate_3m_30` 的坏账率 |
+| 分段金额坏账率 | `bad_rate_amount` | Σ(剩余本金 × 金额标签) / Σ(原贷本金) | 段内金额口径坏账率，金额标签 = `dpd_days_ever_mob3` ≥ 30 |
 
-#### 模型级排序指标
+**方案汇总指标**（通过人群 = score ≤ review_max）：
 
-| 指标 | 公式 | 说明 |
-|---|---|---|
-| AUC | 梯形法：`SUM((tpr[i] + tpr[i-1]) / 2 * (fpr[i] - fpr[i-1]))` | TPR = cum_bad / total_bad，FPR = cum_good / total_good |
-| KS | `max(\|TPR - FPR\|)` | Kolmogorov-Smirnov，分数级排序指标 |
-| Spearman ρ | `spearmanr(bin_index, bad_rate)` | 分箱序与坏账率的秩相关系数，检验单调性 |
-| Pearson r | `CORR(score_a, score_b)` | 两模型分数的线性相关 |
+| 指标 | 代码变量 | 公式 | 业务含义 |
+|---|---|---|---|
+| 方案通过样本量 | `pass_n` | COUNT(score ≤ review_max) | 通过（自动+审核）的总样本数 |
+| 方案通过率 | `pass_rate` | pass_n / total | 通过样本占全样本比例 |
+| 通过人群笔数坏账率 | `pass_bad_rate_count` | Σ(label) / pass_n | 通过人群 label=`duedate_3m_30` 的坏账率 |
+| 通过人群金额坏账率 | `pass_bad_rate_amount` | Σ(剩余本金 × 金额标签) / Σ(原贷本金) WHERE score ≤ review_max | 通过人群金额口径坏账率 |
+| 方案拒绝样本量 | `reject_n` | total − pass_n | 拒绝的样本数 |
+| 方案拒绝率 | `reject_rate` | reject_n / total | 拒绝样本占全样本比例 |
 
-#### 分布稳定性
-
-| 指标 | 公式 | 说明 |
-|---|---|---|
-| PSI | `SUM((actual_pct - expected_pct) * ln(actual_pct / expected_pct))` | expected = 调优集各箱占比，actual = OOT 集各箱占比 |
-| 卡方检验（相邻箱） | `chi2_contingency([[B_a, G_a], [B_b, G_b]])` | 判断两箱好坏分布是否独立，p < 0.05 显著 |
-| Z 检验（相邻箱） | `z = (r_b - r_a) / sqrt(r_a*(1-r_a)/n_a + r_b*(1-r_b)/n_b)` | p = 2 * (1 - Φ(\|z\|))，判断两箱坏账率差异 |
-
-#### 方案指标
-
-| 指标 | 公式 | 说明 |
-|---|---|---|
-| 通过率 | `pass_rate = n_approved / total` | n_approved = score ≤ review_max 的样本数 |
-| 坏账率（笔数） | `pass_bad_rate = B_approved / n_approved` | 通过人群中 label=1 的占比 |
-| 坏账率（金额） | `SUM(amount_col * label) / SUM(principal)` WHERE score ≤ review_max | amount_col = estimate_principal_remaining_mob3 |
-| 拒绝率 | `reject_rate = reject_n / total` | reject_n = score > review_max 的样本数 |
-
-> 金额逾期率更能反映真实风险敞口，实际分析建议两者同时汇报。AUC/KS 为分数级排序指标，不随分箱变化，合并前后一致。
+> 金额坏账率反映真实风险敞口，建议与笔数坏账率同时汇报。所有指标均按 `SCORE_HIGHER_IS_RISKIER` 的方向计算累计和阈值，当前配置为高分高风险（score 越低风险越低）。
 
 ## 文档风格
 
