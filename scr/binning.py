@@ -24,6 +24,8 @@ LABEL_COL_1M30 = "duedate_1m_30"
 CHIMERGE_LABEL_COLS = ["duedate_3m_30", "duedate_1m_30"]  # ChiMerge 合并时同时考虑这两个标签
 AMOUNT_COL = "estimate_principal_remaining_mob3"  # 金额坏账率分子：MOB3 时点剩余本金
 AMOUNT_DENOM_COL = "principal"  # 金额坏账率分母：原贷本金
+AMOUNT_LABEL_COL = "dpd_days_ever_mob3"  # 金额坏账率标签：MOB3 内历史最大逾期天数 >= 30
+AMOUNT_LABEL_THRESHOLD = 30
 LABEL_DISPLAY = "3m30+"
 SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 SCORE_HIGHER_IS_RISKIER = True
@@ -452,12 +454,13 @@ def compute_threshold_curve(
             "marginal_n": float("nan"),
             "marginal_bad_rate_count": float("nan"),
         }
-        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns:
+        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns and AMOUNT_LABEL_COL in df.columns:
             num = df[amount_col].values
             denom = df[AMOUNT_DENOM_COL].values
-            valid = ~np.isnan(num) & (num > 0) & ~np.isnan(denom) & (denom > 0)
+            amount_labels = (df[AMOUNT_LABEL_COL] >= AMOUNT_LABEL_THRESHOLD).astype(int).values
+            valid = ~np.isnan(num) & (num > 0) & ~np.isnan(denom) & (denom > 0) & ~np.isnan(amount_labels)
             p_mask = mask & valid
-            bad_amount = (num[p_mask] * labels[p_mask]).sum()
+            bad_amount = (num[p_mask] * amount_labels[p_mask]).sum()
             total_principal = denom[p_mask].sum()
             row["cum_bad_rate_amount"] = (
                 bad_amount / total_principal if total_principal > 0 else float("nan")
@@ -514,12 +517,13 @@ def compute_scheme_stats(
             "bad_rate_count": B / n if n > 0 else float("nan"),
             "bad_rate_amount": float("nan"),
         }
-        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns:
+        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns and AMOUNT_LABEL_COL in df.columns:
             num = seg_df[amount_col]
             denom = seg_df[AMOUNT_DENOM_COL]
-            valid = num.notna() & (num > 0) & denom.notna() & (denom > 0)
+            amount_label = seg_df[AMOUNT_LABEL_COL] >= AMOUNT_LABEL_THRESHOLD
+            valid = num.notna() & (num > 0) & denom.notna() & (denom > 0) & amount_label.notna()
             if valid.sum() > 0:
-                bad_amount = (num[valid] * seg_df.loc[valid, label_col].astype(int)).sum()
+                bad_amount = (num[valid] * amount_label[valid].astype(int)).sum()
                 total_principal = denom[valid].sum()
                 row["bad_rate_amount"] = bad_amount / total_principal
         rows.append(row)
@@ -626,12 +630,13 @@ def design_three_schemes(
             "reject_n": reject_n,
             "reject_rate": reject_rate,
         }
-        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns:
+        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns and AMOUNT_LABEL_COL in df.columns:
             num = approved[amount_col]
             denom = approved[AMOUNT_DENOM_COL]
-            valid = num.notna() & (num > 0) & denom.notna() & (denom > 0)
+            amount_label = approved[AMOUNT_LABEL_COL] >= AMOUNT_LABEL_THRESHOLD
+            valid = num.notna() & (num > 0) & denom.notna() & (denom > 0) & amount_label.notna()
             if valid.sum() > 0:
-                bad_amount = (num[valid] * approved.loc[valid.index, label_col].astype(int)).sum()
+                bad_amount = (num[valid] * amount_label[valid].astype(int)).sum()
                 total_principal = denom[valid].sum()
                 summary["pass_bad_rate_amount"] = bad_amount / total_principal
             else:
@@ -798,7 +803,7 @@ print(f"  申请表:   {len(info_df):,} 条")
 merged = score_df.merge(
     info_df[[
         "application_id", LABEL_COL, LABEL_COL_1M30, "principal",
-        "estimate_principal_remaining_mob3",
+        "estimate_principal_remaining_mob3", AMOUNT_LABEL_COL,
     ]],
     on="application_id",
     how="inner",
@@ -1135,7 +1140,7 @@ md.append(
 )
 md.append("")
 
-has_amount = AMOUNT_COL in tuning_valid.columns and AMOUNT_DENOM_COL in tuning_valid.columns
+has_amount = AMOUNT_COL in tuning_valid.columns and AMOUNT_DENOM_COL in tuning_valid.columns and AMOUNT_LABEL_COL in tuning_valid.columns
 append_key_decision_section(
     md,
     schemes,
