@@ -22,8 +22,8 @@ from scipy.stats import spearmanr, chi2_contingency, norm
 LABEL_COL = "duedate_3m_30"
 LABEL_COL_1M30 = "duedate_1m_30"
 CHIMERGE_LABEL_COLS = ["duedate_3m_30", "duedate_1m_30"]  # ChiMerge 合并时同时考虑这两个标签
-AMOUNT_COL = "estimate_principal_remaining_mob3"  # 金额坏账率分子权重
-AMOUNT_DENOM_COL = "principal"  # 金额坏账率分母
+AMOUNT_COL = "estimate_principal_remaining_mob3"  # 金额坏账率分子：MOB3 时点剩余本金
+AMOUNT_DENOM_COL = "principal"  # 金额坏账率分母：原贷本金
 LABEL_DISPLAY = "3m30+"
 SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 SCORE_HIGHER_IS_RISKIER = True
@@ -415,7 +415,7 @@ def compute_threshold_curve(
     df,
     score_col,
     label_col,
-    principal_col=None,
+    amount_col=None,
     n_thresholds=20,
     candidate_bins=None,
     higher_is_riskier=True,
@@ -423,7 +423,7 @@ def compute_threshold_curve(
     """在调优集上逐阈值计算累计指标。
 
     高分高风险时累计方向为 score <= threshold；高分低风险时为 score >= threshold。
-    若提供 principal_col，则同时计算金额口径坏账率。
+    若提供 amount_col，则同时计算金额口径坏账率（分子=SUM(amount_col WHERE dpd_days_ever_mob3>=30)，分母=SUM(principal)）。
     """
     scores = df[score_col].values
     labels = df[label_col].astype(int).values
@@ -453,8 +453,8 @@ def compute_threshold_curve(
             "marginal_n": float("nan"),
             "marginal_bad_rate_count": float("nan"),
         }
-        if principal_col and principal_col in df.columns and AMOUNT_DENOM_COL in df.columns:
-            num = df[principal_col].values
+        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns:
+            num = df[amount_col].values
             denom = df[AMOUNT_DENOM_COL].values
             valid = ~np.isnan(num) & (num > 0) & ~np.isnan(denom) & (denom > 0)
             p_mask = mask & valid
@@ -566,7 +566,7 @@ def compute_scheme_stats(
     label_col,
     auto_threshold,
     review_threshold,
-    principal_col=None,
+    amount_col=None,
     higher_is_riskier=True,
 ):
     """Compute segment stats for a single scheme."""
@@ -596,8 +596,8 @@ def compute_scheme_stats(
             "bad_rate_count": B / n if n > 0 else float("nan"),
             "bad_rate_amount": float("nan"),
         }
-        if principal_col and principal_col in df.columns and AMOUNT_DENOM_COL in df.columns:
-            num = seg_df[principal_col]
+        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns:
+            num = seg_df[amount_col]
             denom = seg_df[AMOUNT_DENOM_COL]
             valid = num.notna() & (num > 0) & denom.notna() & (denom > 0)
             if valid.sum() > 0:
@@ -620,7 +620,7 @@ def design_three_schemes(
     merged_stats,
     score_col,
     label_col,
-    principal_col=None,
+    amount_col=None,
     higher_is_riskier=True,
 ):
     """基于合并箱边界设计三套方案。
@@ -680,7 +680,7 @@ def design_three_schemes(
             label_col,
             cfg["auto_max"],
             cfg["review_max"],
-            principal_col,
+            amount_col,
             higher_is_riskier,
         )
         # summary row
@@ -708,8 +708,8 @@ def design_three_schemes(
             "reject_n": reject_n,
             "reject_rate": reject_rate,
         }
-        if principal_col and principal_col in df.columns and AMOUNT_DENOM_COL in df.columns:
-            num = approved[principal_col]
+        if amount_col and amount_col in df.columns and AMOUNT_DENOM_COL in df.columns:
+            num = approved[amount_col]
             denom = approved[AMOUNT_DENOM_COL]
             valid = num.notna() & (num > 0) & denom.notna() & (denom > 0)
             if valid.sum() > 0:
@@ -1148,7 +1148,7 @@ threshold_curve = compute_threshold_curve(
     tuning_valid,
     SCORE_COL,
     LABEL_COL,
-    principal_col=AMOUNT_COL,
+    amount_col=AMOUNT_COL,
     n_thresholds=20,
     candidate_bins=merged_bins[1:-1],
     higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
@@ -1175,7 +1175,7 @@ schemes = design_three_schemes(
     tuning_merged_stats,
     SCORE_COL,
     LABEL_COL,
-    principal_col=AMOUNT_COL,
+    amount_col=AMOUNT_COL,
     higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
 )
 
@@ -1202,7 +1202,7 @@ if len(oot_valid) > 0 and oot_merged_stats is not None:
         oot_merged_stats,
         SCORE_COL,
         LABEL_COL,
-        principal_col=AMOUNT_COL,
+        amount_col=AMOUNT_COL,
         higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
     )
 
@@ -1467,7 +1467,8 @@ md.append("")
 md.append(f"> 基于合并后的 {len(tuning_merged_stats)} 个风险等级，设计增长/平衡/保守三套方案。")
 md.append("> 每套方案将分数段划分为三区：**自动通过**（低风险）、**人工审核**（中风险）、**拒绝**（高风险）。")
 md.append(f"> 目前基于通过率与 {LABEL_DISPLAY} 坏账率做 trade-off 选择；EL/收入/UE 待补充经济数据后扩展。")
-md.append(f"> **注**：金额坏账率 = Σ(坏账样本的 `{AMOUNT_COL}`) / Σ(全量样本的 `{AMOUNT_DENOM_COL}`)，仅覆盖两列均非空且 > 0 的样本，与笔数口径的人群不完全一致，两者不能直接对比。")
+md.append(f"> **注**：{LABEL_DISPLAY} 坏账率（笔数） = SUM(`{LABEL_COL}`) / COUNT(`{LABEL_COL}` IS NOT NULL)，即 `{LABEL_COL}` 中 1/(1+0)。")
+md.append(f"> {LABEL_DISPLAY} 坏账率（金额） = SUM(`estimate_principal_remaining_mob3` WHERE `dpd_days_ever_mob3 >= 30`) / SUM(`principal`)，仅计两列均非空且 > 0 的样本，分子与分母人群不完全一致，两者不能直接对比。")
 md.append("")
 
 for scheme_name, s in schemes.items():

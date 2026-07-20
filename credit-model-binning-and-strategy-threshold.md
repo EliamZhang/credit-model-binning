@@ -289,8 +289,8 @@ S_c=\{j:score_j\ge c\}
 | 指标 | 公式 | 说明 |
 |---|---|---|
 | 累计通过率 | \(\lvert S_c\rvert/N\) | 阈值以上申请数占全量申请数 |
-| 实际坏账率（账户口径） | \(\sum_{j\in S_c}y_j/\lvert S_c\rvert\) | 每笔贷款等权 |
-| 实际坏账率（金额口径） | \(\sum_{j\in S_c}P_jy_j/\sum_{j\in S_c}P_j\) | 按本金或 EAD 加权 |
+| 实际坏账率（账户口径） | \(\sum_{j\in S_c}y_j/\lvert S_c\rvert\) | `y = duedate_3m_30`，即 `duedate_3m_30` 列中 1/(1+0)，空值不计入分母 |
+| 实际坏账率（金额口径） | \(\sum_{j\in S_c(y_j=1)} R_j/\sum_{j\in S_c} P_j\) | R=`estimate_principal_remaining_mob3`（MOB3 剩余本金），P=`principal`（原贷本金），y=1 WHERE `dpd_days_ever_mob3 >= 30`，两列均非空且>0 |
 | 累计 EL | \(\sum_{j\in S_c}PD_j\times LGD_j\times EAD_j\) | 预计本金损失 |
 | 预计收入 | \(\sum_{j\in S_c}Revenue_j\) | 应考虑违约、提前还款和使用率 |
 | 风险后收入 | 预计收入 − 累计 EL | 不包含其他经营成本 |

@@ -165,11 +165,11 @@ END AS fpd7_flag
 | 维度 | 说明 | 适用场景 |
 |---|---|---|
 | 标的率（按笔数） | 每笔贷款等权，`SUM(y) / COUNT(*)` | 衡量多少比例的**人**逾期 |
-| 金额率（按本金） | 本金加权，`SUM(principal * y) / SUM(principal)` | 衡量多少比例的**钱**逾期 |
+| 金额率（MOB3 剩余本金 / 原贷本金） | 分子: `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30)`，分母: `SUM(principal)` | 衡量多少比例的**敞口**逾期 |
 
 | 指标 | 标的率（笔数） | 金额率（本金加权） | 说明 |
 |---|---|---|---|
-| 逾期率 | `AVG(y)` | `SUM(principal * y) / SUM(principal)` | y=1 的占比，NULL 不计分母 |
+| 逾期率 | `SUM(duedate_3m_30) / COUNT(duedate_3m_30 IS NOT NULL)`，即 1/(1+0) | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30) / SUM(principal)`，两列均非空且 > 0 | 笔数：`duedate_3m_30` 列；金额：分子 MOB3 剩余本金、分母原贷本金 |
 | AUC | 梯形法：`SUM((tpr + next_tpr) / 2 * (fpr - next_fpr))` | 同左 | ROC 曲线下面积，排序级指标不区分口径 |
 | Pearson 相关系数 | `CORR(score_a, score_b)` | 同左 | 两模型分数的线性相关性 |
 | PSI | 参考主文档分箱方法论 | 同左 | 分数分布稳定性 |
@@ -184,7 +184,6 @@ END AS fpd7_flag
 
 ## 编辑约定
 
-- 保持中文术语一致（"坏账率"非"违约率"，"通过率"非"批准率"）
 - 新增章节遵循现有编号层级（中文数字章 → 数字节）
 - 参考资料使用编号列表，格式 `[来源名称](URL)`
 - 文件/列名使用英文小写下划线命名
