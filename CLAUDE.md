@@ -160,21 +160,53 @@ END AS fpd7_flag
 
 ### 风险指标公式
 
-两种计算口径：
+#### 分箱级指标（按箱计算）
 
-| 维度 | 说明 | 适用场景 |
+| 指标 | 公式 | 说明 |
 |---|---|---|
-| 标的率（按笔数） | 每笔贷款等权，`SUM(y) / COUNT(*)` | 衡量多少比例的**人**逾期 |
-| 金额率（MOB3 剩余本金 / 原贷本金） | 分子: `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30)`，分母: `SUM(principal)` | 衡量多少比例的**敞口**逾期 |
+| 坏账率 | `bad_rate = B / n` | 箱内坏样本占比，B = SUM(label)，n = 箱内样本量 |
+| SE | `SE = sqrt(bad_rate * (1 - bad_rate) / n)` | 坏账率标准误 |
+| WOE | `WOE = ln(B_pct / G_pct)` | B_pct = 箱内坏/总坏，G_pct = 箱内好/总好 |
+| IV（单箱） | `IV_component = (B_pct - G_pct) * WOE` | 总 IV = SUM(各箱 IV_component) |
+| Lift | `lift = bad_rate / overall_bad_rate` | >1 表示该箱比平均更差 |
+| 累计 Lift | `cum_lift = cum_bad_rate / overall_bad_rate` | 累计坏账率 / 整体坏账率 |
 
-| 指标 | 标的率（笔数） | 金额率（本金加权） | 说明 |
-|---|---|---|---|
-| 逾期率 | `SUM(duedate_3m_30) / COUNT(duedate_3m_30 IS NOT NULL)`，即 1/(1+0) | `SUM(estimate_principal_remaining_mob3 WHERE dpd_days_ever_mob3 >= 30) / SUM(principal)`，两列均非空且 > 0 | 笔数：`duedate_3m_30` 列；金额：分子 MOB3 剩余本金、分母原贷本金 |
-| AUC | 梯形法：`SUM((tpr + next_tpr) / 2 * (fpr - next_fpr))` | 同左 | ROC 曲线下面积，排序级指标不区分口径 |
-| Pearson 相关系数 | `CORR(score_a, score_b)` | 同左 | 两模型分数的线性相关性 |
-| PSI | 参考主文档分箱方法论 | 同左 | 分数分布稳定性 |
+#### 累计指标（逐阈值）
 
-> 金额逾期率更能反映真实风险敞口，实际分析建议两者同时汇报。
+| 指标 | 公式 | 说明 |
+|---|---|---|
+| 累计通过率 | `cum_pass_rate = cum_n / total_N` | cum_n = score ≤ threshold 的样本量 |
+| 累计坏账率（笔数） | `cum_bad_rate = cum_B / cum_n` | cum_B = score ≤ threshold 的坏样本量 |
+| 边际坏账率 | `marginal_B / marginal_n` | marginal_n = cum_n[i] - cum_n[i-1]（阈值间增量） |
+| 累计坏账率（金额） | `SUM(estimate_principal_remaining_mob3 * label) / SUM(principal)` | 仅计两列均非空且 > 0，label = 1 iff dpd_days_ever_mob3 >= 30 |
+
+#### 模型级排序指标
+
+| 指标 | 公式 | 说明 |
+|---|---|---|
+| AUC | 梯形法：`SUM((tpr[i] + tpr[i-1]) / 2 * (fpr[i] - fpr[i-1]))` | TPR = cum_bad / total_bad，FPR = cum_good / total_good |
+| KS | `max(\|TPR - FPR\|)` | Kolmogorov-Smirnov，分数级排序指标 |
+| Spearman ρ | `spearmanr(bin_index, bad_rate)` | 分箱序与坏账率的秩相关系数，检验单调性 |
+| Pearson r | `CORR(score_a, score_b)` | 两模型分数的线性相关 |
+
+#### 分布稳定性
+
+| 指标 | 公式 | 说明 |
+|---|---|---|
+| PSI | `SUM((actual_pct - expected_pct) * ln(actual_pct / expected_pct))` | expected = 调优集各箱占比，actual = OOT 集各箱占比 |
+| 卡方检验（相邻箱） | `chi2_contingency([[B_a, G_a], [B_b, G_b]])` | 判断两箱好坏分布是否独立，p < 0.05 显著 |
+| Z 检验（相邻箱） | `z = (r_b - r_a) / sqrt(r_a*(1-r_a)/n_a + r_b*(1-r_b)/n_b)` | p = 2 * (1 - Φ(\|z\|))，判断两箱坏账率差异 |
+
+#### 方案指标
+
+| 指标 | 公式 | 说明 |
+|---|---|---|
+| 通过率 | `pass_rate = n_approved / total` | n_approved = score ≤ review_max 的样本数 |
+| 坏账率（笔数） | `pass_bad_rate = B_approved / n_approved` | 通过人群中 label=1 的占比 |
+| 坏账率（金额） | `SUM(amount_col * label) / SUM(principal)` WHERE score ≤ review_max | amount_col = estimate_principal_remaining_mob3 |
+| 拒绝率 | `reject_rate = reject_n / total` | reject_n = score > review_max 的样本数 |
+
+> 金额逾期率更能反映真实风险敞口，实际分析建议两者同时汇报。AUC/KS 为分数级排序指标，不随分箱变化，合并前后一致。
 
 ## 文档风格
 
