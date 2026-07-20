@@ -2,13 +2,13 @@
 分箱主脚本
 ==========
 对策略调优样本进行等频 20 箱初分，ChiMerge 合并相似相邻箱，输出合并前后的
-风险指标及 OOT 跨期验证。
+风险指标及 OOT 跨期验证，包含累计阈值曲线、三套方案设计和转化率漏斗。
 
 使用方式：
     python scr/binning.py
 
 输出：
-    res/binning_result.md  — 分箱结果 Markdown 表格（含合并前后对比）
+    res/binning_result.md  — 分箱结果 Markdown 表格
 """
 
 import pandas as pd
