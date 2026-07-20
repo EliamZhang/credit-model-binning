@@ -2,7 +2,7 @@
 分箱主脚本
 ==========
 对策略调优样本进行等频 20 箱初分，ChiMerge 合并相似相邻箱，输出合并前后的
-风险指标及 OOT 跨期验证，包含累计阈值曲线、三套方案设计和转化率漏斗。
+风险指标及 OOT 跨期验证，包含累计阈值曲线和三套方案设计。
 
 使用方式：
     python scr/binning.py
@@ -29,7 +29,6 @@ SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 SCORE_HIGHER_IS_RISKIER = True
 N_BINS = 20
 OOT_CUT_DATE = "2025-10-21"
-FPD7_REF_DATE = "2026-07-20"     # FPD7 计算参考日期
 
 # ChiMerge 参数
 CHIMERGE_MIN_BINS = 6          # 最少保留箱数
@@ -479,87 +478,6 @@ def compute_threshold_curve(
     return curve
 
 
-def compute_conversion_funnel(df, score_col, bins):
-    """计算全量申请转化漏斗，按分箱拆分。
-
-    完整漏斗：申请 → 完成 → 通过 → 放款
-    返回整体和各箱的转化率明细。
-    """
-    total = len(df)
-
-    # 申请阶段标签
-    df = df.copy()
-    df["is_completed"] = ~df["application_status"].isin(["0.Incomplete"])
-    df["is_approved"] = df["application_status"].str.startswith(("3", "4"))
-    df["is_declined"] = df["application_status"] == "2.3.Risk Declined"
-    df["is_withdrawn"] = df["application_status"] == "2.1.Submitted Withdrawn"
-    df["is_funded"] = df["application_status"] == "4.Funded"
-    df["is_deal"] = df["status"].isin(["Active_Account", "Closed", "Blocked"])
-
-    metrics = {
-        "apply_cnt": total,
-        "completed_cnt": int(df["is_completed"].sum()),
-        "approved_cnt": int(df["is_approved"].sum()),
-        "declined_cnt": int(df["is_declined"].sum()),
-        "withdrawn_cnt": int(df["is_withdrawn"].sum()),
-        "funded_cnt": int(df["is_funded"].sum()),
-        "deal_cnt": int(df["is_deal"].sum()),
-        "completion_rate": df["is_completed"].mean(),
-        "approval_rate": df[df["is_completed"]]["is_approved"].mean() if df["is_completed"].sum() > 0 else 0,
-        "decline_rate": df[df["is_completed"]]["is_declined"].mean() if df["is_completed"].sum() > 0 else 0,
-        "withdraw_rate": df[df["is_completed"]]["is_withdrawn"].mean() if df["is_completed"].sum() > 0 else 0,
-        "funding_rate": df[df["is_approved"]]["is_funded"].mean() if df["is_approved"].sum() > 0 else 0,
-        "overall_funding_rate": df["is_funded"].sum() / total,
-    }
-
-    # 按分箱拆解
-    df["bin"] = pd.cut(df[score_col], bins=bins, duplicates="drop", include_lowest=True)
-    df_binned = df[df["bin"].notna()].copy()
-
-    bin_stats = []
-    for bin_name, group in df_binned.groupby("bin", observed=False):
-        n = len(group)
-        completed = group[group["is_completed"]]
-        approved = group[group["is_approved"]]
-        row = {
-            "bin": str(bin_name),
-            "apply": n,
-            "completed": len(completed),
-            "approved": len(approved),
-            "declined": int(group["is_declined"].sum()),
-            "withdrawn": int(group["is_withdrawn"].sum()),
-            "funded": int(group["is_funded"].sum()),
-            "deal": int(group["is_deal"].sum()),
-            "completion_rate": group["is_completed"].mean(),
-            "approval_rate": completed["is_approved"].mean() if len(completed) > 0 else 0,
-            "decline_rate": completed["is_declined"].mean() if len(completed) > 0 else 0,
-            "withdraw_rate": completed["is_withdrawn"].mean() if len(completed) > 0 else 0,
-            "funding_rate": approved["is_funded"].mean() if len(approved) > 0 else 0,
-            "overall_funding_rate": group["is_funded"].sum() / n,
-        }
-        bin_stats.append(row)
-
-    # Sort by bin order (low score = low risk = first bin)
-    bin_stats.sort(key=lambda x: float(x["bin"].strip("([])").split(",")[0].strip()))
-    for i, row in enumerate(bin_stats):
-        row["bin_no"] = i + 1
-
-    return metrics, bin_stats
-
-
-def format_triple(row):
-    """Format a segment row for the three-scheme table."""
-    score_range = f"[{row.score_min:.4f}, {row.score_max:.4f})"
-    return (
-        f"| {row.segment} "
-        f"| {score_range} "
-        f"| {row.n:>6,} "
-        f"| {row.pct:.2%} "
-        f"| {row.bad_rate_count:.4%} "
-        f"| {row.bad_rate_amount:.4%} |"
-    )
-
-
 def compute_scheme_stats(
     df,
     score_col,
@@ -879,26 +797,13 @@ print(f"  申请表:   {len(info_df):,} 条")
 
 merged = score_df.merge(
     info_df[[
-        "application_id", LABEL_COL, LABEL_COL_1M30, "principal", "status", "application_status",
-        "first_payment_scheduled_date", "first_payment_days_past_due_ever",
+        "application_id", LABEL_COL, LABEL_COL_1M30, "principal",
         "estimate_principal_remaining_mob3",
     ]],
     on="application_id",
     how="inner",
 )
 print(f"  关联后:   {len(merged):,} 条")
-
-# FPD7 标签
-merged["fpd7_flag"] = np.nan
-fpd7_ref = pd.Timestamp(FPD7_REF_DATE)
-first_pay_date = pd.to_datetime(merged["first_payment_scheduled_date"], errors="coerce")
-funded_mask = merged["application_status"] == "4.Funded"
-fpd7_eligible = funded_mask & first_pay_date.notna() & (first_pay_date < fpd7_ref - pd.Timedelta(days=7))
-merged.loc[fpd7_eligible & (merged["first_payment_days_past_due_ever"] > 7), "fpd7_flag"] = 1
-merged.loc[fpd7_eligible & (merged["first_payment_days_past_due_ever"] <= 7), "fpd7_flag"] = 0
-fpd7_valid_n = fpd7_eligible.sum()
-fpd7_bad_n = int((merged["fpd7_flag"] == 1).sum())
-print(f"  FPD7 有效样本: {fpd7_valid_n:,}，坏样本: {fpd7_bad_n:,}（FPD7 = {fpd7_bad_n/fpd7_valid_n:.4%}）" if fpd7_valid_n > 0 else "  FPD7 有效样本: 0")
 
 # ============================================================
 # 2. 样本划分
@@ -1207,75 +1112,10 @@ if len(oot_valid) > 0 and oot_merged_stats is not None:
     )
 
 # ============================================================
-# 12. 转化率分析（全量申请，不区分调优/OOT）
+# 12. 输出 Markdown
 # ============================================================
 print("\n" + "=" * 60)
-print("12. 转化率分析")
-print("=" * 60)
-
-funnel_metrics, funnel_bins = compute_conversion_funnel(merged, SCORE_COL, merged_bins_for_scoring)
-
-print(f"  申请: {funnel_metrics['apply_cnt']:,}")
-print(f"  完成率: {funnel_metrics['completion_rate']:.2%}")
-print(f"  通过率（完成中）: {funnel_metrics['approval_rate']:.2%}")
-print(f"  拒绝率（完成中）: {funnel_metrics['decline_rate']:.2%}")
-print(f"  放款率（通过中）: {funnel_metrics['funding_rate']:.2%}")
-print(f"  整体放款率（申请 → 放款）: {funnel_metrics['overall_funding_rate']:.2%}")
-
-# ============================================================
-# 13. FPD7 标签对比分析
-# ============================================================
-print("\n" + "=" * 60)
-print("13. FPD7 标签对比分析")
-print("=" * 60)
-
-FPD7_LABEL = "fpd7_flag"
-
-# 在 tuning 和 OOT 中筛选 FPD7 有效样本
-tuning_fpd7 = tuning_valid[tuning_valid[FPD7_LABEL].notna()].copy()
-oot_fpd7 = oot_valid[oot_valid[FPD7_LABEL].notna()].copy() if len(oot_valid) > 0 else pd.DataFrame()
-
-print(f"  调优集 FPD7 有效: {len(tuning_fpd7):,}，坏样本: {int(tuning_fpd7[FPD7_LABEL].sum()):,}")
-if len(tuning_fpd7) > 0:
-    fpd7_tuning_auc, fpd7_tuning_ks = compute_auc_ks(
-        tuning_fpd7[SCORE_COL],
-        tuning_fpd7[FPD7_LABEL],
-        higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
-    )
-    print(f"  调优集 FPD7 AUC = {fpd7_tuning_auc:.4f}，KS = {fpd7_tuning_ks:.4f}")
-
-if len(oot_fpd7) > 0:
-    fpd7_oot_auc, fpd7_oot_ks = compute_auc_ks(
-        oot_fpd7[SCORE_COL],
-        oot_fpd7[FPD7_LABEL],
-        higher_is_riskier=SCORE_HIGHER_IS_RISKIER,
-    )
-    print(f"  OOT 集 FPD7 AUC = {fpd7_oot_auc:.4f}，KS = {fpd7_oot_ks:.4f}")
-else:
-    fpd7_oot_auc, fpd7_oot_ks = float("nan"), float("nan")
-
-# 合并后分箱 × FPD7（调优集）
-fpd7_bin_stats = None
-if len(tuning_fpd7) > 0:
-    tuning_fpd7["merged_bin"] = pd.cut(
-        tuning_fpd7[SCORE_COL],
-        bins=merged_bins_for_scoring,
-        duplicates="drop",
-        include_lowest=True,
-    )
-    fpd7_bin_stats, fpd7_bin_N, fpd7_bin_B = compute_bin_stats(
-        tuning_fpd7, SCORE_COL, FPD7_LABEL, bin_col="merged_bin"
-    )
-    fpd7_overall = fpd7_bin_B / fpd7_bin_N
-    print(f"  FPD7 整体坏账率（调优）: {fpd7_overall:.4%}")
-    for row in fpd7_bin_stats.itertuples():
-        print(f"    箱{row.Index}: FPD7={row.bad_rate:.4%}, n={row.n:,}")
-
-# ============================================================
-# 14. 输出 Markdown
-# ============================================================
-print("\n" + "=" * 60)
-print("14. 输出结果")
+print("12. 输出结果")
 print("=" * 60)
 
 md = []
@@ -1576,102 +1416,6 @@ md.append("")
 md.append(f"> **推荐**：平衡方案自动通过 {schemes['平衡方案（推荐）']['segments'][0]['pct']:.1%} 低风险客群（{LABEL_DISPLAY} 坏账率 {schemes['平衡方案（推荐）']['segments'][0]['bad_rate_count']:.2%}），人工审核 {schemes['平衡方案（推荐）']['segments'][1]['pct']:.1%}，仅拒绝最高风险 {schemes['平衡方案（推荐）']['reject_rate']:.1%}。三套方案形成清晰梯度——保守（通过率 {schemes['保守方案']['pass_rate']:.0%}，{LABEL_DISPLAY} 坏账率最低）、平衡（通过率 {schemes['平衡方案（推荐）']['pass_rate']:.0%}，风险与审核兼顾）、增长（通过率 {schemes['增长方案']['pass_rate']:.0%}，不做硬拒绝，以审核替代拒绝），建议常态使用平衡方案，根据风险偏好和审核产能切换。")
 md.append("")
 
-# ---- 转化率漏斗 ----
-md.append("## 十、转化率漏斗")
-md.append("")
-md.append(f"> 在全量申请（不分调优/OOT）上，按合并后的 {len(tuning_merged_stats)} 个风险等级拆分审批漏斗。")
-md.append("> 漏斗路径：申请 → 完成（排除 Incomplete）→ 通过（status 以 3/4 开头）→ 放款（4.Funded）。")
-md.append("")
-
-# Overall funnel
-m = funnel_metrics
-md.append("### 整体漏斗")
-md.append("")
-md.append("| 阶段 | 数量 | 占比 |")
-md.append("|---:|---:|---:|")
-md.append(f"| 申请 | {m['apply_cnt']:,} | 100.0% |")
-md.append(f"| └ 完成（排除 0.Incomplete） | {m['completed_cnt']:,} | {m['completion_rate']:.2%} |")
-md.append(f"| 　└ 通过（3.x / 4.x） | {m['approved_cnt']:,} | {m['approval_rate']:.2%}（完成中） |")
-md.append(f"| 　　└ 放款（4.Funded） | {m['funded_cnt']:,} | {m['funding_rate']:.2%}（通过中） |")
-md.append(f"| 　└ 拒绝（2.3.Risk Declined） | {m['declined_cnt']:,} | {m['decline_rate']:.2%}（完成中） |")
-md.append(f"| 　└ 撤回（2.1.Submitted Withdrawn） | {m['withdrawn_cnt']:,} | {m['withdraw_rate']:.2%}（完成中） |")
-md.append(f"| 整体放款率（申请 → 放款） | {m['funded_cnt']:,} | {m['overall_funding_rate']:.2%} |")
-md.append("")
-
-# Per-bin funnel
-md.append("### 各风险等级转化率")
-md.append("")
-md.append("| 箱序 | 分数区间 | 申请 | 完成率 | 通过率 | 拒绝率 | 放款率 | 整体放款率 |")
-md.append("|---:|---:|---:|---:|---:|---:|---:|---:|")
-for row in funnel_bins:
-    md.append(
-        f"| {row['bin_no']} "
-        f"| {row['bin']} "
-        f"| {row['apply']:,} "
-        f"| {row['completion_rate']:.2%} "
-        f"| {row['approval_rate']:.2%} "
-        f"| {row['decline_rate']:.2%} "
-        f"| {row['funding_rate']:.2%} "
-        f"| {row['overall_funding_rate']:.2%} |"
-    )
-md.append("")
-md.append("> **解读**：低分箱（低风险）的完成率和通过率应更高；若低风险客群拒绝率异常偏高，说明风控策略可能过于严苛。")
-md.append("")
-
-# ---- FPD7 标签对比 ----
-md.append("## 十一、FPD7 标签对比")
-md.append("")
-md.append(f"> FPD7：首期支付逾期 7 天。计算口径：`application_status = '4.Funded'` 且 `first_payment_scheduled_date < {FPD7_REF_DATE} - 7` 天。")
-md.append("> 满足条件但 `first_payment_days_past_due_ever <= 7` 的为 0，`> 7` 的为 1，其余为 NULL。")
-md.append(f"> FPD7 有效样本仅覆盖已放款且首期到期满 7 天的订单，样本量远小于 `{LABEL_COL}`，但作为更早期的风险信号可提供补充视角。")
-md.append("")
-
-# FPD7 overall metrics
-md.append("### FPD7 整体指标")
-md.append("")
-md.append("| 指标 | 调优集 | OOT 集 |")
-md.append("|---:|---:|---:|")
-md.append(f"| 有效样本 | {len(tuning_fpd7):,} | {len(oot_fpd7):,} |" if len(oot_fpd7) > 0 else f"| 有效样本 | {len(tuning_fpd7):,} | — |")
-if len(tuning_fpd7) > 0:
-    md.append(f"| FPD7 坏账率 | {int(tuning_fpd7[FPD7_LABEL].sum())/len(tuning_fpd7):.4%} "
-             f"| {int(oot_fpd7[FPD7_LABEL].sum())/len(oot_fpd7):.4%} |" if len(oot_fpd7) > 0 else f"| FPD7 坏账率 | {int(tuning_fpd7[FPD7_LABEL].sum())/len(tuning_fpd7):.4%} | — |")
-    md.append(f"| AUC | {fpd7_tuning_auc:.4f} | {fpd7_oot_auc:.4f} |" if not np.isnan(fpd7_oot_auc) else f"| AUC | {fpd7_tuning_auc:.4f} | — |")
-    md.append(f"| KS | {fpd7_tuning_ks:.4f} | {fpd7_oot_ks:.4f} |" if not np.isnan(fpd7_oot_ks) else f"| KS | {fpd7_tuning_ks:.4f} | — |")
-md.append("")
-
-# FPD7 vs duedate_3m_30 comparison
-md.append("### AUC / KS 对比（调优集）")
-md.append("")
-md.append("| 标签 | AUC | KS | 有效样本 | 坏账率 |")
-md.append("|---:|---:|---:|---:|---:|")
-md.append(f"| `{LABEL_COL}` | {tuning_auc:.4f} | {tuning_ks:.4f} | {tuning_N:,} | {tuning_bad_rate:.4%} |")
-if len(tuning_fpd7) > 0:
-    fpd7_rate = int(tuning_fpd7[FPD7_LABEL].sum()) / len(tuning_fpd7)
-    md.append(f"| `{FPD7_LABEL}` | {fpd7_tuning_auc:.4f} | {fpd7_tuning_ks:.4f} | {len(tuning_fpd7):,} | {fpd7_rate:.4%} |")
-md.append("")
-md.append("> FPD7 作为早期风险信号，其 AUC/KS 通常低于成熟期标签（3m_30），但若差异过大，说明模型对早期风险的排序能力不足。")
-md.append("")
-
-# FPD7 by merged bins
-if fpd7_bin_stats is not None and len(fpd7_bin_stats) > 0:
-    md.append("### 合并后分箱 × FPD7（调优集）")
-    md.append("")
-    md.append("| 箱序 | 分数区间 | FPD7 有效样本 | FPD7 坏样本 | FPD7 坏账率 | 3m_30 坏账率（同箱） |")
-    md.append("|---:|---:|---:|---:|---:|---:|")
-    for i, (f_row, t_row) in enumerate(zip(fpd7_bin_stats.itertuples(), tuning_merged_stats.itertuples())):
-        score_range = f"[{f_row.score_min:.4f}, {f_row.score_max:.4f})"
-        md.append(
-            f"| {i+1} "
-            f"| {score_range} "
-            f"| {f_row.n:>6,} "
-            f"| {int(f_row.B):>6,} "
-            f"| {f_row.bad_rate:.4%} "
-            f"| {t_row.bad_rate:.4%} |"
-        )
-    md.append("")
-    md.append("> 对比同一分箱内 FPD7 与 3m_30 的坏账率，可观察早期风险信号与成熟期风险的一致性。若某箱 FPD7 显著低于 3m_30，说明该客群的首期表现较好但后续恶化（或反之）。")
-    md.append("")
-
 # 写入文件
 out_path = os.path.join(RES_DIR, "binning_result.md")
 with open(out_path, "w", encoding="utf-8") as f:
@@ -1685,7 +1429,5 @@ if oot_merged_bad_rate is not None:
     print(f"  OOT（合并后）: {oot_merged_N:,} 条，坏账率 {oot_merged_bad_rate:.4%}，IV {oot_merged_IV:.4f}，ρ {oot_merged_rho:.4f}，AUC {oot_auc:.4f}，KS {oot_ks:.4f}")
     if merged_psi is not None:
         print(f"  PSI = {merged_psi:.4f}")
-if len(tuning_fpd7) > 0:
-    print(f"  FPD7（调优）: 有效 {len(tuning_fpd7):,}，坏账率 {int(tuning_fpd7[FPD7_LABEL].sum())/len(tuning_fpd7):.4%}，AUC {fpd7_tuning_auc:.4f}，KS {fpd7_tuning_ks:.4f}")
 
 print("\n完成。")
