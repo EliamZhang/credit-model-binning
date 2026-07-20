@@ -126,7 +126,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `duedate_3m_30` | 第三期 30 DPD（常用目标） |
 | `duedate_4m_30` | 第四期 30 DPD |
 
-每条记录为 0/1/NULL。当前分箱脚本使用 `duedate_3m_30` 作为风险标签。
+每条记录为 0/1/NULL。脚本中两个标签的分工：
+
+- `duedate_3m_30`（`LABEL_COL`）：主标签，计算坏账率、排序单调性、AUC/KS 均基于此列
+- `duedate_1m_30`：辅助标签，ChiMerge 合并时要求两列的卡方检验**同时满足**才允许合并（[scr/binning.py:24](scr/binning.py#L24) `CHIMERGE_LABEL_COLS`）
 
 ### FPD7（首期支付逾期 7 天）
 
