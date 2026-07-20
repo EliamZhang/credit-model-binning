@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 推荐方案：**等频 20 箱 → 单调/统计合并 → 业务调整 → 收益阈值优化**。
 
+[scr/binning.py](scr/binning.py) 是本方法论的程序实现载体，沿文档的 8 步流程（0.定义口径 → 7.上线治理）逐步落地。当前完成步骤 2，后续步骤 3-7 待扩展。修改脚本前先看文档对应章节了解业务口径，新增功能后同步更新 [scr/binning.md](scr/binning.md)。
+
 三个模型分的关系：`aus_old_risk_apply_appmodel`（申请模型）和 `aus_old_risk_bid_submodel`（交易特征子模型）是子模型，融合后得到 `aus_old_risk_bid_mltmodel`（多头融合模型），分箱以 mlt 模型为主。
 
 ## 数据文件
@@ -26,6 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 脚本
 
 - [scr/binning.py](scr/binning.py) — 分箱主脚本。读取 mlt 模型分和申请表，按 `application_id` 关联获取标签 `duedate_3m_30`，以 2026-01-01 划分策略调优集/OOT 集，输出 `res/binning_result.md`
+- [scr/binning.md](scr/binning.md) — 分箱方法论文档，与 binning.py 逻辑同步更新
 - [scr/application_info_extract.sql](scr/application_info_extract.sql) — 从 `ba.customer_profile_rawdata` 提取申请信息的原始 SQL。筛选 `application_time >= '2025-01-01'`。当前本地 `application_info.csv` 由 Spark 导出，非此 SQL 产出，SQL 仅作字段参考
 
 ## 转化率计算（原始 SQL 口径参考）
@@ -165,3 +168,13 @@ END AS fpd7_flag
 - 新增章节遵循现有编号层级（中文数字章 → 数字节）
 - 参考资料使用编号列表，格式 `[来源名称](URL)`
 - 文件/列名使用英文小写下划线命名
+
+## 协作偏好
+
+- **记忆统一管理**：所有项目记忆、用户偏好、对话要求统一记录在本 CLAUDE.md 中，不使用 `.claude/memory/` 目录
+- **数据文件**：合并后的文件替换原始文件，中间文件及时删除精简目录结构
+- **输出格式**：脚本输出 Markdown（.md），不输出 CSV
+- **命名规范**：脚本和输出文件使用有意义的英文名，如 `binning.py` → `binning_result.md`
+- **同步更新**：CLAUDE.md 和 scr/*.md 文档随代码变更同步更新，保持与实际情况一致
+- **分支策略**：`master` 为正式分支，开发使用 `staging` 分支，功能完成后提交推送
+- **脚本与文档关系**：[credit-model-binning-and-strategy-threshold.md](credit-model-binning-and-strategy-threshold.md) 是方法论蓝图（8 步流程），[scr/binning.py](scr/binning.py) 是程序实现载体，沿文档步骤逐步落地
