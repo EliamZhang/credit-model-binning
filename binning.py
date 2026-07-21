@@ -2671,6 +2671,9 @@ def configure_report_sheet(
     ws.freeze_panes = freeze_panes
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = zoom
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.protection = openpyxl.styles.Protection(locked=False)
 
 
 def write_note_block(
