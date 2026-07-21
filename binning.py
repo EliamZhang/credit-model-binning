@@ -3188,37 +3188,18 @@ def export_excel_report(results: PipelineResults) -> Path:
                 f"accepted_{PRIMARY_TARGET.key}_cnt_bad_rate",
             ],
         )
-    row = write_note_block(
-        ws,
-        row,
-        "三、推荐阅读顺序",
-        "1）先看本页的策略规则、通过规模和接纳风险；\n"
-        "2）再看《2.阈值与策略》，比较保守、平衡、增长三套方案；\n"
-        "3）看《3.最终分箱表现》，确认风险是否随分数单调上升；\n"
-        "4）看《4.稳定性验证》，确认 OOT、PSI、AUC、KS 和跨月表现；\n"
-        "5）分箱过程、数据质量和显著性检验主要用于技术复核。",
-    )
-    row = write_note_block(
-        ws,
-        row,
-        "四、重要提示",
-        "本报告中的保守、平衡、增长方案由 Train 风险水平和探索性约束动态生成，"
-        "用于帮助比较风险与规模，不等于最终上线审批结果。上线前应替换或补充正式的"
-        "风险上限、收益、EL、人工审核产能和业务风险偏好。",
-        fill=WARNING_FILL,
-    )
-    row = series_block(ws, row, "五、分箱验证结论", results.validation_decision)
-    row = write_block(ws, row, "六、样本范围与成熟度", split_summary_view)
-    row = write_block(ws, row, "七、核心指标怎么看", build_metric_glossary())
+    row = series_block(ws, row, "三、分箱验证结论", results.validation_decision)
+    row = write_block(ws, row, "四、样本范围与成熟度", split_summary_view)
+    row = write_block(ws, row, "五、核心指标怎么看", build_metric_glossary())
     row = write_block(
         ws,
         row,
-        "八、探索性策略约束",
+        "六、探索性策略约束",
         flatten_strategy_configs(results.strategy_configs),
     )
-    row = series_block(ws, row, "九、运行配置", config_series)
-    row = series_block(ws, row, "十、数据关键检查", results.key_checks)
-    row = write_block(ws, row, "十一、风险标签来源", results.target_derivation_summary)
+    row = series_block(ws, row, "七、运行配置", config_series)
+    row = series_block(ws, row, "八、数据关键检查", results.key_checks)
+    row = write_block(ws, row, "九、风险标签来源", results.target_derivation_summary)
     auto_width(ws)
     configure_report_sheet(ws)
 
@@ -3228,7 +3209,7 @@ def export_excel_report(results: PipelineResults) -> Path:
     row = write_note_block(
         ws,
         row,
-        "阅读提示",
+        "使用指引",
         "先比较三套方案的自动通过率、人工审核率、拒绝率和接纳风险；"
         "再通过敏感性矩阵观察审核产能或风险上限变化时，接纳率如何变化。"
         "阈值曲线用于进一步定位具体分数边界。",
@@ -3297,7 +3278,7 @@ def export_excel_report(results: PipelineResults) -> Path:
     row = write_note_block(
         ws,
         row,
-        "阅读提示",
+        "使用指引",
         "优先查看取整边界下的 Train 和 OOT 表现：箱内风险率应整体随分数升高而上升；"
         "累计通过率用于观察规模，累计风险率用于评估放宽阈值后的整体风险。"
         "完整分子、分母、金额风险和置信区间字段仍保留在表格后部。",
@@ -3361,7 +3342,7 @@ def export_excel_report(results: PipelineResults) -> Path:
     row = write_note_block(
         ws,
         row,
-        "阅读提示",
+        "使用指引",
         "本页用于复核分箱是如何从初始等频箱逐步合并为最终风险等级。"
         "风险策略人员通常先看最终合箱映射和最终边界；分析人员可继续查看初始诊断和每一步合箱原因。",
     )
@@ -3391,7 +3372,7 @@ def export_excel_report(results: PipelineResults) -> Path:
     row = write_note_block(
         ws,
         row,
-        "阅读提示",
+        "使用指引",
         "本页主要验证精确边界取整后是否引起明显样本迁移或风险变化，"
         "以及相邻箱风险差异是否具有统计显著性。它用于辅助判断，不应机械替代业务可解释性和策略约束。",
     )
