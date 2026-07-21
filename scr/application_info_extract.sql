@@ -1,39 +1,41 @@
 SELECT
+    -- ID
     user_id,
     application_id,
+
+    -- 时间
     application_time,
     application_date,
-    application_week,
     application_month,
+
+    -- 状态（漏斗用）
     status,
     application_status,
-    dispersal_date,
-    dispersal_week,
-    dispersal_month,
-    scheduled_cleared_date,
+    assessment_status,
+
+    -- 负债比
     LTI,
     PTI,
     NSTI,
+
+    -- 本金
     principal,
+
+    -- 剩余本金
     estimate_principal_remaining_mob0,
-    dpd_days_mob0,
-    dpd_days_ever_mob0,
     estimate_principal_remaining_mob1,
-    dpd_days_mob1,
-    dpd_days_ever_mob1,
     estimate_principal_remaining_mob2,
-    dpd_days_mob2,
-    dpd_days_ever_mob2,
     estimate_principal_remaining_mob3,
-    dpd_days_mob3,
-    dpd_days_ever_mob3,
     estimate_principal_remaining_mob4,
-    dpd_days_mob4,
+
+    -- DPD
+    dpd_days_ever_mob0,
+    dpd_days_ever_mob1,
+    dpd_days_ever_mob2,
+    dpd_days_ever_mob3,
     dpd_days_ever_mob4,
-    first_payment_scheduled_date,
-    first_payment_scheduled_amount,
-    first_payment_scheduled_principal,
-    first_payment_days_past_due_ever,
+
+    -- 笔数逾期标签
     duedate_1m_5,
     duedate_2m_5,
     duedate_3m_5,
@@ -41,16 +43,11 @@ SELECT
     duedate_2m_30,
     duedate_3m_30,
     duedate_4m_30,
+
+    -- 标签
     application_tag,
     user_tag,
-    loan_tag,
-    requested_loan_amount,
-    requested_loan_tag,
-    payout_date,
-    payout_amount,
-    original_term_length,
-    actual_term_length,
-    original_term_avg,
-    actual_term_avg
+    loan_tag
+
 FROM ba.customer_profile_rawdata
 WHERE application_time >= '2024-01-01';
