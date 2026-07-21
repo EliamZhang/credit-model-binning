@@ -2601,10 +2601,22 @@ def build_sensitivity_matrix(scan_result: pd.DataFrame) -> pd.DataFrame:
 # 8. Excel 报告
 # ============================================================
 
+# 报告展示层样式：只影响 Excel 阅读体验，不改变分箱、验证或阈值计算逻辑。
+GUIDE_FILL = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid")
+WARNING_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+KEY_HEADER_FILL = PatternFill(start_color="2F75B5", end_color="2F75B5", fill_type="solid")
+SUBTLE_FILL = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+NOTE_FONT = Font(name="Microsoft YaHei", size=10, color="404040")
+
 
 def _is_pct_col(name: Any) -> bool:
-    return any(keyword in str(name).lower() for keyword in PCT_KEYWORDS)
+    """识别需要按百分比展示的字段。"""
 
+    text = str(name).lower()
+    chinese_keywords = ["率", "占比", "比例", "覆盖"]
+    return any(keyword in text for keyword in PCT_KEYWORDS) or any(
+        keyword in str(name) for keyword in chinese_keywords
+    )
 
 
 def _excel_safe_value(value: Any) -> Any:
@@ -2630,8 +2642,13 @@ def _excel_safe_value(value: Any) -> Any:
     return value
 
 
+def auto_width(
+    ws: openpyxl.worksheet.worksheet.Worksheet,
+    min_w: int = 10,
+    max_w: int = 46,
+) -> None:
+    """根据单元格内容自动设置列宽。"""
 
-def auto_width(ws: openpyxl.worksheet.worksheet.Worksheet, min_w: int = 10, max_w: int = 46) -> None:
     for column_cells in ws.columns:
         letter = get_column_letter(column_cells[0].column)
         best = min_w
@@ -2644,6 +2661,64 @@ def auto_width(ws: openpyxl.worksheet.worksheet.Worksheet, min_w: int = 10, max_
         ws.column_dimensions[letter].width = min(best, max_w)
 
 
+def configure_report_sheet(
+    ws: openpyxl.worksheet.worksheet.Worksheet,
+    freeze_panes: str = "A3",
+    zoom: int = 85,
+) -> None:
+    """统一设置报告工作表的基础阅读样式。"""
+
+    ws.freeze_panes = freeze_panes
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = zoom
+
+
+def write_note_block(
+    ws: openpyxl.worksheet.worksheet.Worksheet,
+    start_row: int,
+    title: str,
+    text: str,
+    fill: PatternFill = GUIDE_FILL,
+    end_column: int = 8,
+) -> int:
+    """写入一段合并单元格说明，用于阅读指引或风险提示。"""
+
+    ws.merge_cells(
+        start_row=start_row,
+        start_column=1,
+        end_row=start_row,
+        end_column=end_column,
+    )
+    title_cell = ws.cell(row=start_row, column=1, value=title)
+    title_cell.fill = TITLE_FILL
+    title_cell.font = TITLE_FONT
+    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    for column in range(2, end_column + 1):
+        ws.cell(row=start_row, column=column).fill = TITLE_FILL
+
+    content_row = start_row + 1
+    ws.merge_cells(
+        start_row=content_row,
+        start_column=1,
+        end_row=content_row,
+        end_column=end_column,
+    )
+    content_cell = ws.cell(row=content_row, column=1, value=text)
+    content_cell.fill = fill
+    content_cell.font = NOTE_FONT
+    content_cell.alignment = Alignment(
+        horizontal="left",
+        vertical="top",
+        wrap_text=True,
+    )
+    content_cell.border = THIN_BORDER
+    ws.row_dimensions[content_row].height = max(42, 18 * (text.count("\n") + 1))
+    for column in range(2, end_column + 1):
+        ws.cell(row=content_row, column=column).fill = fill
+        ws.cell(row=content_row, column=column).border = THIN_BORDER
+
+    return content_row + 2
+
 
 def write_block(
     ws: openpyxl.worksheet.worksheet.Worksheet,
@@ -2651,10 +2726,12 @@ def write_block(
     title: str,
     frame: pd.DataFrame,
     index_label: str = "序号",
+    key_columns: Sequence[str] | None = None,
 ) -> int:
     """写入带标题的 DataFrame 区块，返回下一可用行号。"""
 
     df = frame.copy()
+    key_column_set = set(key_columns or [])
     ncols = max(len(df.columns) + 1, 2)
     ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=ncols)
     title_cell = ws.cell(row=start_row, column=1, value=title)
@@ -2670,7 +2747,8 @@ def write_block(
         ws.cell(row=header_row, column=column_index, value=str(column_name))
     for column in range(1, ncols + 1):
         cell = ws.cell(row=header_row, column=column)
-        cell.fill = HEADER_FILL
+        column_name = index_label if column == 1 else str(df.columns[column - 2])
+        cell.fill = KEY_HEADER_FILL if column_name in key_column_set else HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = THIN_BORDER
@@ -2700,7 +2778,6 @@ def write_block(
     return data_start + len(df) + 1
 
 
-
 def series_block(
     ws: openpyxl.worksheet.worksheet.Worksheet,
     start_row: int,
@@ -2710,6 +2787,164 @@ def series_block(
     frame = pd.DataFrame({"值": series.values}, index=series.index.astype(str))
     return write_block(ws, start_row, title, frame, index_label="指标")
 
+
+def reorder_columns(frame: pd.DataFrame, preferred_columns: Sequence[str]) -> pd.DataFrame:
+    """将核心字段移动到前面，其他字段完整保留在后面。"""
+
+    if frame.empty:
+        return frame.copy()
+    preferred = [column for column in preferred_columns if column in frame.columns]
+    remaining = [column for column in frame.columns if column not in preferred]
+    return frame.loc[:, preferred + remaining].copy()
+
+
+def detect_bin_column(frame: pd.DataFrame) -> str | None:
+    """识别分箱名称列。"""
+
+    suffix_priority = (
+        "_final_bin_rounded",
+        "_final_bin",
+        "_bin_initial",
+    )
+    for suffix in suffix_priority:
+        matched = [column for column in frame.columns if str(column).endswith(suffix)]
+        if matched:
+            return matched[0]
+    generic = [column for column in frame.columns if "bin" in str(column).lower()]
+    return generic[0] if generic else None
+
+
+def prepare_bin_stats_view(frame: pd.DataFrame) -> pd.DataFrame:
+    """将风险策略人员最常用的最终分箱字段前置。"""
+
+    bin_col = detect_bin_column(frame)
+    preferred = [
+        bin_col,
+        "bin_order",
+        "score_min",
+        "score_max",
+        "score_mean",
+        "n",
+        "sample_pct",
+        "principal_amt",
+        "principal_pct",
+        f"{EARLY_TARGET.key}_cnt_mature",
+        f"{EARLY_TARGET.key}_cnt_bad",
+        f"{EARLY_TARGET.key}_cnt_bad_rate",
+        f"{PRIMARY_TARGET.key}_cnt_mature",
+        f"{PRIMARY_TARGET.key}_cnt_bad",
+        f"{PRIMARY_TARGET.key}_cnt_bad_rate",
+        f"{EARLY_TARGET.key}_amt_bad_rate",
+        f"{PRIMARY_TARGET.key}_amt_bad_rate",
+        f"{EARLY_TARGET.key}_cnt_lift",
+        f"{PRIMARY_TARGET.key}_cnt_lift",
+        "cum_pass_rate",
+        f"cum_{EARLY_TARGET.key}_cnt_bad_rate",
+        f"cum_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        f"cum_{EARLY_TARGET.key}_amt_bad_rate",
+        f"cum_{PRIMARY_TARGET.key}_amt_bad_rate",
+    ]
+    return reorder_columns(frame, [column for column in preferred if column])
+
+
+def prepare_strategy_plan_view(frame: pd.DataFrame) -> pd.DataFrame:
+    """将阈值、规模和风险字段前置，保留完整策略方案字段。"""
+
+    preferred = [
+        "strategy_name",
+        "objective",
+        "status",
+        "auto_pass_threshold",
+        "auto_pass_bin",
+        "reject_threshold",
+        "manual_review_upper_bin",
+        "auto_pass_rate",
+        "manual_review_rate",
+        "reject_rate",
+        "accepted_rate",
+        f"accepted_{EARLY_TARGET.key}_cnt_bad_rate",
+        f"accepted_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        f"accepted_{EARLY_TARGET.key}_amt_bad_rate",
+        f"accepted_{PRIMARY_TARGET.key}_amt_bad_rate",
+        "last_accepted_marginal_1m5_bad_rate",
+        "last_accepted_marginal_3m30p_bad_rate",
+        "score_missing_decision",
+        "constraint_source",
+    ]
+    return reorder_columns(frame, preferred)
+
+
+def prepare_strategy_segment_view(frame: pd.DataFrame) -> pd.DataFrame:
+    """将 Train/OOT、方案、策略动作和核心风险字段前置。"""
+
+    preferred = [
+        "sample_group",
+        "strategy_name",
+        "decision",
+        "auto_pass_threshold",
+        "reject_threshold",
+        "n",
+        "sample_pct",
+        f"{EARLY_TARGET.key}_cnt_mature",
+        f"{EARLY_TARGET.key}_cnt_bad_rate",
+        f"{PRIMARY_TARGET.key}_cnt_mature",
+        f"{PRIMARY_TARGET.key}_cnt_bad_rate",
+        f"{EARLY_TARGET.key}_amt_bad_rate",
+        f"{PRIMARY_TARGET.key}_amt_bad_rate",
+        "principal_amt",
+        "principal_pct",
+        "score_missing_cnt",
+        "score_missing_included",
+    ]
+    return reorder_columns(frame, preferred)
+
+
+def prepare_threshold_curve_view(frame: pd.DataFrame) -> pd.DataFrame:
+    """将阈值曲线中的规模、累计风险和边际风险字段前置。"""
+
+    bin_col = detect_bin_column(frame)
+    preferred = [
+        "threshold_order",
+        "threshold",
+        bin_col,
+        "cum_pass_rate",
+        "cum_pass_rate_scored",
+        "marginal_sample_pct",
+        f"cum_{EARLY_TARGET.key}_cnt_bad_rate",
+        f"cum_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        f"marginal_{EARLY_TARGET.key}_cnt_bad_rate",
+        f"marginal_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        f"cum_{EARLY_TARGET.key}_amt_bad_rate",
+        f"cum_{PRIMARY_TARGET.key}_amt_bad_rate",
+        f"marginal_{EARLY_TARGET.key}_amt_bad_rate",
+        f"marginal_{PRIMARY_TARGET.key}_amt_bad_rate",
+        "cum_n",
+        "marginal_n",
+        "score_coverage",
+        "score_missing_n",
+    ]
+    return reorder_columns(frame, [column for column in preferred if column])
+
+
+def prepare_split_summary_view(frame: pd.DataFrame) -> pd.DataFrame:
+    """将样本范围、规模、分数覆盖和风险成熟度字段前置。"""
+
+    preferred = [
+        "sample_group",
+        "month_min",
+        "month_max",
+        "n",
+        "application_id_nunique",
+        "score_missing_cnt",
+        "score_missing_rate",
+        f"{EARLY_TARGET.key}_mature",
+        f"{EARLY_TARGET.key}_bad",
+        f"{EARLY_TARGET.key}_bad_rate",
+        f"{PRIMARY_TARGET.key}_mature",
+        f"{PRIMARY_TARGET.key}_bad",
+        f"{PRIMARY_TARGET.key}_bad_rate",
+    ]
+    return reorder_columns(frame, preferred)
 
 
 def flatten_strategy_configs(configs: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
@@ -2729,17 +2964,193 @@ def flatten_strategy_configs(configs: Sequence[Mapping[str, Any]]) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
+def build_metric_glossary() -> pd.DataFrame:
+    """生成面向风险策略人员的核心指标阅读说明。"""
+
+    return pd.DataFrame(
+        [
+            {
+                "指标": "1M5",
+                "怎么看": "MOB1 时曾达到 5+ DPD，用于观察较早期风险表现。",
+            },
+            {
+                "指标": "MOB3 30+",
+                "怎么看": "MOB3 时曾达到 30+ DPD，是本报告的主要风险标的。",
+            },
+            {
+                "指标": "箱内风险率",
+                "怎么看": "当前分数箱自身的坏样本率，用于判断风险是否随分数上升。",
+            },
+            {
+                "指标": "累计通过率",
+                "怎么看": "从低风险端累计接纳至当前阈值时，占全部样本的比例。",
+            },
+            {
+                "指标": "累计风险率",
+                "怎么看": "从低风险端累计接纳至当前阈值后的整体风险水平。",
+            },
+            {
+                "指标": "边际风险率",
+                "怎么看": "从上一个阈值放宽到当前阈值时，新增人群自身的风险。",
+            },
+            {
+                "指标": "Train / OOT",
+                "怎么看": "Train 用于学习分箱和候选阈值；OOT 用于验证跨期稳定性。",
+            },
+            {
+                "指标": "PSI / AUC / KS",
+                "怎么看": "分别观察分布漂移和模型区分能力，不能单独替代策略审批。",
+            },
+        ]
+    )
+
+
+def build_recommended_strategy_reason(
+    strategy_plan: pd.DataFrame,
+    recommendation: pd.Series,
+) -> str:
+    """说明为何推荐当前方案，避免把探索性推荐误解为唯一最优解。"""
+
+    selected_name = recommendation.get("recommended_strategy", "无可行方案")
+    if selected_name == "无可行方案":
+        return "当前探索性约束下无可行方案，需要复核成熟样本或调整业务约束。"
+    if selected_name == "平衡方案":
+        return "平衡方案满足当前探索性约束，默认优先作为风险、规模和审核量之间的讨论基准。"
+
+    feasible = strategy_plan.loc[
+        strategy_plan.get("status", pd.Series(dtype="object")).eq("OK")
+    ]
+    if not feasible.empty:
+        return "平衡方案未形成可行阈值，因此选择可行方案中接纳率较高的方案作为讨论起点。"
+    return "当前方案由本次样本和探索性约束动态生成，需要业务侧进一步复核。"
+
+
+def build_decision_summary(results: PipelineResults) -> pd.Series:
+    """将报告第一页重构为风险策略人员可直接阅读的决策摘要。"""
+
+    recommendation = results.strategy_recommendation
+    validation = results.validation_decision
+    validation_text = str(validation.get("recommendation", ""))
+    if "候选方案" in validation_text:
+        decision_status = "可进入策略讨论与业务约束评估"
+    else:
+        decision_status = "建议先复核分箱稳定性或成熟度问题"
+
+    return pd.Series(
+        {
+            "报告定位": "探索性分箱与策略阈值分析，不直接替代正式上线审批",
+            "策略讨论状态": decision_status,
+            "推荐方案": recommendation.get("recommended_strategy", ""),
+            "推荐逻辑": build_recommended_strategy_reason(
+                results.strategy_plan,
+                recommendation,
+            ),
+            "自动通过规则": recommendation.get("auto_pass_rule", ""),
+            "人工审核规则": recommendation.get("manual_review_rule", ""),
+            "拒绝规则": recommendation.get("reject_rule", ""),
+            "自动通过率": recommendation.get("auto_pass_rate", np.nan),
+            "人工审核率": recommendation.get("manual_review_rate", np.nan),
+            "拒绝率": recommendation.get("reject_rate", np.nan),
+            "总接纳率": recommendation.get("accepted_rate", np.nan),
+            "接纳人群 1M5 风险率": recommendation.get(
+                "accepted_1m5_bad_rate", np.nan
+            ),
+            "接纳人群 MOB3 30+ 风险率": recommendation.get(
+                "accepted_3m30p_bad_rate", np.nan
+            ),
+            "分箱验证判断": validation.get("recommendation", ""),
+            "关键验证原因": validation.get("reason", ""),
+            "Train / OOT 时间": (
+                f"Train ≤ {results.config.train_end_month}；"
+                f"OOT ≥ {results.config.oot_start_month}"
+            ),
+            "模型分方向": "分数越高，风险越高",
+            "分数缺失处理": results.config.score_missing_decision,
+            "上线前必须确认": "正式风险上限、收益与 EL、人工审核产能、业务风险偏好",
+        },
+        name="value",
+    )
+
+
+def build_recommended_cross_sample_summary(results: PipelineResults) -> pd.DataFrame:
+    """汇总推荐方案在 Train/OOT 的规模和接纳风险，便于跨期对比。"""
+
+    recommended = results.strategy_recommendation.get("recommended_strategy")
+    segments = results.strategy_segment_report.copy()
+    if (
+        not recommended
+        or recommended == "无可行方案"
+        or segments.empty
+        or "strategy_name" not in segments.columns
+    ):
+        return pd.DataFrame()
+
+    selected = segments.loc[segments["strategy_name"].eq(recommended)].copy()
+    rows: list[dict[str, Any]] = []
+    for sample_group, group in selected.groupby("sample_group", dropna=False, sort=False):
+        row: dict[str, Any] = {
+            "sample_group": sample_group,
+            "strategy_name": recommended,
+        }
+        for decision, output_name in [
+            ("自动通过", "auto_pass_rate"),
+            ("人工审核", "manual_review_rate"),
+            ("拒绝", "reject_rate"),
+        ]:
+            decision_row = group.loc[group["decision"].eq(decision)]
+            row[output_name] = (
+                decision_row["sample_pct"].iloc[0]
+                if not decision_row.empty and "sample_pct" in decision_row.columns
+                else np.nan
+            )
+
+        accepted_n = int(
+            group.loc[
+                group["decision"].isin(["自动通过", "人工审核"]),
+                "n",
+            ].sum()
+        )
+        row["accepted_rate"] = safe_div(accepted_n, int(group["n"].sum()))
+
+        accepted = group.loc[group["decision"].isin(["自动通过", "人工审核"])]
+        for target in RISK_TARGETS:
+            key = target.key
+            mature = accepted.get(f"{key}_cnt_mature", pd.Series(dtype="float64")).sum()
+            bad = accepted.get(f"{key}_cnt_bad", pd.Series(dtype="float64")).sum()
+            exposure = accepted.get(f"{key}_amt_exposure", pd.Series(dtype="float64")).sum()
+            bad_amt = accepted.get(f"{key}_amt_bad", pd.Series(dtype="float64")).sum()
+            row[f"accepted_{key}_cnt_bad_rate"] = safe_div(bad, mature)
+            row[f"accepted_{key}_amt_bad_rate"] = safe_div(bad_amt, exposure)
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
 
 def export_excel_report(results: PipelineResults) -> Path:
-    """生成完整 Excel 策略报告。"""
+    """
+    生成完整 Excel 策略报告。
+
+    展示顺序面向风险策略人员调整为：
+    结论 → 阈值 → 最终分箱 → 稳定性 → 分箱过程 → 数据质量 → 技术复核。
+    底层计算结果和完整明细字段均保留。
+    """
 
     results.config.out_dir.mkdir(parents=True, exist_ok=True)
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    # Sheet 1：结论
-    ws = wb.create_sheet("1.结论与配置")
-    row = 1
+    decision_summary = build_decision_summary(results)
+    recommended_cross_sample = build_recommended_cross_sample_summary(results)
+    strategy_plan_view = prepare_strategy_plan_view(results.strategy_plan)
+    strategy_segment_view = prepare_strategy_segment_view(results.strategy_segment_report)
+    final_curve_view = prepare_threshold_curve_view(results.threshold_curve_final_bins)
+    quantile_curve_view = prepare_threshold_curve_view(results.threshold_curve_quantile)
+    rounded_train_view = prepare_bin_stats_view(results.rounded_train_stats)
+    rounded_oot_view = prepare_bin_stats_view(results.rounded_oot_stats)
+    exact_train_view = prepare_bin_stats_view(results.train_final_stats)
+    exact_oot_view = prepare_bin_stats_view(results.oot_final_stats)
+    split_summary_view = prepare_split_summary_view(results.split_summary)
+
     config_series = pd.Series(
         {
             "data_dir": str(results.config.data_dir),
@@ -2756,29 +3167,204 @@ def export_excel_report(results: PipelineResults) -> Path:
         },
         name="value",
     )
-    row = series_block(ws, row, "一、运行配置", config_series)
-    row = series_block(ws, row, "二、数据关键检查", results.key_checks)
-    row = write_block(ws, row, "三、风险标签来源", results.target_derivation_summary)
-    row = series_block(ws, row, "四、分箱验证结论", results.validation_decision)
-    row = series_block(ws, row, "五、策略推荐", results.strategy_recommendation)
-    row = write_block(ws, row, "六、探索性策略约束", flatten_strategy_configs(results.strategy_configs))
-    auto_width(ws)
-    ws.freeze_panes = "A3"
 
-    # Sheet 2：数据质量
-    ws = wb.create_sheet("2.数据质量")
+    # Sheet 1：先回答“怎么切、影响多大、是否可用”。
+    ws = wb.create_sheet("1.策略结论")
     row = 1
-    row = write_block(ws, row, "一、样本切分", results.split_summary)
-    dedup_summary = results.data_quality.attrs.get("dedup_summary", pd.DataFrame())
-    if not dedup_summary.empty:
-        row = write_block(ws, row, "二、源表去重检查", dedup_summary)
-    row = write_block(ws, row, "三、字段质量", results.data_quality)
+    row = series_block(ws, row, "一、策略决策摘要", decision_summary)
+    if not recommended_cross_sample.empty:
+        row = write_block(
+            ws,
+            row,
+            "二、推荐方案 Train / OOT 对比",
+            recommended_cross_sample,
+            key_columns=[
+                "sample_group",
+                "auto_pass_rate",
+                "manual_review_rate",
+                "reject_rate",
+                "accepted_rate",
+                f"accepted_{EARLY_TARGET.key}_cnt_bad_rate",
+                f"accepted_{PRIMARY_TARGET.key}_cnt_bad_rate",
+            ],
+        )
+    row = write_note_block(
+        ws,
+        row,
+        "三、推荐阅读顺序",
+        "1）先看本页的策略规则、通过规模和接纳风险；\n"
+        "2）再看《2.阈值与策略》，比较保守、平衡、增长三套方案；\n"
+        "3）看《3.最终分箱表现》，确认风险是否随分数单调上升；\n"
+        "4）看《4.稳定性验证》，确认 OOT、PSI、AUC、KS 和跨月表现；\n"
+        "5）分箱过程、数据质量和显著性检验主要用于技术复核。",
+    )
+    row = write_note_block(
+        ws,
+        row,
+        "四、重要提示",
+        "本报告中的保守、平衡、增长方案由 Train 风险水平和探索性约束动态生成，"
+        "用于帮助比较风险与规模，不等于最终上线审批结果。上线前应替换或补充正式的"
+        "风险上限、收益、EL、人工审核产能和业务风险偏好。",
+        fill=WARNING_FILL,
+    )
+    row = series_block(ws, row, "五、分箱验证结论", results.validation_decision)
+    row = write_block(ws, row, "六、样本范围与成熟度", split_summary_view)
+    row = write_block(ws, row, "七、核心指标怎么看", build_metric_glossary())
+    row = write_block(
+        ws,
+        row,
+        "八、探索性策略约束",
+        flatten_strategy_configs(results.strategy_configs),
+    )
+    row = series_block(ws, row, "九、运行配置", config_series)
+    row = series_block(ws, row, "十、数据关键检查", results.key_checks)
+    row = write_block(ws, row, "十一、风险标签来源", results.target_derivation_summary)
     auto_width(ws)
-    ws.freeze_panes = "A3"
+    configure_report_sheet(ws)
 
-    # Sheet 3：初始分箱和合箱
-    ws = wb.create_sheet("3.分箱过程")
+    # Sheet 2：策略方案优先，阈值明细和敏感性放在后面。
+    ws = wb.create_sheet("2.阈值与策略")
     row = 1
+    row = write_note_block(
+        ws,
+        row,
+        "阅读提示",
+        "先比较三套方案的自动通过率、人工审核率、拒绝率和接纳风险；"
+        "再通过敏感性矩阵观察审核产能或风险上限变化时，接纳率如何变化。"
+        "阈值曲线用于进一步定位具体分数边界。",
+    )
+    row = write_block(
+        ws,
+        row,
+        "一、三套策略方案",
+        strategy_plan_view,
+        key_columns=[
+            "strategy_name",
+            "status",
+            "auto_pass_threshold",
+            "reject_threshold",
+            "auto_pass_rate",
+            "manual_review_rate",
+            "reject_rate",
+            "accepted_rate",
+            f"accepted_{EARLY_TARGET.key}_cnt_bad_rate",
+            f"accepted_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        ],
+    )
+    if not recommended_cross_sample.empty:
+        row = write_block(
+            ws,
+            row,
+            "二、推荐方案 Train / OOT 汇总",
+            recommended_cross_sample,
+        )
+    row = write_block(
+        ws,
+        row,
+        "三、Train / OOT 三段完整指标",
+        strategy_segment_view,
+        key_columns=[
+            "sample_group",
+            "strategy_name",
+            "decision",
+            "sample_pct",
+            f"{EARLY_TARGET.key}_cnt_bad_rate",
+            f"{PRIMARY_TARGET.key}_cnt_bad_rate",
+        ],
+    )
+    row = write_block(ws, row, "四、阈值敏感性矩阵", results.threshold_sensitivity_matrix)
+    row = write_block(ws, row, "五、阈值敏感性扫描", results.threshold_sensitivity)
+    row = write_block(
+        ws,
+        row,
+        "六、最终箱边界阈值曲线",
+        final_curve_view,
+        key_columns=[
+            "threshold",
+            "cum_pass_rate",
+            f"cum_{EARLY_TARGET.key}_cnt_bad_rate",
+            f"cum_{PRIMARY_TARGET.key}_cnt_bad_rate",
+            f"marginal_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        ],
+    )
+    row = write_block(ws, row, "七、细粒度分位点阈值曲线", quantile_curve_view)
+    auto_width(ws)
+    configure_report_sheet(ws)
+
+    # Sheet 3：展示上线候选取整边界下的最终风险分层。
+    ws = wb.create_sheet("3.最终分箱表现")
+    row = 1
+    row = write_note_block(
+        ws,
+        row,
+        "阅读提示",
+        "优先查看取整边界下的 Train 和 OOT 表现：箱内风险率应整体随分数升高而上升；"
+        "累计通过率用于观察规模，累计风险率用于评估放宽阈值后的整体风险。"
+        "完整分子、分母、金额风险和置信区间字段仍保留在表格后部。",
+    )
+    row = write_block(ws, row, "一、上线候选取整边界", results.rounded_edges)
+    row = write_block(
+        ws,
+        row,
+        "二、取整边界 Train 分箱指标",
+        rounded_train_view,
+        key_columns=[
+            detect_bin_column(rounded_train_view) or "",
+            "score_min",
+            "score_max",
+            "n",
+            "sample_pct",
+            f"{EARLY_TARGET.key}_cnt_bad_rate",
+            f"{PRIMARY_TARGET.key}_cnt_bad_rate",
+            "cum_pass_rate",
+            f"cum_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        ],
+    )
+    row = write_block(
+        ws,
+        row,
+        "三、取整边界 OOT 分箱指标",
+        rounded_oot_view,
+        key_columns=[
+            detect_bin_column(rounded_oot_view) or "",
+            "score_min",
+            "score_max",
+            "n",
+            "sample_pct",
+            f"{EARLY_TARGET.key}_cnt_bad_rate",
+            f"{PRIMARY_TARGET.key}_cnt_bad_rate",
+            "cum_pass_rate",
+            f"cum_{PRIMARY_TARGET.key}_cnt_bad_rate",
+        ],
+    )
+    row = write_block(ws, row, "四、精确边界 Train 分箱指标（复核）", exact_train_view)
+    row = write_block(ws, row, "五、精确边界 OOT 分箱指标（复核）", exact_oot_view)
+    auto_width(ws)
+    configure_report_sheet(ws)
+
+    # Sheet 4：验证结果集中展示。
+    ws = wb.create_sheet("4.稳定性验证")
+    row = 1
+    row = series_block(ws, row, "一、验证结论", results.validation_decision)
+    row = write_block(ws, row, "二、PSI（含分数缺失箱）", results.psi)
+    row = write_block(ws, row, "三、AUC / KS", results.performance_by_group)
+    row = write_block(ws, row, "四、Train 单调性", results.monotonicity_train)
+    row = write_block(ws, row, "五、OOT 单调性", results.monotonicity_oot)
+    row = write_block(ws, row, "六、月度稳定性摘要", results.monthly_summary)
+    row = write_block(ws, row, "七、月度 AUC / KS", results.monthly_performance)
+    auto_width(ws)
+    configure_report_sheet(ws)
+
+    # Sheet 5：完整保留分箱和自动合箱底稿。
+    ws = wb.create_sheet("5.分箱过程")
+    row = 1
+    row = write_note_block(
+        ws,
+        row,
+        "阅读提示",
+        "本页用于复核分箱是如何从初始等频箱逐步合并为最终风险等级。"
+        "风险策略人员通常先看最终合箱映射和最终边界；分析人员可继续查看初始诊断和每一步合箱原因。",
+    )
     row = write_block(ws, row, "一、初始等频边界", results.initial_edge_table)
     row = write_block(ws, row, "二、初始分箱指标", results.initial_stats)
     row = write_block(ws, row, "三、初始分箱诊断", results.initial_diagnosis)
@@ -2786,45 +3372,35 @@ def export_excel_report(results: PipelineResults) -> Path:
     row = write_block(ws, row, "五、最终合箱映射", results.merge_map)
     row = write_block(ws, row, "六、最终精确边界", results.final_edges)
     auto_width(ws)
-    ws.freeze_panes = "A3"
+    configure_report_sheet(ws)
 
-    # Sheet 4：验证
-    ws = wb.create_sheet("4.分箱验证")
+    # Sheet 6：数据口径和质量底稿后置。
+    ws = wb.create_sheet("6.数据质量")
     row = 1
-    row = write_block(ws, row, "一、Train 最终箱指标", results.train_final_stats)
-    row = write_block(ws, row, "二、OOT 最终箱指标", results.oot_final_stats)
-    row = write_block(ws, row, "三、Train 单调性", results.monotonicity_train)
-    row = write_block(ws, row, "四、OOT 单调性", results.monotonicity_oot)
-    row = write_block(ws, row, "五、PSI（含分数缺失箱）", results.psi)
-    row = write_block(ws, row, "六、AUC / KS", results.performance_by_group)
-    row = write_block(ws, row, "七、月度稳定性摘要", results.monthly_summary)
-    row = write_block(ws, row, "八、月度 AUC / KS", results.monthly_performance)
+    row = write_block(ws, row, "一、样本切分", split_summary_view)
+    dedup_summary = results.data_quality.attrs.get("dedup_summary", pd.DataFrame())
+    if not dedup_summary.empty:
+        row = write_block(ws, row, "二、源表去重检查", dedup_summary)
+    row = write_block(ws, row, "三、字段质量", results.data_quality)
     auto_width(ws)
-    ws.freeze_panes = "A3"
+    configure_report_sheet(ws)
 
-    # Sheet 5：边界取整与显著性
-    ws = wb.create_sheet("5.边界与显著性")
+    # Sheet 7：边界取整和统计显著性作为技术复核附录。
+    ws = wb.create_sheet("7.边界与显著性")
     row = 1
+    row = write_note_block(
+        ws,
+        row,
+        "阅读提示",
+        "本页主要验证精确边界取整后是否引起明显样本迁移或风险变化，"
+        "以及相邻箱风险差异是否具有统计显著性。它用于辅助判断，不应机械替代业务可解释性和策略约束。",
+    )
     row = write_block(ws, row, "一、取整后的最终边界", results.rounded_edges)
     row = write_block(ws, row, "二、精确边界 vs 取整边界", results.rounded_boundary_comparison)
-    row = write_block(ws, row, "三、取整边界 Train 指标", results.rounded_train_stats)
-    row = write_block(ws, row, "四、取整边界 OOT 指标", results.rounded_oot_stats)
-    row = write_block(ws, row, "五、1M5 相邻箱显著性", results.adjacent_tests_early)
-    row = write_block(ws, row, "六、MOB3 30+ 相邻箱显著性", results.adjacent_tests_primary)
+    row = write_block(ws, row, "三、1M5 相邻箱显著性", results.adjacent_tests_early)
+    row = write_block(ws, row, "四、MOB3 30+ 相邻箱显著性", results.adjacent_tests_primary)
     auto_width(ws)
-    ws.freeze_panes = "A3"
-
-    # Sheet 6：阈值与策略
-    ws = wb.create_sheet("6.阈值与策略")
-    row = 1
-    row = write_block(ws, row, "一、最终箱边界阈值曲线", results.threshold_curve_final_bins)
-    row = write_block(ws, row, "二、细粒度分位点阈值曲线", results.threshold_curve_quantile)
-    row = write_block(ws, row, "三、三套策略方案", results.strategy_plan)
-    row = write_block(ws, row, "四、Train / OOT 三段指标", results.strategy_segment_report)
-    row = write_block(ws, row, "五、阈值敏感性扫描", results.threshold_sensitivity)
-    row = write_block(ws, row, "六、阈值敏感性矩阵", results.threshold_sensitivity_matrix)
-    auto_width(ws)
-    ws.freeze_panes = "A3"
+    configure_report_sheet(ws)
 
     wb.save(results.report_path)
     LOGGER.info("策略报告已生成：%s", results.report_path)
