@@ -54,12 +54,48 @@ except ImportError as exc:  # pragma: no cover - 运行环境依赖检查
 
 
 # ============================================================
-# 0. 配置与日志
+# 0. 配置区 —— 所有可调参数集中在这里
+# ============================================================
+#
+# 【使用方式】
+#   方式一（命令行）：直接修改下方默认值，然后运行 python binning.py
+#   方式二（命令行传参）：
+#       python binning.py --data-dir ./res --out-dir ./out \
+#           --train-end-month 2026-03 --oot-start-month 2026-04 \
+#           --initial-bins 20 --min-final-bins 5 --max-final-bins 8
+#   方式三（Notebook 编程调用）：
+#       from binning import PipelineConfig, run_pipeline
+#       config = PipelineConfig(train_end_month="2026-03", initial_bins=20)
+#       results = run_pipeline(config)
+#
+# 【参数分类速查】
+#   - 文件路径：data_dir, out_dir, sample_file, application_file, score_file, report_name
+#   - 字段映射：score_source_col, score_col, application_id_col, user_id_col
+#   - 时间窗口：train_end_month, oot_start_month
+#   - 分箱参数：initial_bins, min_final_bins, max_final_bins, min_bin_n, min_mature_n, min_bad_n
+#   - 边界取整：rounded_decimals_preferred, rounded_decimals_max
+#   - 缺失分数处理：score_missing_decision（可选值：自动通过 / 人工审核 / 拒绝）
+#   - 策略方案预设：strategy_presets（名称、目标描述、风险倍数）
+#   - 敏感性分析：manual_review_caps（人工审核产能上限）
+#   - 验证阈值：psi_low_threshold, psi_high_threshold, auc_drop_threshold
+#
+# 【风险标的（RiskTarget）】
+#   如需增删或修改风险指标，调整下方的 EARLY_TARGET / PRIMARY_TARGET 和 RISK_TARGETS。
+#   每个 RiskTarget 包含：
+#     - key:           指标缩写，用于内部列名
+#     - display_name:  报告中的展示名
+#     - label_col:     0/1 标签列名；如不存在，自动根据 dpd_col >= dpd_threshold 派生
+#     - dpd_col:       对应 MOB 的 ever DPD 列名
+#     - dpd_threshold: 坏样本的 DPD 天数阈值
+#     - balance_col:   坏样本在对应 MOB 时点的剩余本金列名
+#
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGGER = logging.getLogger("binning")
 
+
+# --- 风险标的定义 ---
 
 @dataclass(frozen=True)
 class RiskTarget:
@@ -91,46 +127,95 @@ PRIMARY_TARGET = RiskTarget(
     balance_col="estimate_principal_remaining_mob3",
 )
 
+# 需要分析的风险标的列表；增删标的只需修改这里
 RISK_TARGETS: tuple[RiskTarget, ...] = (EARLY_TARGET, PRIMARY_TARGET)
 
 
+# --- 主流程配置 ---
+
 @dataclass
 class PipelineConfig:
-    """主流程配置。"""
+    """主流程配置 —— 所有可调参数及其默认值。"""
 
+    # ========== 文件路径 ==========
+    # 数据目录，默认在项目根目录下的 res 文件夹
     data_dir: Path = field(default_factory=lambda: BASE_DIR / "res")
+    # 输出目录，默认在项目根目录下的 out 文件夹
     out_dir: Path = field(default_factory=lambda: BASE_DIR / "out")
 
+    # 三个输入文件名（放在 data_dir 下）
     sample_file: str = "sample.csv"
     application_file: str = "application_info.csv"
     score_file: str = "aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv"
 
+    # 输出的 Excel 报告文件名
+    report_name: str = "策略报告.xlsx"
+
+    # ========== 字段映射 ==========
+    # score 表中的原始分数字段名
     score_source_col: str = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
+    # 合并到分析表后使用的分数字段名
     score_col: str = "score_mlt"
+    # 申请 ID 和用户 ID 字段名（用于关联和去重）
     application_id_col: str = "application_id"
     user_id_col: str = "user_id"
 
+    # ========== 时间窗口 ==========
+    # 格式：YYYY-MM；Train 截止月份（含），OOT 起始月份（含）
     train_end_month: str = "2026-03"
     oot_start_month: str = "2026-04"
 
+    # ========== 分箱参数 ==========
+    # 等频初分的箱数
     initial_bins: int = 20
+    # 最终合箱后的最少 / 最多箱数
     min_final_bins: int = 5
     max_final_bins: int = 8
+    # 单个箱的最小样本量 / 最小成熟样本量 / 最小坏样本数（低于阈值会触发合箱）
     min_bin_n: int = 1000
     min_mature_n: int = 1000
     min_bad_n: int = 30
 
+    # ========== 边界取整 ==========
+    # 优先尝试的小数位数 / 最大尝试的小数位数
     rounded_decimals_preferred: int = 4
     rounded_decimals_max: int = 8
+
+    # ========== 缺失分数处理 ==========
+    # 可选值："自动通过" / "人工审核" / "拒绝"
     score_missing_decision: str = "人工审核"
 
-    # None 表示根据 Train 的总体风险水平动态生成探索性约束。
+    # ========== 策略方案预设 ==========
+    # 每项：(方案名称, 目标描述, 自动通过风险倍数, 可接受风险倍数, 边际风险倍数)
+    # 风险倍数 = 该方案允许的最大风险率 / Train 总体风险率
+    # 设为 None 则根据 Train 总体风险水平动态生成三套探索性方案
     strategy_configs: list[dict[str, Any]] | None = None
 
-    # 阈值敏感性分析：人工审核产能上限。
+    # 当 strategy_configs 为 None 时自动生成的方案预设
+    strategy_presets: tuple[tuple[str, str, float, float, float], ...] = (
+        ("保守方案", "优先控制风险，覆盖低风险核心人群", 0.65, 0.80, 1.10),
+        ("平衡方案", "平衡通过规模、累计风险和边际风险", 0.78, 0.98, 1.40),
+        ("增长方案", "在总体风险附近扩大接纳规模", 0.90, 1.12, 1.80),
+    )
+
+    # ========== 阈值敏感性分析 ==========
+    # 人工审核产能上限（占总体比例），会逐一扫描
     manual_review_caps: tuple[float, ...] = (0.20, 0.25, 0.30)
 
-    report_name: str = "策略报告.xlsx"
+    # 接纳人群 3M30+ 风险倍数的扫描范围（相对于 Train 总体风险率）
+    sensitivity_primary_cap_ratios: tuple[float, ...] = (0.80, 1.00, 1.20)
+
+    # 分位点阈值曲线的细粒度（分位点数量）
+    quantile_threshold_count: int = 100
+
+    # ========== 验证阈值 ==========
+    # PSI < psi_low  → 稳定；psi_low ≤ PSI < psi_high → 中等；PSI ≥ psi_high → 偏高
+    psi_low_threshold: float = 0.10
+    psi_high_threshold: float = 0.25
+    # OOT AUC 相对 Train 下降超过此值则告警
+    auc_drop_threshold: float = 0.05
+
+    # ========== 其他 ==========
     verbose_tables: bool = False
 
     def __post_init__(self) -> None:
@@ -205,6 +290,32 @@ class PipelineResults:
     adjacent_tests_early: pd.DataFrame
     adjacent_tests_primary: pd.DataFrame
     report_path: Path
+
+
+# --- Excel 报告样式 ---
+# 如需调整报告配色和字体，修改以下常量即可
+HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+HEADER_FONT = Font(name="Microsoft YaHei", bold=True, color="FFFFFF", size=10)
+TITLE_FILL = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+TITLE_FONT = Font(name="Microsoft YaHei", bold=True, size=12, color="1F4E79")
+DATA_FONT = Font(name="Microsoft YaHei", size=9)
+THIN_BORDER = Border(
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin"),
+)
+# 自动识别为百分比的列名关键字
+PCT_KEYWORDS = [
+    "rate",
+    "pct",
+    "share",
+    "lift",
+    "coverage",
+    "portion",
+    "gap",
+    "delta",
+]
 
 
 # ============================================================
@@ -1687,6 +1798,7 @@ def build_validation_decision(
     mono_oot: pd.DataFrame,
     perf: pd.DataFrame,
     monthly_summary: pd.DataFrame,
+    config: PipelineConfig,
 ) -> pd.Series:
     """根据实际结果动态生成验证结论。"""
 
@@ -1726,9 +1838,9 @@ def build_validation_decision(
 
     reasons: list[str] = []
     if pd.notna(psi_total):
-        if psi_total < 0.10:
+        if psi_total < config.psi_low_threshold:
             reasons.append("Train/OOT 分布稳定")
-        elif psi_total < 0.25:
+        elif psi_total < config.psi_high_threshold:
             reasons.append("PSI 中等，需持续观察")
         else:
             reasons.append("PSI 偏高，需复核样本漂移")
@@ -1747,8 +1859,8 @@ def build_validation_decision(
 
     if pd.notna(train_auc) and pd.notna(oot_auc):
         auc_drop = float(train_auc - oot_auc)
-        if auc_drop > 0.05:
-            reasons.append("OOT AUC 下降超过 0.05")
+        if auc_drop > config.auc_drop_threshold:
+            reasons.append(f"OOT AUC 下降超过 {config.auc_drop_threshold}")
         else:
             reasons.append("OOT AUC 下降可控")
     else:
@@ -1764,7 +1876,7 @@ def build_validation_decision(
     candidate_ok = (
         train_primary_mono_bool is True
         and (oot_primary_mono_bool is True or oot_primary_mono_bool is None)
-        and (pd.isna(psi_total) or psi_total < 0.25)
+        and (pd.isna(psi_total) or psi_total < config.psi_high_threshold)
     )
     recommendation = (
         "当前分箱可作为候选方案进入阈值与业务约束评估"
@@ -2027,12 +2139,20 @@ def quantile_thresholds(
 
 def build_data_driven_strategy_configs(
     train: pd.DataFrame,
+    presets: Sequence[tuple[str, str, float, float, float]] | None = None,
 ) -> list[dict[str, Any]]:
     """
     根据 Train 的总体风险率生成探索性约束。
 
     这些约束只用于自动生成分析方案，不能替代业务确认后的正式风险上限。
     """
+
+    if presets is None:
+        presets = (
+            ("保守方案", "优先控制风险，覆盖低风险核心人群", 0.65, 0.80, 1.10),
+            ("平衡方案", "平衡通过规模、累计风险和边际风险", 0.78, 0.98, 1.40),
+            ("增长方案", "在总体风险附近扩大接纳规模", 0.90, 1.12, 1.80),
+        )
 
     overall = calc_frame_metrics(train)
     early_rate = overall[f"{EARLY_TARGET.key}_cnt_bad_rate"]
@@ -2043,13 +2163,8 @@ def build_data_driven_strategy_configs(
     if pd.isna(primary_rate) or primary_rate <= 0:
         primary_rate = 0.08
 
-    definitions = [
-        ("保守方案", "优先控制风险，覆盖低风险核心人群", 0.65, 0.80, 1.10),
-        ("平衡方案", "平衡通过规模、累计风险和边际风险", 0.78, 0.98, 1.40),
-        ("增长方案", "在总体风险附近扩大接纳规模", 0.90, 1.12, 1.80),
-    ]
     configs: list[dict[str, Any]] = []
-    for name, objective, auto_ratio, accept_ratio, marginal_ratio in definitions:
+    for name, objective, auto_ratio, accept_ratio, marginal_ratio in presets:
         configs.append(
             {
                 "strategy_name": name,
@@ -2486,29 +2601,6 @@ def build_sensitivity_matrix(scan_result: pd.DataFrame) -> pd.DataFrame:
 # 8. Excel 报告
 # ============================================================
 
-HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-HEADER_FONT = Font(name="Microsoft YaHei", bold=True, color="FFFFFF", size=10)
-TITLE_FILL = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
-TITLE_FONT = Font(name="Microsoft YaHei", bold=True, size=12, color="1F4E79")
-DATA_FONT = Font(name="Microsoft YaHei", size=9)
-THIN_BORDER = Border(
-    left=Side(style="thin"),
-    right=Side(style="thin"),
-    top=Side(style="thin"),
-    bottom=Side(style="thin"),
-)
-PCT_KEYWORDS = [
-    "rate",
-    "pct",
-    "share",
-    "lift",
-    "coverage",
-    "portion",
-    "gap",
-    "delta",
-]
-
-
 
 def _is_pct_col(name: Any) -> bool:
     return any(keyword in str(name).lower() for keyword in PCT_KEYWORDS)
@@ -2901,6 +2993,7 @@ def run_pipeline(config: PipelineConfig | None = None) -> PipelineResults:
         monotonicity_oot,
         performance_by_group,
         monthly_summary,
+        config,
     )
 
     # 3. 边界取整并复算
@@ -2975,7 +3068,7 @@ def run_pipeline(config: PipelineConfig | None = None) -> PipelineResults:
         validate="one_to_one",
     )
 
-    quantile_values = quantile_thresholds(train_rounded, config.score_col, n_quantiles=100)
+    quantile_values = quantile_thresholds(train_rounded, config.score_col, n_quantiles=config.quantile_threshold_count)
     threshold_curve_quantile = calc_threshold_curve(
         train_rounded,
         config.score_col,
@@ -2983,7 +3076,9 @@ def run_pipeline(config: PipelineConfig | None = None) -> PipelineResults:
     )
 
     # 5. 动态策略方案
-    strategy_configs = config.strategy_configs or build_data_driven_strategy_configs(train_rounded)
+    strategy_configs = config.strategy_configs or build_data_driven_strategy_configs(
+        train_rounded, config.strategy_presets
+    )
     strategy_plan, strategy_segment_train = make_strategy_plan(
         train_rounded,
         threshold_curve_final_bins,
@@ -3018,7 +3113,7 @@ def run_pipeline(config: PipelineConfig | None = None) -> PipelineResults:
             sorted(
                 {
                     min(max(overall_primary_rate * ratio, 0.0001), 1.0)
-                    for ratio in (0.80, 1.00, 1.20)
+                    for ratio in config.sensitivity_primary_cap_ratios
                 }
             )
         )
