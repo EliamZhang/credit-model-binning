@@ -2366,10 +2366,10 @@ seg_cols = [
 
 for label, seg_df in [('Train（4位小数）', strategy_segment_report_rounded4), ('OOT（4位小数）', strategy_segment_report_rounded4)]:
     mask = (seg_df['strategy_name'] == recommended)
-    if 'train' in label:
-        mask &= seg_df['sample_group'].str.contains('train')
+    if 'train' in label.lower():
+        mask &= seg_df['sample_group'].str.lower().str.contains('train')
     else:
-        mask &= seg_df['sample_group'].str.contains('oot')
+        mask &= seg_df['sample_group'].str.lower().str.contains('oot')
     subset = seg_df.loc[mask, seg_cols].set_index('decision')
     r = write_block(ws1, r, f'三、推荐方案「{recommended}」三段指标 — {label}', subset)
 
@@ -2389,6 +2389,17 @@ bin_cols = [
 ]
 r = write_block(ws2, r, '一、8档最终风险等级（精确边界）', bin_stats_final.set_index('bin_order')[bin_cols])
 
+tc_cols = [c for c in [
+    'threshold', FINAL_BIN_COL, 'merged_from',
+    'cum_n', 'cum_pass_rate',
+    'cum_1m30p_cnt_mature', 'cum_1m30p_cnt_bad_rate',
+    'cum_3m30p_cnt_mature', 'cum_3m30p_cnt_bad_rate',
+    'cum_1m30p_amt_bad_rate', 'cum_3m30p_amt_bad_rate',
+    'marginal_n', 'marginal_sample_pct',
+    'marginal_1m30p_cnt_bad_rate', 'marginal_3m30p_cnt_bad_rate',
+] if c in threshold_curve_final_bins.columns]
+r = write_block(ws2, r, '二、阈值曲线（各等级右边界作为阈值）', threshold_curve_final_bins.set_index('threshold_order')[tc_cols])
+
 compare_cols = [c for c in [
     'n_train', 'n_oot', 'sample_pct_train', 'sample_pct_oot',
     '1m30p_cnt_mature_train', '1m30p_cnt_mature_oot',
@@ -2398,23 +2409,28 @@ compare_cols = [c for c in [
     '1m30p_amt_bad_rate_train', '1m30p_amt_bad_rate_oot',
     '3m30p_amt_bad_rate_train', '3m30p_amt_bad_rate_oot',
 ] if c in train_oot_bin_compare.columns]
-r = write_block(ws2, r, '二、Train vs OOT 逐箱对比', train_oot_bin_compare.set_index(FINAL_BIN_COL)[compare_cols])
+r = write_block(ws2, r, '三、Train vs OOT 逐箱对比', train_oot_bin_compare.set_index(FINAL_BIN_COL)[compare_cols])
 
 psi_label = FINAL_BIN_COL if FINAL_BIN_COL in psi_final.columns else 'bin'
 r = write_block(
     ws2, r,
-    f'三、PSI 分布稳定性（总 PSI = {psi_final["psi_total"].iloc[0]:.6f}）',
+    f'四、PSI 分布稳定性（总 PSI = {psi_final["psi_total"].iloc[0]:.6f}）',
     psi_final.set_index(psi_label)[[c for c in ['expected_cnt', 'expected_pct', 'actual_cnt', 'actual_pct', 'psi_component'] if c in psi_final.columns]],
 )
 
-r = write_block(ws2, r, '四、AUC/KS 汇总', perf_by_group.set_index('sample_group')[[c for c in ['label', 'n', 'bad_cnt', 'bad_rate', 'auc', 'ks'] if c in perf_by_group.columns]])
+r = write_block(ws2, r, '五、AUC/KS 汇总', perf_by_group.set_index('sample_group')[[c for c in ['label', 'n', 'bad_cnt', 'bad_rate', 'auc', 'ks'] if c in perf_by_group.columns]])
+
+mp_cols = [c for c in [
+    'label', 'n', 'bad_cnt', 'bad_rate', 'auc', 'ks',
+] if c in monthly_perf.columns]
+r = write_block(ws2, r, '六、逐月 AUC/KS', monthly_perf.set_index('application_month')[mp_cols])
 
 m_cols = [c for c in [
     'bin_cnt', 'n', 'm1_mature', 'm3_mature', 'm1_bad_rate', 'm3_bad_rate',
     'min_bin_n', 'min_m1_mature_per_bin', 'min_m3_mature_per_bin',
     '1m30p_cnt_bad_rate_violation_cnt', '3m30p_cnt_bad_rate_violation_cnt',
 ] if c in monthly_stability_summary.columns]
-r = write_block(ws2, r, '五、月度分箱稳定性', monthly_stability_summary.set_index('application_month')[m_cols])
+r = write_block(ws2, r, '七、月度分箱稳定性', monthly_stability_summary.set_index('application_month')[m_cols])
 
 auto_width(ws2)
 
@@ -2422,13 +2438,15 @@ auto_width(ws2)
 ws3 = wb.create_sheet('3.分箱优化过程')
 r = 1
 
+r = series_block(ws3, r, '一、20等频箱诊断摘要', diagnosis_summary)
+
 diag_cols = [c for c in [
     BIN20_COL, 'n', '1m30p_cnt_mature', '1m30p_cnt_bad', '1m30p_cnt_bad_rate',
     '1m30p_cnt_rate_diff_prev', '3m30p_cnt_mature', '3m30p_cnt_bad',
     '3m30p_cnt_bad_rate', '3m30p_cnt_rate_diff_prev',
     'merge_priority_score', 'diagnosis_flags',
 ] if c in bin_diagnosis_20.columns]
-r = write_block(ws3, r, '一、20等频箱初步诊断', bin_diagnosis_20.set_index('bin_order')[diag_cols])
+r = write_block(ws3, r, '二、20等频箱初步诊断', bin_diagnosis_20.set_index('bin_order')[diag_cols])
 
 cand_cols = [c for c in [
     'bin_cnt', 'min_train_n', 'min_train_1m_mature', 'min_train_3m_mature',
@@ -2436,16 +2454,16 @@ cand_cols = [c for c in [
     'oot_1m_cnt_violation_cnt', 'oot_3m_cnt_violation_cnt', 'psi_total',
     'months_with_1m_cnt_violation', 'months_with_3m_cnt_violation', 'candidate_score',
 ] if c in candidate_merge_compare.columns]
-r = write_block(ws3, r, '二、6/7/8/9 档候选分箱方案对比', candidate_merge_compare.set_index('candidate_name')[cand_cols])
+r = write_block(ws3, r, '三、6/7/8/9 档候选分箱方案对比', candidate_merge_compare.set_index('candidate_name')[cand_cols])
 
-r = series_block(ws3, r, '三、分箱优化结论', binning_optimization_decision)
+r = series_block(ws3, r, '四、分箱优化结论', binning_optimization_decision)
 
 sig_cols = [c for c in [
     'metric', 'left_bin_order', 'right_bin_order', 'left_rate', 'right_rate',
     'rate_diff', 'direction_ok', 'z_stat', 'z_p_value', 'chi2_p_value',
     'significant_5pct', 'merge_hint',
 ] if c in adjacent_sig_tests.columns]
-r = write_block(ws3, r, '四、相邻箱显著性检验（仅显示建议合并的箱）', adjacent_sig_tests.loc[adjacent_sig_tests['merge_hint'].eq('建议合并'), sig_cols].reset_index(drop=True))
+r = write_block(ws3, r, '五、相邻箱显著性检验（仅显示建议合并的箱）', adjacent_sig_tests.loc[adjacent_sig_tests['merge_hint'].eq('建议合并'), sig_cols].reset_index(drop=True))
 
 auto_width(ws3)
 
@@ -2491,6 +2509,14 @@ sd_cols = [c for c in [
     'last_accepted_marginal_3m30p_cnt_bad_rate',
 ] if c in threshold_sensitivity_rounded4.columns]
 r = write_block(ws4, r, '五、阈值敏感性扫描明细', threshold_sensitivity_rounded4[sd_cols].reset_index(drop=True))
+
+r = series_block(ws4, r, '六、阈值敏感性推荐结论', threshold_sensitivity_decision)
+
+qv_cols = [c for c in [
+    'accepted_rate_rounded4', 'accepted_rate_quantile', 'accepted_rate_gain_quantile',
+    'auto_pass_rate_rounded4', 'auto_pass_rate_quantile', 'auto_rate_gain_quantile',
+] if c in threshold_sensitivity_final_vs_quantile.columns]
+r = write_block(ws4, r, '七、分位点曲线 vs 最终箱边界对比', threshold_sensitivity_final_vs_quantile.set_index(['max_manual_review_rate', 'max_accepted_3m30p_cnt_bad_rate'])[qv_cols])
 
 auto_width(ws4)
 
