@@ -2857,7 +2857,7 @@ def series_block(ws, start_row, title, series, guidance=None):
 
 
 
-def setup_sheet(ws, tab_color=None, freeze_panes='A7'):
+def setup_sheet(ws, tab_color=None, freeze_panes=None):
     """统一工作表视图、打印与页眉页脚。"""
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = freeze_panes
@@ -2880,7 +2880,7 @@ def setup_sheet(ws, tab_color=None, freeze_panes='A7'):
 def create_readme_sheet(wb):
     """创建报告阅读指南，集中解释口径、颜色和推荐阅读顺序。"""
     ws = wb.create_sheet('0.阅读指南')
-    setup_sheet(ws, tab_color=NAVY, freeze_panes='A1')
+    setup_sheet(ws, tab_color=NAVY)
     ws.sheet_view.zoomScale = 95
 
     ws.merge_cells('A1:H2')
