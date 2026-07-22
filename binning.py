@@ -2895,65 +2895,6 @@ def create_readme_sheet(wb):
     ws.row_dimensions[1].height = 28
     ws.row_dimensions[2].height = 16
 
-    ws['A4'] = '报告定位'
-    ws['A4'].font = TITLE_FONT
-    ws['A5'] = '本报告面向风险策略人员，用于理解模型风险分层、跨期稳定性、候选阈值和三段策略方案。建议先看推荐结论，再核对最终分箱与OOT验证，最后查看优化过程和敏感性。'
-    ws.merge_cells('A5:H6')
-    ws['A5'].alignment = Alignment(wrap_text=True, vertical='top')
-    ws['A5'].font = Font(name='Microsoft YaHei', size=10, color=TEXT_DARK)
-    ws['A5'].fill = PatternFill(start_color=LIGHT_GRAY, end_color=LIGHT_GRAY, fill_type='solid')
-
-    order_df = pd.DataFrame({
-        '阅读顺序': ['1', '2', '3', '4', '5'],
-        '工作表': ['1.策略推荐结论', '2.最终分箱与验证', '5.三套策略方案对比', '4.边界与阈值敏感性', '3.分箱优化过程'],
-        '主要问题': [
-            '最终建议采用什么阈值，规模和风险是多少？',
-            '分箱是否单调稳定，Train/OOT是否一致？',
-            '增长、平衡、保守方案如何取舍？',
-            '产能或风险上限变化时，阈值如何调整？',
-            '最终分箱是如何从20箱优化得到的？',
-        ],
-    }).set_index('阅读顺序')
-    next_row = write_block(
-        ws,
-        8,
-        '一、推荐阅读顺序',
-        order_df,
-        index_label='顺序',
-        guidance={
-            'focus': '首次阅读建议按顺序查看，不必从分箱过程开始逐页阅读。',
-            'logic': '按“结论—验证—方案—敏感性—过程”组织，先回答策略决策，再追溯计算依据。',
-            'caution': '任何阈值结论都应回到OOT表现、成熟样本量和运营产能进行复核。',
-            'key_columns': ['工作表', '主要问题'],
-        },
-    )
-
-    color_df = pd.DataFrame({
-        '颜色/样式': ['绿色', '黄色', '红色', '蓝色', '紫色', '橙色', '渐变色', '表头批注'],
-        '含义': [
-            '通过、推荐或相对安全的结果',
-            '人工审核、需要观察或存在不确定性',
-            '拒绝、非OK状态或高风险提示',
-            '样本量、成熟度、通过率等规模指标',
-            'Train/OOT、PSI、差异和稳定性指标',
-            '金额口径或需要关注的自动提示',
-            '从低到高展示风险率、差异值或模型表现变化',
-            '将鼠标悬停在关键字段表头，可查看指标口径说明',
-        ],
-    }).set_index('颜色/样式')
-    next_row = write_block(
-        ws,
-        next_row,
-        '二、颜色与样式说明',
-        color_df,
-        index_label='元素',
-        guidance={
-            'focus': '颜色只用于快速定位，不替代对分子、分母和样本量的判断。',
-            'logic': '表头按决策、规模、风险、稳定性和金额口径分色，数据区按字段自动应用条件格式。',
-            'caution': '渐变色在当前列内部比较相对高低，不代表统一的绝对风险阈值。',
-        },
-    )
-
     metric_df = pd.DataFrame({
         '指标': [
             '样本占比', '1M30+笔数逾期率', '3M30+笔数逾期率',
@@ -2987,8 +2928,8 @@ def create_readme_sheet(wb):
     }).set_index('指标')
     next_row = write_block(
         ws,
-        next_row,
-        '三、关键指标口径',
+        4,
+        '一、关键指标口径',
         metric_df,
         index_label='指标',
         guidance={
@@ -3021,7 +2962,7 @@ def create_readme_sheet(wb):
     write_block(
         ws,
         next_row,
-        '四、核心加工流程',
+        '二、核心加工流程',
         logic_df,
         index_label='步骤',
         guidance={
