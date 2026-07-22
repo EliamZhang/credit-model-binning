@@ -2602,6 +2602,71 @@ if oot_mask_all.any():
 
 auto_width(ws5)
 
+# ==================== Sheet 5: 配置参数 ====================
+ws6 = wb.create_sheet('5.配置参数')
+setup_sheet(ws6, tab_color='808080')
+r = 1
+
+data_config = pd.Series({
+    '数据目录': str(DATA_DIR),
+    '输出目录': str(OUT_DIR),
+    '训练期截止月份': TRAIN_END_MONTH,
+    '验证期起始月份': OOT_START_MONTH,
+    '模型分方向': '高分高风险' if HIGH_SCORE_HIGH_RISK else '低分高风险',
+    '主模型分字段': SCORE_COL,
+}, name='值')
+r = series_block(ws6, r, '一、数据与模型配置', data_config)
+
+diag_cfg = DIAG_CONFIG
+diag_series = pd.Series({
+    '最小箱样本量': diag_cfg['min_bin_n'],
+    '最小成熟样本量': diag_cfg['min_cnt_mature'],
+    '最小坏样本量': diag_cfg['min_cnt_bad'],
+    '金额/笔数差异阈值': diag_cfg['amt_cnt_gap_threshold'],
+}, name='值')
+r = series_block(ws6, r, '二、20箱诊断配置', diag_series)
+
+final_bin_series = pd.Series({
+    '初分箱数': 20,
+    '最终档数': len(FINAL_BIN_RANGES),
+    '合箱规则': str(FINAL_BIN_RANGES),
+    '标签方案': 'A-H 评级',
+}, name='值')
+r = series_block(ws6, r, '三、分箱参数', final_bin_series)
+
+for cfg in STRATEGY_CONFIGS:
+    auto = cfg['auto_constraints']
+    accept = cfg['accept_constraints']
+    strategy_detail = pd.Series({
+        '目标': cfg['objective'],
+        '自动通过 — 累计1M30+上限': auto['max_cum_1m30p_cnt_bad_rate'],
+        '自动通过 — 累计3M30+上限': auto['max_cum_3m30p_cnt_bad_rate'],
+        '自动通过 — 边际3M30+上限': auto['max_marginal_3m30p_cnt_bad_rate'],
+        '接纳上限 — 累计1M30+上限': accept['max_cum_1m30p_cnt_bad_rate'],
+        '接纳上限 — 累计3M30+上限': accept['max_cum_3m30p_cnt_bad_rate'],
+        '接纳上限 — 边际3M30+上限': accept['max_marginal_3m30p_cnt_bad_rate'],
+    }, name='值')
+    r = series_block(ws6, r, f'四、{cfg["strategy_name"]}约束', strategy_detail)
+
+ts_cfg = THRESHOLD_SENSITIVITY_CONFIG
+ts_series = pd.Series({
+    '人工审核产能上限': ts_cfg['manual_review_caps'],
+    '接纳3M30+上限': ts_cfg['accepted_3m30p_caps'],
+    '接纳1M30+上限': ts_cfg['accepted_1m30p_cap'],
+    '接纳边际3M30+上限': ts_cfg['accepted_marginal_3m30p_cap'],
+    '自动通过风险比例': ts_cfg['auto_cap_ratio'],
+}, name='值')
+r = series_block(ws6, r, '五、阈值敏感性扫描配置', ts_series)
+
+candidate_series = pd.Series({
+    k: str(v) for k, v in CANDIDATE_FINAL_BIN_RANGES.items()
+}, name='合箱规则')
+candidate_df = pd.DataFrame(candidate_series)
+candidate_df.index.name = '候选方案'
+r = write_block(ws6, r, '六、候选合箱方案', candidate_df, index_label='候选方案')
+
+auto_width(ws6)
+
 # ---- 保存 ----
 wb.save(REPORT_PATH)
 print(f'\n策略报告已生成: {REPORT_PATH}')
