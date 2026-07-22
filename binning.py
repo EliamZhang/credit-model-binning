@@ -755,7 +755,7 @@ def build_adjacent_merge_map(bin_ranges, source_bin_col, target_bin_col='score_m
     """根据相邻 20 箱范围生成最终分箱映射表。"""
     rows = []
     for final_order, (start_bin, end_bin) in enumerate(bin_ranges, start=1):
-        final_bin = f"G{final_order:02d}"
+        final_bin = chr(ord('A') + final_order - 1)
         for bin_order in range(start_bin, end_bin + 1):
             rows.append({
                 'bin_order': bin_order,
@@ -1696,7 +1696,7 @@ binning_optimization_decision = pd.Series({
     'backup_reason': '7档方案 OOT 1M30/3M30 都无倒挂，月度1M30倒挂略少；若偏好更简洁稳健，可作为备选',
     'significance_takeaway': '相邻显著性检验支持合并 B05-B07、B09-B11、B13-B14、B17-B18 等相邻箱；当前8档合箱方向与检验结论一致',
     'boundary_recommendation': '上线边界建议使用4位小数；3位小数会迁移约7.67%训练样本，并引入 OOT 3M30 倒挂',
-    'recommended_edges': 'G01<=0.0378, G02<=0.0595, G03<=0.0777, G04<=0.0975, G05<=0.1413, G06<=0.1894, G07<=0.2469, G08>0.2469',
+    'recommended_edges': 'A<=0.0378, B<=0.0595, C<=0.0777, D<=0.0975, E<=0.1413, F<=0.1894, G<=0.2469, H>0.2469',
     'need_recheck': '边界取整后应复跑策略方案；若业务更看重简洁，可对7档方案单独生成阈值曲线与策略方案',
 }, name='value')
 
@@ -2017,7 +2017,7 @@ threshold_sensitivity_decision = pd.Series({
     'manual_review_rate': threshold_sensitivity_recommended_row['manual_review_rate'],
     'reject_rate': threshold_sensitivity_recommended_row['reject_rate'],
     'accepted_3m30p_cnt_bad_rate': threshold_sensitivity_recommended_row['accepted_3m30p_cnt_bad_rate'],
-    'note': '若人工产能可放宽到30%，可采用原平衡方案接纳到G06；若产能严格小于25%，建议接纳上限收至G05',
+    'note': '若人工产能可放宽到30%，可采用原平衡方案接纳到F；若产能严格小于25%，建议接纳上限收至E',
 }, name='value')
 
 
