@@ -2342,7 +2342,7 @@ wb = openpyxl.Workbook()
 wb.remove(wb.active)
 
 # ==================== Sheet 1: 策略推荐结论 ====================
-ws1 = wb.create_sheet('1.策略推荐结论')
+ws1 = wb.create_sheet('1.策略推荐与分箱验证')
 setup_sheet(ws1, tab_color='548235')
 r = 1
 
@@ -2372,13 +2372,7 @@ for label, seg_df in [('Train（4位小数）', strategy_segment_report_rounded4
         ws1, r, f'三、推荐方案「{recommended}」三段指标 — {label}', subset,
     )
 
-auto_width(ws1)
-
-# ==================== Sheet 2: 最终分箱与验证 ====================
-ws2 = wb.create_sheet('2.最终分箱与验证')
-setup_sheet(ws2, tab_color='4472C4')
-r = 1
-
+# 继续写入 ws1：原 Sheet 2 内容
 bin_cols = [
     'merged_from', 'score_left', 'score_right', 'n', 'sample_pct',
     'score_min', 'score_max', '1m30p_cnt_mature', '1m30p_cnt_bad',
@@ -2388,7 +2382,7 @@ bin_cols = [
     'cum_pass_rate', 'cum_1m30p_cnt_bad_rate', 'cum_3m30p_cnt_bad_rate',
 ]
 r = write_block(
-    ws2, r, '一、8档最终风险等级（精确边界）',
+    ws1, r, '四、8档最终风险等级（精确边界）',
     bin_stats_final.set_index('bin_order')[bin_cols],
 )
 
@@ -2402,7 +2396,7 @@ tc_cols = [c for c in [
     'marginal_1m30p_cnt_bad_rate', 'marginal_3m30p_cnt_bad_rate',
 ] if c in threshold_curve_final_bins.columns]
 r = write_block(
-    ws2, r, '二、阈值曲线（各等级右边界作为阈值）',
+    ws1, r, '五、阈值曲线（各等级右边界作为阈值）',
     threshold_curve_final_bins.set_index('threshold_order')[tc_cols],
 )
 
@@ -2416,25 +2410,25 @@ compare_cols = [c for c in [
     '3m30p_amt_bad_rate_train', '3m30p_amt_bad_rate_oot',
 ] if c in train_oot_bin_compare.columns]
 r = write_block(
-    ws2, r, '三、Train vs OOT 逐箱对比',
+    ws1, r, '六、Train vs OOT 逐箱对比',
     train_oot_bin_compare.set_index(FINAL_BIN_COL)[compare_cols],
 )
 
 psi_label = FINAL_BIN_COL if FINAL_BIN_COL in psi_final.columns else 'bin'
 r = write_block(
-    ws2, r,
-    f'四、PSI 分布稳定性（总 PSI = {psi_final["psi_total"].iloc[0]:.6f}）',
+    ws1, r,
+    f'七、PSI 分布稳定性（总 PSI = {psi_final["psi_total"].iloc[0]:.6f}）',
     psi_final.set_index(psi_label)[[c for c in ['expected_cnt', 'expected_pct', 'actual_cnt', 'actual_pct', 'psi_component'] if c in psi_final.columns]],
 )
 
 r = write_block(
-    ws2, r, '五、AUC/KS 汇总',
+    ws1, r, '八、AUC/KS 汇总',
     perf_by_group.set_index('sample_group')[[c for c in ['label', 'n', 'bad_cnt', 'bad_rate', 'auc', 'ks'] if c in perf_by_group.columns]],
 )
 
 mp_cols = [c for c in ['label', 'n', 'bad_cnt', 'bad_rate', 'auc', 'ks'] if c in monthly_perf.columns]
 r = write_block(
-    ws2, r, '六、逐月 AUC/KS',
+    ws1, r, '九、逐月 AUC/KS',
     monthly_perf.set_index('application_month')[mp_cols],
 )
 
@@ -2444,14 +2438,14 @@ m_cols = [c for c in [
     '1m30p_cnt_bad_rate_violation_cnt', '3m30p_cnt_bad_rate_violation_cnt',
 ] if c in monthly_stability_summary.columns]
 r = write_block(
-    ws2, r, '七、月度分箱稳定性',
+    ws1, r, '十、月度分箱稳定性',
     monthly_stability_summary.set_index('application_month')[m_cols],
 )
 
-auto_width(ws2)
+auto_width(ws1)
 
-# ==================== Sheet 3: 分箱优化过程 ====================
-ws3 = wb.create_sheet('3.分箱优化过程')
+# ==================== Sheet 2: 分箱优化过程 ====================
+ws3 = wb.create_sheet('2.分箱优化过程')
 setup_sheet(ws3, tab_color='8064A2')
 r = 1
 
@@ -2498,7 +2492,7 @@ r = write_block(
 auto_width(ws3)
 
 # ==================== Sheet 4: 边界与阈值敏感性 ====================
-ws4 = wb.create_sheet('4.边界与阈值敏感性')
+ws4 = wb.create_sheet('3.边界与阈值敏感性')
 setup_sheet(ws4, tab_color='C65911')
 r = 1
 
@@ -2573,7 +2567,7 @@ r = write_block(
 auto_width(ws4)
 
 # ==================== Sheet 5: 三套策略方案对比 ====================
-ws5 = wb.create_sheet('5.三套策略方案对比')
+ws5 = wb.create_sheet('4.三套策略方案对比')
 setup_sheet(ws5, tab_color='BF9000')
 r = 1
 
