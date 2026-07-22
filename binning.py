@@ -12,10 +12,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# IPython display() 不在命令行环境可用，替换为空操作
-def display(*args, **kwargs):
-    pass
-
 from scipy.stats import norm
 from scipy.stats import chi2_contingency
 import statsmodels.api as sm
@@ -55,19 +51,15 @@ def read_csv_clean(path, **kwargs):
 
 # 主表：样本表
 sample = read_csv_clean(DATA_DIR / 'sample.csv')
-print(f"sample: {sample.shape}")
+print('1/14 加载数据 ...')
 
 # 申请信息表（已按 sample 对齐）
 app = read_csv_clean(DATA_DIR / 'application_info.csv')
-print(f"app: {app.shape}")
 
 # 模型分表
 mlt_score = read_csv_clean(DATA_DIR / 'aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv')
 apply_score = read_csv_clean(DATA_DIR / 'aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score.csv')
 txn_score = read_csv_clean(DATA_DIR / 'aus_old_risk_bid_submodel_v20260323_v1_2_txn_lgb_score.csv')
-print(f"mlt_score: {mlt_score.shape}")
-print(f"apply_score: {apply_score.shape}")
-print(f"txn_score: {txn_score.shape}")
 
 
 # ============================================================
@@ -84,8 +76,6 @@ apply_col = 'aus_old_risk_apply_appmodel_v20260318_v1_2_lgb_score'
 
 mlt_dedup = mlt_score.drop_duplicates(subset='application_id', keep='first')
 apply_dedup = apply_score.drop_duplicates(subset='application_id', keep='first')
-print(f"mlt_score 去重: {mlt_score.shape[0]} -> {mlt_dedup.shape[0]}")
-print(f"apply_score 去重: {apply_score.shape[0]} -> {apply_dedup.shape[0]}")
 
 df = df.merge(
     mlt_dedup[['application_id', mlt_col]],
@@ -107,7 +97,6 @@ txn_feature_cols = [
     )
 ]
 txn_dedup = txn_score.drop_duplicates(subset='application_id', keep='first')
-print(f"txn_score 去重: {txn_score.shape[0]} -> {txn_dedup.shape[0]}")
 
 df = df.merge(
     txn_dedup[['application_id'] + txn_feature_cols],
@@ -150,9 +139,7 @@ numeric_cols = [c for c in numeric_cols if c in df.columns]
 for col in numeric_cols:
     df[col] = pd.to_numeric(df[col], errors='coerce')
 
-print(f"df: {df.shape}")
-print(f"columns ({len(df.columns)}): {df.columns.tolist()}")
-print(f"\n缺失率概览:\n{df.isnull().mean().round(4).sort_values(ascending=False).head(20)}")
+print(f'2/14 数据拼接完成，{len(df.columns)} 个字段，{len(df)} 行')
 
 
 # ============================================================
@@ -170,30 +157,6 @@ required_cols = [
 missing_required_cols = [c for c in required_cols if c not in df.columns]
 if missing_required_cols:
     raise ValueError(f"关键字段缺失: {missing_required_cols}")
-
-data_quality = pd.DataFrame({
-    'column': df.columns,
-    'dtype': [df[c].dtype for c in df.columns],
-    'missing_cnt': [df[c].isna().sum() for c in df.columns],
-    'missing_rate': [df[c].isna().mean() for c in df.columns],
-    'nunique': [df[c].nunique(dropna=True) for c in df.columns],
-})
-
-key_checks = {
-    'sample_rows': len(sample),
-    'df_rows': len(df),
-    'sample_application_id_dup': int(sample['application_id'].duplicated().sum()),
-    'df_application_id_dup': int(df['application_id'].duplicated().sum()),
-    'mlt_score_application_id_dup': int(mlt_score['application_id'].duplicated().sum()),
-    'apply_score_application_id_dup': int(apply_score['application_id'].duplicated().sum()),
-    'txn_score_application_id_dup': int(txn_score['application_id'].duplicated().sum()),
-    'application_month_min': df['application_month'].min(),
-    'application_month_max': df['application_month'].max(),
-    'application_month_nunique': df['application_month'].nunique(dropna=True),
-}
-
-display(pd.Series(key_checks, name='value'))
-display(data_quality.sort_values('missing_rate', ascending=False).head(30))
 
 
 # ============================================================
@@ -216,23 +179,7 @@ df['sample_group'] = np.select(
 train_df = df.loc[df['sample_group'].eq('train')].copy()
 oot_df = df.loc[df['sample_group'].eq('oot')].copy()
 
-split_summary = (
-    df.groupby('sample_group', dropna=False)
-      .agg(
-          n=('application_id', 'count'),
-          application_id_nunique=('application_id', 'nunique'),
-          month_min=('application_month', 'min'),
-          month_max=('application_month', 'max'),
-          score_mlt_missing_rate=('score_mlt', lambda s: s.isna().mean()),
-          m1_mature=('duedate_1m_30', lambda s: s.isin([0, 1]).sum()),
-          m3_mature=('duedate_3m_30', lambda s: s.isin([0, 1]).sum()),
-      )
-      .reset_index()
-)
-
-display(split_summary)
-print(f"train_df: {train_df.shape}")
-print(f"oot_df: {oot_df.shape}")
+print(f'3/14 样本切分完成，Train {len(train_df)} 行，OOT {len(oot_df)} 行')
 
 
 # ============================================================
@@ -541,7 +488,7 @@ metric_columns_preview = [
     'cum_pass_rate', 'cum_1m30p_cnt_bad_rate', 'cum_3m30p_cnt_bad_rate',
 ]
 
-print('指标计算函数已就绪：calc_bin_stats / calc_funnel_stats')
+print('4/14 指标计算函数已就绪')
 
 
 # ============================================================
@@ -644,18 +591,7 @@ bin_stats_20 = bin_stats_20.merge(
     how='left',
 )
 
-bin20_preview_cols = [
-    'bin_order', BIN20_COL, 'score_left', 'score_right',
-    'n', 'sample_pct', 'score_min', 'score_max',
-    '1m30p_cnt_mature', '1m30p_cnt_bad_rate',
-    '3m30p_cnt_mature', '3m30p_cnt_bad_rate',
-    '1m30p_amt_bad_rate', '3m30p_amt_bad_rate',
-    'cum_pass_rate', 'cum_1m30p_cnt_bad_rate', 'cum_3m30p_cnt_bad_rate',
-]
-
-print(f"score_mlt 等频初分实际箱数: {len(score_mlt_bin_edges) - 1}")
-display(score_mlt_bin_edges_df)
-display(bin_stats_20[bin20_preview_cols])
+print(f'5/14 score_mlt 等频初分完成，{len(score_mlt_bin_edges) - 1} 箱')
 
 
 # ============================================================
@@ -793,14 +729,6 @@ def diagnose_bin_stats(bin_stats, config=None):
 
 bin_diagnosis_20 = diagnose_bin_stats(bin_stats_20)
 
-diagnosis_preview_cols = [
-    'bin_order', BIN20_COL, 'n',
-    '1m30p_cnt_mature', '1m30p_cnt_bad', '1m30p_cnt_bad_rate', '1m30p_cnt_rate_diff_prev',
-    '3m30p_cnt_mature', '3m30p_cnt_bad', '3m30p_cnt_bad_rate', '3m30p_cnt_rate_diff_prev',
-    '1m30p_amt_bad_rate', '3m30p_amt_bad_rate',
-    'diagnosis_flag_cnt', 'merge_priority_score', 'diagnosis_flags',
-]
-
 diagnosis_summary = pd.Series({
     'bin_cnt': len(bin_diagnosis_20),
     '1m30p_inversion_cnt': int(bin_diagnosis_20['1m30p_inversion_flag'].sum()),
@@ -815,14 +743,8 @@ diagnosis_summary = pd.Series({
     '3m30p_amt_cnt_gap_cnt': int(bin_diagnosis_20['3m30p_amt_cnt_gap_flag'].sum()),
 }, name='value')
 
-display(diagnosis_summary)
-display(bin_diagnosis_20[diagnosis_preview_cols])
-
-merge_priority_bins = bin_diagnosis_20.loc[
-    bin_diagnosis_20['merge_priority_score'].gt(0),
-    ['bin_order', BIN20_COL, 'merge_priority_score', 'diagnosis_flags']
-].sort_values(['merge_priority_score', 'bin_order'], ascending=[False, True])
-display(merge_priority_bins)
+inv_cnt = diagnosis_summary['3m30p_inversion_cnt']
+print(f'6/14 20箱诊断完成，3M30倒挂 {inv_cnt} 箱')
 
 
 # ============================================================
@@ -974,19 +896,8 @@ final_monotonicity_check = check_monotonicity(
     ],
 )
 
-final_preview_cols = [
-    'bin_order', FINAL_BIN_COL, 'merged_from', 'score_left', 'score_right',
-    'n', 'sample_pct', 'score_min', 'score_max',
-    '1m30p_cnt_mature', '1m30p_cnt_bad', '1m30p_cnt_bad_rate',
-    '3m30p_cnt_mature', '3m30p_cnt_bad', '3m30p_cnt_bad_rate',
-    '1m30p_amt_bad_rate', '3m30p_amt_bad_rate',
-    'cum_pass_rate', 'cum_1m30p_cnt_bad_rate', 'cum_3m30p_cnt_bad_rate',
-]
-
-display(score_mlt_final_merge_map)
-display(score_mlt_final_edges_df)
-display(bin_stats_final[final_preview_cols])
-display(final_monotonicity_check)
+mono_ok = final_monotonicity_check['is_monotonic_non_decreasing'].all()
+print(f'7/14 最终分箱完成，单调性 {"OK" if mono_ok else "存在倒挂"}')
 
 
 # ============================================================
@@ -1164,69 +1075,7 @@ monthly_perf = calc_perf_by_group(
     label_cols=['duedate_1m_30', 'duedate_3m_30'],
 )
 
-oot_3m_amount_maturity_check = (
-    oot_final_binned.groupby([FINAL_BIN_COL, 'bin_order'], dropna=False, observed=True)
-    .agg(
-        n=('application_id', 'count'),
-        duedate_3m_30_mature=('duedate_3m_30', lambda s: s.isin([0, 1]).sum()),
-        dpd_days_ever_mob3_notna=('dpd_days_ever_mob3', lambda s: s.notna().sum()),
-        principal_notna=('principal', lambda s: s.notna().sum()),
-        estimate_principal_remaining_mob3_notna=('estimate_principal_remaining_mob3', lambda s: s.notna().sum()),
-    )
-    .reset_index()
-    .sort_values('bin_order')
-)
-
-display(train_oot_bin_compare)
-display(oot_monotonicity_check)
-display(psi_final)
-display(perf_by_group)
-display(monthly_stability_summary)
-display(monthly_perf)
-display(oot_3m_amount_maturity_check)
-
-
-# ============================================================
-# 8.2 验证结论
-# ============================================================
-
-psi_total = psi_final['psi_total'].iloc[0]
-oot_3m_cnt_monotonic = bool(
-    oot_monotonicity_check.loc[
-        oot_monotonicity_check['metric'].eq('3m30p_cnt_bad_rate'),
-        'is_monotonic_non_decreasing',
-    ].iloc[0]
-)
-oot_1m_cnt_monotonic = bool(
-    oot_monotonicity_check.loc[
-        oot_monotonicity_check['metric'].eq('1m30p_cnt_bad_rate'),
-        'is_monotonic_non_decreasing',
-    ].iloc[0]
-)
-oot_3m_amt_available = bool(oot_bin_stats_final['3m30p_amt_bad_rate'].notna().any())
-train_3m_auc = perf_by_group.loc[
-    perf_by_group['sample_group'].eq('train') & perf_by_group['label'].eq('duedate_3m_30'),
-    'auc',
-].iloc[0]
-oot_3m_auc = perf_by_group.loc[
-    perf_by_group['sample_group'].eq('oot') & perf_by_group['label'].eq('duedate_3m_30'),
-    'auc',
-].iloc[0]
-
-validation_decision = pd.Series({
-    'psi_total': psi_total,
-    'oot_3m_cnt_monotonic': oot_3m_cnt_monotonic,
-    'oot_1m_cnt_monotonic': oot_1m_cnt_monotonic,
-    'oot_3m_amt_available': oot_3m_amt_available,
-    'train_3m_auc': train_3m_auc,
-    'oot_3m_auc': oot_3m_auc,
-    'oot_3m_auc_drop': train_3m_auc - oot_3m_auc,
-    'months_with_3m_cnt_violation': int(monthly_stability_summary['3m30p_cnt_bad_rate_violation_cnt'].gt(0).sum()),
-    'months_with_1m_cnt_violation': int(monthly_stability_summary['1m30p_cnt_bad_rate_violation_cnt'].gt(0).sum()),
-    'recommendation': '保留当前8档作为候选最终分箱；先进入阈值曲线，等OOT金额口径成熟后再复核',
-}, name='value')
-
-display(validation_decision)
+print(f'8/14 OOT验证完成，PSI={psi_final["psi_total"].iloc[0]:.4f}，Train AUC={perf_by_group.loc[perf_by_group["sample_group"].eq("train") & perf_by_group["label"].eq("duedate_3m_30"), "auc"].iloc[0]:.4f}，OOT AUC={perf_by_group.loc[perf_by_group["sample_group"].eq("oot") & perf_by_group["label"].eq("duedate_3m_30"), "auc"].iloc[0]:.4f}')
 
 
 # ============================================================
@@ -1361,27 +1210,7 @@ threshold_curve_quantile = calc_threshold_curve(
     thresholds=quantile_thresholds(train_final_binned, SCORE_COL, n_quantiles=100),
 )
 
-threshold_curve_preview_cols = [
-    'threshold_order', 'threshold', FINAL_BIN_COL, 'merged_from',
-    'cum_n', 'cum_pass_rate', 'cum_principal_pct',
-    'cum_1m30p_cnt_mature', 'cum_1m30p_cnt_bad_rate',
-    'cum_3m30p_cnt_mature', 'cum_3m30p_cnt_bad_rate',
-    'cum_1m30p_amt_bad_rate', 'cum_3m30p_amt_bad_rate',
-    'marginal_n', 'marginal_sample_pct',
-    'marginal_1m30p_cnt_bad_rate', 'marginal_3m30p_cnt_bad_rate',
-]
-
-display(threshold_curve_final_bins[threshold_curve_preview_cols])
-display(threshold_curve_quantile[[
-    'threshold_order', 'threshold', 'cum_n', 'cum_pass_rate',
-    'cum_1m30p_cnt_bad_rate', 'cum_3m30p_cnt_bad_rate',
-    'marginal_n', 'marginal_1m30p_cnt_bad_rate', 'marginal_3m30p_cnt_bad_rate',
-]].head(20))
-display(threshold_curve_quantile[[
-    'threshold_order', 'threshold', 'cum_n', 'cum_pass_rate',
-    'cum_1m30p_cnt_bad_rate', 'cum_3m30p_cnt_bad_rate',
-    'marginal_n', 'marginal_1m30p_cnt_bad_rate', 'marginal_3m30p_cnt_bad_rate',
-]].tail(20))
+print(f'9/14 阈值曲线计算完成，共 {len(threshold_curve_final_bins)} 个候选阈值')
 
 
 # ============================================================
@@ -1578,14 +1407,6 @@ strategy_segment_oot = make_strategy_segment_report(
 )
 strategy_segment_report = pd.concat([strategy_segment_train, strategy_segment_oot], ignore_index=True)
 
-strategy_plan_preview_cols = [
-    'strategy_name', 'auto_pass_bin', 'auto_pass_threshold',
-    'manual_review_upper_bin', 'reject_threshold',
-    'auto_pass_rate', 'manual_review_rate', 'reject_rate',
-    'accepted_1m30p_cnt_bad_rate', 'accepted_3m30p_cnt_bad_rate',
-    'accepted_1m30p_amt_bad_rate', 'accepted_3m30p_amt_bad_rate',
-    'last_accepted_marginal_1m30p_cnt_bad_rate', 'last_accepted_marginal_3m30p_cnt_bad_rate',
-]
 strategy_segment_preview_cols = [
     'sample_group', 'strategy_name', 'decision',
     'lower_threshold_exclusive', 'upper_threshold_inclusive',
@@ -1595,8 +1416,8 @@ strategy_segment_preview_cols = [
     '1m30p_amt_bad_rate', '3m30p_amt_bad_rate',
 ]
 
-display(strategy_plan[strategy_plan_preview_cols])
-display(strategy_segment_report[strategy_segment_preview_cols])
+rec = strategy_plan.loc[strategy_plan['strategy_name'].eq('平衡方案')]
+print(f'10/14 策略方案生成完成，推荐平衡方案：自动通过 {rec["auto_pass_rate"].iloc[0]:.1%}，人工审核 {rec["manual_review_rate"].iloc[0]:.1%}')
 
 
 # ============================================================
@@ -1627,8 +1448,6 @@ strategy_recommendation = pd.Series({
     ].iloc[0],
     'note': '当前方案仍需结合人工审核产能、收益/EL、以及OOT 3M30金额口径成熟后复核',
 }, name='value')
-
-display(strategy_recommendation)
 
 
 # ============================================================
@@ -1690,19 +1509,7 @@ adjacent_sig_1m30p = adjacent_proportion_tests(bin_stats_20, '1m30p')
 adjacent_sig_3m30p = adjacent_proportion_tests(bin_stats_20, '3m30p')
 adjacent_sig_tests = pd.concat([adjacent_sig_1m30p, adjacent_sig_3m30p], ignore_index=True)
 
-adjacent_sig_summary = (
-    adjacent_sig_tests.groupby('metric')
-    .agg(
-        adjacent_pair_cnt=('metric', 'count'),
-        inversion_cnt=('direction_ok', lambda s: int((~s).sum())),
-        insignificant_cnt=('significant_5pct', lambda s: int((~s).sum())),
-        merge_hint_cnt=('merge_hint', lambda s: int(s.eq('建议合并').sum())),
-    )
-    .reset_index()
-)
-
-display(adjacent_sig_summary)
-display(adjacent_sig_tests.loc[adjacent_sig_tests['merge_hint'].eq('建议合并')])
+print(f'11/14 相邻箱显著性检验完成，建议合并 {int(adjacent_sig_tests["merge_hint"].eq("建议合并").sum())} 对')
 
 
 # ============================================================
@@ -1792,7 +1599,7 @@ candidate_merge_compare['candidate_score'] = (
 )
 candidate_merge_compare = candidate_merge_compare.sort_values('candidate_score', ascending=False).reset_index(drop=True)
 
-display(candidate_merge_compare)
+print(f'12/14 候选合箱方案比较完成，推荐 {candidate_merge_compare.iloc[0]["candidate_name"]}')
 
 
 # ============================================================
@@ -1874,15 +1681,8 @@ for decimals in [4, 3]:
     }
 
 rounded_boundary_compare = pd.DataFrame(rounded_boundary_rows)
-rounded_boundary_recommendation = pd.Series({
-    'recommendation': '建议优先使用4位小数边界；如线上要求更简洁，可评估3位小数但需复核迁移样本和风险率变化',
-    'current_boundary_style': '精确分位点边界',
-    'preferred_rounded_decimals': 4,
-}, name='value')
 
-display(rounded_boundary_compare)
-display(rounded_boundary_details[4]['rounded_edges'])
-display(rounded_boundary_recommendation)
+print(f'13/14 边界取整分析完成，4位小数迁移 {rounded_boundary_rows[0]["shifted_pct"]:.2%} 样本')
 
 
 # ============================================================
@@ -1899,8 +1699,6 @@ binning_optimization_decision = pd.Series({
     'recommended_edges': 'G01<=0.0378, G02<=0.0595, G03<=0.0777, G04<=0.0975, G05<=0.1413, G06<=0.1894, G07<=0.2469, G08>0.2469',
     'need_recheck': '边界取整后应复跑策略方案；若业务更看重简洁，可对7档方案单独生成阈值曲线与策略方案',
 }, name='value')
-
-display(binning_optimization_decision)
 
 
 # ============================================================
@@ -2023,12 +1821,7 @@ rounded4_recalc_decision = pd.Series({
     'recommendation': '4位小数边界复算影响很小，可作为上线配置版本；策略推荐继续使用平衡方案',
 }, name='value')
 
-display(rounded4_bin_compare)
-display(rounded4_train_monotonicity_check)
-display(rounded4_oot_monotonicity_check)
-display(strategy_plan_compare_rounded4)
-display(strategy_segment_report_rounded4[strategy_segment_preview_cols])
-display(rounded4_recalc_decision)
+print(f'14/14 4位小数复算完成，最大箱样本变化 {rounded4_recalc_decision["max_abs_train_bin_n_delta"]:.0f}')
 
 
 # ============================================================
@@ -2226,15 +2019,6 @@ threshold_sensitivity_decision = pd.Series({
     'accepted_3m30p_cnt_bad_rate': threshold_sensitivity_recommended_row['accepted_3m30p_cnt_bad_rate'],
     'note': '若人工产能可放宽到30%，可采用原平衡方案接纳到G06；若产能严格小于25%，建议接纳上限收至G05',
 }, name='value')
-
-display(threshold_sensitivity_matrix_rounded4)
-display(threshold_sensitivity_rounded4)
-display(threshold_sensitivity_final_vs_quantile[[
-    'max_manual_review_rate', 'max_accepted_3m30p_cnt_bad_rate',
-    'accepted_rate_rounded4', 'accepted_rate_quantile', 'accepted_rate_gain_quantile',
-    'auto_pass_rate_rounded4', 'auto_pass_rate_quantile', 'auto_rate_gain_quantile',
-]])
-display(threshold_sensitivity_decision)
 
 
 # ============================================================
