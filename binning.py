@@ -2137,7 +2137,7 @@ def _number_format(name):
 
 
 
-def auto_width(ws, min_w=10, max_w=42):
+def auto_width(ws, min_w=10, max_w=120):
     """根据中英文字符宽度自动调整列宽。"""
     for col_cells in ws.columns:
         letter = get_column_letter(col_cells[0].column)
@@ -2216,7 +2216,6 @@ def _apply_text_highlights(cell, col_name):
 
     if 'diagnosis_flags' in name_l and value and value != 'OK':
         cell.fill = WARN_FILL
-        cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
     if 'merge_hint' in name_l and '建议合并' in value:
         cell.fill = WARN_FILL
