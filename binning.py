@@ -2650,8 +2650,8 @@ for cfg in STRATEGY_CONFIGS:
 
 ts_cfg = THRESHOLD_SENSITIVITY_CONFIG
 ts_series = pd.Series({
-    '人工审核产能上限': ts_cfg['manual_review_caps'],
-    '接纳3M30+上限': ts_cfg['accepted_3m30p_caps'],
+    '人工审核产能上限': str(ts_cfg['manual_review_caps']),
+    '接纳3M30+上限': str(ts_cfg['accepted_3m30p_caps']),
     '接纳1M30+上限': ts_cfg['accepted_1m30p_cap'],
     '接纳边际3M30+上限': ts_cfg['accepted_marginal_3m30p_cap'],
     '自动通过风险比例': ts_cfg['auto_cap_ratio'],
