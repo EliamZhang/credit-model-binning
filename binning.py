@@ -2028,7 +2028,6 @@ threshold_sensitivity_decision = pd.Series({
 import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-from openpyxl.comments import Comment
 from openpyxl.formatting.rule import ColorScaleRule, DataBarRule
 
 OUT_DIR = Path('out')
@@ -2080,200 +2079,7 @@ COUNT_KEYWORDS = [
     'violation_cnt', 'bin_cnt', 'shifted_n', 'marginal_n',
 ]
 
-# 关键字段说明会写入 Excel 表头批注，方便读者悬停查看。
-METRIC_COMMENTS = {
-    'n': '当前箱或当前分组内的样本量，口径为 application_id 记录数。',
-    'application_id_nunique': '当前分组内去重后的 application_id 数量，用于检查重复样本。',
-    'sample_pct': '样本占比 = 当前箱样本量 / 当前分析样本总量。',
-    'score_left': '分箱左边界；当前区间规则为 (left, right]。',
-    'score_right': '分箱右边界；当前区间规则为 (left, right]。',
-    'score_min': '当前箱实际观测到的最小模型分。',
-    'score_max': '当前箱实际观测到的最大模型分。',
-    '1m30p_cnt_mature': '1M30+ 笔数口径成熟样本量：duedate_1m_30 取值为 0 或 1。',
-    '1m30p_cnt_bad': '1M30+ 笔数口径坏样本量：duedate_1m_30 = 1。',
-    '1m30p_cnt_bad_rate': '1M30+ 笔数逾期率 = 1M30+坏样本量 / 1M30+成熟样本量。',
-    '3m30p_cnt_mature': '3M30+ 笔数口径成熟样本量：duedate_3m_30 取值为 0 或 1。',
-    '3m30p_cnt_bad': '3M30+ 笔数口径坏样本量：duedate_3m_30 = 1。',
-    '3m30p_cnt_bad_rate': '3M30+ 笔数逾期率 = 3M30+坏样本量 / 3M30+成熟样本量。',
-    '1m30p_amt_bad_rate': '1M30+ 金额逾期率 = MOB1逾期剩余本金 / MOB1成熟样本对应本金。',
-    '3m30p_amt_bad_rate': '3M30+ 金额逾期率 = MOB3逾期剩余本金 / MOB3成熟样本对应本金。',
-    '1m30p_cnt_lift': '当前箱1M30+笔数逾期率 / 全体样本1M30+笔数逾期率。',
-    '3m30p_cnt_lift': '当前箱3M30+笔数逾期率 / 全体样本3M30+笔数逾期率。',
-    'cum_pass_rate': '从低风险端累计至当前阈值的样本占比。',
-    'cum_1m30p_cnt_bad_rate': '从低风险端累计至当前阈值的1M30+笔数逾期率。',
-    'cum_3m30p_cnt_bad_rate': '从低风险端累计至当前阈值的3M30+笔数逾期率。',
-    'threshold': '策略阈值，模型分不高于该值的样本进入当前累计范围。',
-    'marginal_sample_pct': '新增放宽一个分数区间所增加的样本占比。',
-    'marginal_1m30p_cnt_bad_rate': '新增边际区间自身的1M30+笔数逾期率，而非累计逾期率。',
-    'marginal_3m30p_cnt_bad_rate': '新增边际区间自身的3M30+笔数逾期率，而非累计逾期率。',
-    'psi_component': '该风险等级对总体 PSI 的贡献。',
-    'psi_total': 'Train 与 OOT 分箱分布的总体 PSI。',
-    'auc': '模型排序能力指标；本代码按高分高风险方向计算。',
-    'ks': '好坏样本累计分布的最大差异，用于评估模型区分度。',
-    'diagnosis_flags': '对样本量、成熟样本、坏样本、倒挂、置信区间和金额口径的综合诊断。',
-    'merge_priority_score': '合箱优先级评分，分数越高代表越需要优先检查或合并。',
-    'candidate_score': '候选分箱方案综合评分，仅用于方案横向比较，仍需结合业务解释和OOT表现判断。',
-    'z_p_value': '相邻箱两比例 Z 检验的 p 值。',
-    'chi2_p_value': '相邻箱列联表卡方检验的 p 值。',
-    'significant_5pct': '在 5% 显著性水平下，相邻箱风险差异是否显著。',
-    'shifted_pct': '边界取整后发生分箱迁移的样本占比。',
-    'auto_pass_rate': '自动通过人群占全体样本的比例。',
-    'manual_review_rate': '人工审核人群占全体样本的比例。',
-    'reject_rate': '拒绝人群占全体样本的比例。',
-    'accepted_rate': '自动通过与人工审核合计的人群占比。',
-    'accepted_3m30p_cnt_bad_rate': '接纳人群（自动通过+人工审核）的累计3M30+笔数逾期率。',
-    'last_accepted_marginal_3m30p_cnt_bad_rate': '最后一个被接纳边际区间自身的3M30+笔数逾期率。',
-}
 
-
-REPORT_GUIDANCE = {
-    'strategy_recommendation': {
-        'focus': '先看推荐策略、阈值区间、接纳规模、人工审核占比和接纳人群3M30+风险；这是整份报告的决策入口。',
-        'logic': '综合最终分箱、Train/OOT验证、边界取整复算和阈值敏感性结果形成推荐结论。',
-        'caution': '推荐结论依赖当前人工审核产能和风险上限假设；上线前需由策略、风险与运营共同确认。',
-        'key_columns': ['值'],
-    },
-    'rounded4_recalc': {
-        'focus': '确认4位小数上线边界是否改变样本归属、风险表现和三段策略规模。',
-        'logic': '将精确边界统一取4位小数后重新分箱、重算指标，再与精确边界结果对比。',
-        'caution': '不能只比较阈值数值，应同时检查迁移样本占比及高风险边界附近的样本变化。',
-    },
-    'recommended_segment': {
-        'focus': '分别比较自动通过、人工审核、拒绝三段的规模、成熟样本和1M30+/3M30+风险。',
-        'logic': '按推荐方案的两个阈值切分样本，并在Train或OOT内分别汇总三段指标。',
-        'caution': 'OOT部分可能受观察期未完全成熟影响；成熟样本量不足时不要直接比较绝对逾期率。',
-        'key_columns': ['decision', 'sample_pct', '3m30p_cnt_bad_rate'],
-    },
-    'final_bins': {
-        'focus': '重点检查各风险等级的样本占比、3M30+风险单调性、Lift和累计风险变化。',
-        'logic': '先在Train学习20等频箱，再按相邻箱诊断合并为8档；同一边界直接复用于OOT。',
-        'caution': '当前模型方向为高分高风险；区间规则为(left, right]，边界值归入右侧箱。',
-        'key_columns': ['score_left', 'score_right', 'sample_pct', '3m30p_cnt_bad_rate', 'cum_pass_rate'],
-    },
-    'threshold_curve': {
-        'focus': '观察阈值逐步放宽时，通过率提升与累计3M30+风险、边际3M30+风险的同步变化。',
-        'logic': '依次将每个最终风险等级右边界作为阈值，从低风险端向高风险端累计计算。',
-        'caution': '累计风险用于评估整体接纳质量；边际风险用于判断新增一档是否值得接纳，两者不可混用。',
-        'key_columns': ['threshold', 'cum_pass_rate', 'cum_3m30p_cnt_bad_rate', 'marginal_3m30p_cnt_bad_rate'],
-    },
-    'train_oot_compare': {
-        'focus': '关注各箱样本占比漂移、风险排序是否保持，以及Train/OOT逾期率差异最大的风险等级。',
-        'logic': '使用Train学习的固定边界分别计算Train与OOT逐箱指标，再按最终风险等级对齐比较。',
-        'caution': 'OOT成熟度、样本量和业务客群变化都会影响结果；需同时看成熟样本量和风险率。',
-        'key_columns': ['sample_pct_train', 'sample_pct_oot', '3m30p_cnt_bad_rate_train', '3m30p_cnt_bad_rate_oot'],
-    },
-    'psi': {
-        'focus': '先看总体PSI，再定位贡献最大的风险等级，并判断漂移是否集中在策略边界附近。',
-        'logic': '以Train为基准分布、OOT为实际分布，按固定最终分箱计算各箱PSI贡献并求和。',
-        'caution': 'PSI只反映分布变化，不直接代表模型失效；应与AUC/KS、风险排序和业务变化结合判断。',
-        'key_columns': ['expected_pct', 'actual_pct', 'psi_component'],
-    },
-    'auc_ks': {
-        'focus': '比较Train与OOT在1M30+、3M30+口径下的AUC、KS和坏样本量。',
-        'logic': '仅使用模型分非空且标签为0/1的成熟样本，按高分高风险方向计算排序指标。',
-        'caution': 'AUC/KS下降需要结合样本量、坏样本量和客群变化判断；少量成熟样本可能导致波动较大。',
-        'key_columns': ['label', 'bad_rate', 'auc', 'ks'],
-    },
-    'monthly_auc_ks': {
-        'focus': '识别AUC、KS或整体坏账率异常波动的月份，并与策略、渠道或数据变化交叉验证。',
-        'logic': '按申请月份拆分成熟样本，分别计算1M30+和3M30+的AUC与KS。',
-        'caution': '最近月份通常成熟度较低，不能与成熟月份直接横向比较。',
-        'key_columns': ['bad_rate', 'auc', 'ks'],
-    },
-    'monthly_stability': {
-        'focus': '检查每月风险等级是否保持单调、每箱成熟样本是否充足，以及异常月份数量。',
-        'logic': '逐月套用固定最终边界，并统计各风险指标的倒挂次数和最小箱样本量。',
-        'caution': '单月倒挂不一定需要立即调箱，应先判断是否由小样本、成熟度或偶发业务变化导致。',
-        'key_columns': ['m1_bad_rate', 'm3_bad_rate', 'min_m3_mature_per_bin', '3m30p_cnt_bad_rate_violation_cnt'],
-    },
-    'diagnosis_summary': {
-        'focus': '快速判断20等频初分中存在多少倒挂、成熟不足、坏样本不足和相邻置信区间重叠。',
-        'logic': '基于预设诊断阈值，对每个初始箱执行样本量、风险排序、置信区间和金额口径检查。',
-        'caution': '诊断阈值是分析参数，不等同于业务硬规则；应结合总体样本规模调整。',
-    },
-    'diagnosis_detail': {
-        'focus': '优先检查merge_priority_score较高、3M30+倒挂或成熟样本不足的箱。',
-        'logic': '逐箱计算与前一箱的风险差异，并汇总多类诊断标记形成合箱优先级。',
-        'caution': '相邻置信区间重叠只表示差异证据不足，不代表两个箱业务上必须合并。',
-        'key_columns': ['merge_priority_score', 'diagnosis_flags', '3m30p_cnt_bad_rate'],
-    },
-    'candidate_compare': {
-        'focus': '对比6/7/8/9档方案在最小样本、单调性、OOT表现、PSI和月度稳定性上的平衡。',
-        'logic': '对不同相邻合箱方案统一重算Train、OOT及跨月指标，再形成候选方案综合评分。',
-        'caution': '综合评分用于缩小候选范围，最终档数还需兼顾策略可操作性和风险区分度。',
-        'key_columns': ['bin_cnt', 'psi_total', 'oot_3m_cnt_violation_cnt', 'candidate_score'],
-    },
-    'binning_decision': {
-        'focus': '查看最终选择的档数、选择理由、保留风险区分度以及后续需监控的问题。',
-        'logic': '综合候选方案评估、相邻显著性、OOT稳定性和策略应用需求形成分箱结论。',
-        'caution': '分箱结论应版本化管理；模型或客群发生明显变化时需要重新验证，而非沿用旧边界。',
-    },
-    'significance': {
-        'focus': '重点看差异不显著且方向不稳定的相邻箱，作为进一步合并或观察的候选。',
-        'logic': '对相邻箱坏样本率执行两比例Z检验和卡方检验，并结合单调方向生成合并提示。',
-        'caution': '统计显著性受样本量影响；大样本下微小差异也可能显著，仍需判断业务意义。',
-        'key_columns': ['metric', 'rate_diff', 'z_p_value', 'chi2_p_value', 'merge_hint'],
-    },
-    'rounding_compare': {
-        'focus': '检查取整后迁移样本占比、最大箱规模变化、最大3M30+风险变化和OOT单调性。',
-        'logic': '分别按3位和4位小数取整最终边界，并对全量样本重新分箱后与精确边界比较。',
-        'caution': '边界取整看似微小，但若分数高度集中在边界附近，可能造成明显样本迁移。',
-        'key_columns': ['shifted_pct', 'max_abs_3m30p_rate_delta', 'oot_3m_cnt_violation_cnt'],
-    },
-    'rounded4_bin_compare': {
-        'focus': '逐箱定位4位小数取整造成的样本量和1M30+/3M30+风险差异。',
-        'logic': '精确边界和4位小数边界分别计算同一批样本，再按箱序逐项相减。',
-        'caution': '高风险尾部即使样本迁移不多，也可能对拒绝阈值和整体风险产生较大影响。',
-        'key_columns': ['n_delta', '3m30p_cnt_bad_rate_exact', '3m30p_cnt_bad_rate_rounded4'],
-    },
-    'rounded4_strategy_compare': {
-        'focus': '确认三套方案在边界取整前后的自动通过、人工审核、拒绝规模和接纳风险是否一致。',
-        'logic': '在精确边界和4位小数边界下分别应用同一策略方案，并计算规模与风险差值。',
-        'caution': '上线配置应以复算后的4位小数结果为准，不能直接复制精确边界下的指标。',
-        'key_columns': ['auto_pass_threshold_rounded4', 'reject_threshold_rounded4', 'manual_review_rate_delta', 'accepted_3m30p_cnt_bad_rate_rounded4'],
-    },
-    'sensitivity_matrix': {
-        'focus': '在不同人工审核产能与接纳3M30+风险上限下，比较可实现的接纳率和阈值组合。',
-        'logic': '遍历产能上限和风险上限，对4位小数最终箱阈值组合进行约束搜索。',
-        'caution': '矩阵结果是静态样本测算，不包含人工审核通过率、收益和运营时效等二次影响。',
-        'key_columns': ['max_manual_review_rate'],
-    },
-    'sensitivity_detail': {
-        'focus': '查看每组约束是否有可行解，以及对应的阈值、三段规模、接纳风险和边际风险。',
-        'logic': '对每组约束返回满足条件的最优阈值组合；无可行组合时标记非OK状态。',
-        'caution': 'accepted_3m30p_cnt_bad_rate是接纳人群累计风险，last_accepted_marginal风险代表最后一档新增风险。',
-        'key_columns': ['status', 'auto_pass_threshold', 'reject_threshold', 'accepted_rate', 'accepted_3m30p_cnt_bad_rate'],
-    },
-    'sensitivity_decision': {
-        'focus': '查看推荐采用的产能假设、风险上限、自动通过/人工审核/拒绝规则和备选方案。',
-        'logic': '从敏感性扫描中提取人工审核不超过25%、接纳3M30+不超过8%的可行组合。',
-        'caution': '若实际人工审核通过率、产能或风险偏好变化，应回到敏感性明细重新选择阈值。',
-    },
-    'quantile_compare': {
-        'focus': '评估细粒度分位点阈值相较最终箱边界能否额外提升接纳率或自动通过率。',
-        'logic': '在相同产能与风险约束下，分别用最终箱边界和细粒度分位点曲线搜索阈值。',
-        'caution': '分位点阈值更精细，但上线解释、配置稳定性和版本管理成本更高。',
-        'key_columns': ['accepted_rate_gain_quantile', 'auto_rate_gain_quantile'],
-    },
-    'plan_overview': {
-        'focus': '横向比较增长、平衡、保守三套方案的阈值、三段规模、累计风险和最后接纳边际风险。',
-        'logic': '基于最终阈值曲线选取不同风险偏好的自动通过与拒绝边界，并统一重算策略指标。',
-        'caution': '方案名称只代表相对风险偏好；正式上线仍需结合收益、人工审核效果和业务目标。',
-        'key_columns': ['auto_pass_threshold', 'reject_threshold', 'accepted_3m30p_cnt_bad_rate', 'last_accepted_marginal_3m30p_cnt_bad_rate'],
-    },
-    'segment_train': {
-        'focus': '比较各方案在Train上的自动通过、人工审核、拒绝规模及三段风险梯度。',
-        'logic': '按每套方案阈值切分Train样本，并分别计算三段风险和样本规模。',
-        'caution': 'Train用于方案设计，不能替代OOT验证；过度追求Train单调可能造成过拟合。',
-        'key_columns': ['sample_pct', '3m30p_cnt_bad_rate'],
-    },
-    'segment_oot': {
-        'focus': '确认各方案在OOT上的三段规模和风险排序是否延续Train结论。',
-        'logic': '直接套用Train阶段确定的策略阈值，对OOT样本重新切分和汇总。',
-        'caution': '重点核对每段成熟样本量；观察期不足时3M30+风险可能为空或波动较大。',
-        'key_columns': ['sample_pct', '3m30p_cnt_bad_rate'],
-    },
-}
 
 
 def _is_pct_col(name):
@@ -2329,103 +2135,6 @@ def _number_format(name):
         return '0.0000'
     return 'General'
 
-
-def _metric_comment(name):
-    name = str(name)
-    if name in METRIC_COMMENTS:
-        return METRIC_COMMENTS[name]
-
-    # 对 Train/OOT、精确/取整等带后缀字段复用基础口径说明。
-    for suffix in ['_train', '_oot', '_exact', '_rounded4', '_rounded3', '_quantile']:
-        if name.endswith(suffix):
-            base = name[:-len(suffix)]
-            if base in METRIC_COMMENTS:
-                suffix_text = {
-                    '_train': '（Train样本）',
-                    '_oot': '（OOT样本）',
-                    '_exact': '（精确边界）',
-                    '_rounded4': '（4位小数边界）',
-                    '_rounded3': '（3位小数边界）',
-                    '_quantile': '（分位点曲线）',
-                }[suffix]
-                return METRIC_COMMENTS[base] + suffix_text
-
-    name_l = name.lower()
-    if 'mature' in name_l:
-        return '成熟样本或成熟金额口径。阅读风险率时应同时检查该字段是否充足。'
-    if 'bad_rate' in name_l:
-        return '逾期率/坏样本率字段。请同时核对对应分子、分母及观察期成熟度。'
-    if 'delta' in name_l or 'gap' in name_l:
-        return '两种口径或两个样本之间的差异值；正负方向需结合字段后缀理解。'
-    if 'violation' in name_l:
-        return '风险单调性或规则检查的违反次数/位置，数值越高越需要进一步排查。'
-    return None
-
-
-def _format_display_value(col_name, value):
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return '空'
-    if isinstance(value, (np.floating, float, np.integer, int)):
-        value = float(value)
-        if _is_pct_col(col_name):
-            return f'{value:.2%}'
-        if _is_count_col(col_name):
-            return f'{value:,.0f}'
-        return f'{value:.4f}'
-    return str(value)
-
-
-def _auto_insight(df):
-    """从当前表格中提取少量自动提示，避免只给通用阅读说明。"""
-    if df is None or df.empty:
-        return '当前表无可展示数据，请检查样本筛选、标签成熟度或上游数据。'
-
-    parts = []
-    work = df.reset_index()
-
-    if 'status' in work.columns:
-        status = work['status'].astype(str).str.upper()
-        non_ok = int((~status.eq('OK')).sum())
-        if non_ok:
-            parts.append(f'存在 {non_ok} 条非OK结果，需优先检查约束是否无解')
-
-    if 'diagnosis_flags' in work.columns:
-        flags = work['diagnosis_flags'].astype(str)
-        flagged = int((~flags.eq('OK')).sum())
-        if flagged:
-            parts.append(f'共有 {flagged} 个初始箱触发至少一项诊断标记')
-
-    if 'merge_priority_score' in work.columns:
-        score = pd.to_numeric(work['merge_priority_score'], errors='coerce')
-        if score.notna().any():
-            parts.append(f'最高合箱优先级评分为 {score.max():.0f}')
-
-    for rate_col in ['3m30p_cnt_bad_rate', 'accepted_3m30p_cnt_bad_rate', 'cum_3m30p_cnt_bad_rate']:
-        if rate_col in work.columns:
-            rate = pd.to_numeric(work[rate_col], errors='coerce')
-            if rate.notna().any():
-                parts.append(f'{rate_col} 范围为 {rate.min():.2%}–{rate.max():.2%}')
-                break
-
-    if {'3m30p_cnt_bad_rate_train', '3m30p_cnt_bad_rate_oot'}.issubset(work.columns):
-        train_rate = pd.to_numeric(work['3m30p_cnt_bad_rate_train'], errors='coerce')
-        oot_rate = pd.to_numeric(work['3m30p_cnt_bad_rate_oot'], errors='coerce')
-        gap = (oot_rate - train_rate).abs()
-        if gap.notna().any():
-            parts.append(f'Train/OOT最大3M30+绝对差异为 {gap.max():.2%}')
-
-    if 'psi_total' in work.columns:
-        psi = pd.to_numeric(work['psi_total'], errors='coerce')
-        if psi.notna().any():
-            parts.append(f'总体PSI为 {psi.iloc[0]:.4f}')
-
-    violation_cols = [c for c in work.columns if str(c).endswith('violation_cnt')]
-    if violation_cols:
-        total_violations = sum(pd.to_numeric(work[c], errors='coerce').fillna(0).sum() for c in violation_cols)
-        if total_violations > 0:
-            parts.append(f'表内累计记录 {int(total_violations)} 次单调性/规则违反')
-
-    return '；'.join(parts[:3]) if parts else '请按“规模—风险—稳定性—可执行性”的顺序阅读，并重点核对高风险边界附近的变化。'
 
 
 def auto_width(ws, min_w=10, max_w=42):
@@ -2518,16 +2227,10 @@ def _apply_text_highlights(cell, col_name):
 
 
 
-def write_block(ws, start_row, title, df, index_label='序号', guidance=None):
-    """
-    写入一个完整报告区块：标题、三类阅读说明、自动提示、表头与数据。
-
-    guidance 支持：focus / logic / caution / key_columns。
-    返回下一可用行号。
-    """
+def write_block(ws, start_row, title, df, index_label='序号'):
+    """写入一个完整报告区块：标题、表头与数据。返回下一可用行号。"""
     df = df.copy()
     ncols = max(len(df.columns) + 1, 2)
-    guidance = guidance or {}
 
     # 标题行
     ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=ncols)
@@ -2540,35 +2243,13 @@ def write_block(ws, start_row, title, df, index_label='序号', guidance=None):
         ws.cell(row=start_row, column=c).border = MEDIUM_BOTTOM_BORDER
     ws.row_dimensions[start_row].height = 24
 
-    notes = [
-        ('重点关注', guidance.get('focus', '关注核心规模、风险指标、跨期变化以及需要策略判断的异常点。')),
-        ('加工逻辑', guidance.get('logic', '按当前表对应的固定样本、字段口径和计算规则汇总生成。')),
-        ('阅读注意', guidance.get('caution', '阅读比率时需同时核对分子、分母、时间窗口、成熟度和缺失样本处理。')),
-        ('自动提示', _auto_insight(df)),
-    ]
-
-    row_cursor = start_row + 1
-    guide_lines = [f'{i+1}. {text}' for i, (_, text) in enumerate(notes)]
-    guide_text = '\n'.join(guide_lines)
-
-    ws.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=ncols)
-    cell = ws.cell(row=row_cursor, column=1, value=guide_text)
-    cell.font = Font(name='Microsoft YaHei', size=9, color=TEXT_DARK)
-    cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    cell.border = THIN_BORDER
-    for c in range(1, ncols + 1):
-        ws.cell(row=row_cursor, column=c).border = THIN_BORDER
-    ws.row_dimensions[row_cursor].height = 72
-    row_cursor += 1
-
     # 表头行
-    hr = row_cursor
+    hr = start_row + 1
     ws.cell(row=hr, column=1, value=index_label)
     column_names = list(df.columns)
     for j, col_name in enumerate(column_names, start=2):
         ws.cell(row=hr, column=j, value=str(col_name))
 
-    key_columns = {str(c) for c in guidance.get('key_columns', [])}
     for c in range(1, ncols + 1):
         cell = ws.cell(row=hr, column=c)
         col_name = index_label if c == 1 else column_names[c - 2]
@@ -2576,11 +2257,6 @@ def write_block(ws, start_row, title, df, index_label='序号', guidance=None):
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         cell.border = THIN_BORDER
-        if str(col_name) in key_columns:
-            cell.font = Font(name='Microsoft YaHei', bold=True, color=WHITE, size=10, underline='single')
-        comment_text = _metric_comment(col_name)
-        if comment_text:
-            cell.comment = Comment(comment_text, '策略报告')
     ws.row_dimensions[hr].height = 34
 
     # 数据行
@@ -2622,13 +2298,12 @@ def write_block(ws, start_row, title, df, index_label='序号', guidance=None):
     data_end_row = dr + len(df) - 1
     _apply_conditional_formatting(ws, hr, dr, data_end_row, column_names)
 
-    # 留出一行空白，区分不同表格区块。
     return dr + len(df) + 1
 
 
 
-def series_block(ws, start_row, title, series, guidance=None):
-    """将 Series 转置为两列 DataFrame 后写入，并保留统一阅读说明。"""
+def series_block(ws, start_row, title, series):
+    """将 Series 转置为两列 DataFrame 后写入。"""
     df = pd.DataFrame({'指标': series.index.astype(str), '值': series.values})
     return write_block(
         ws,
@@ -2636,7 +2311,6 @@ def series_block(ws, start_row, title, series, guidance=None):
         title,
         df.set_index('指标'),
         index_label='指标',
-        guidance=guidance,
     )
 
 
@@ -2661,115 +2335,12 @@ def setup_sheet(ws, tab_color=None, freeze_panes=None):
 
 
 
-def create_readme_sheet(wb):
-    """创建报告阅读指南，集中解释口径、颜色和推荐阅读顺序。"""
-    ws = wb.create_sheet('0.阅读指南')
-    setup_sheet(ws, tab_color=NAVY)
-    ws.sheet_view.zoomScale = 95
-
-    ws.merge_cells('A1:H2')
-    title_cell = ws['A1']
-    title_cell.value = '模型分箱与策略阈值报告｜阅读指南'
-    title_cell.fill = PatternFill(start_color=NAVY, end_color=NAVY, fill_type='solid')
-    title_cell.font = Font(name='Microsoft YaHei', bold=True, size=18, color=WHITE)
-    title_cell.alignment = Alignment(horizontal='left', vertical='center')
-    for row in ws['A1:H2']:
-        for cell in row:
-            cell.fill = PatternFill(start_color=NAVY, end_color=NAVY, fill_type='solid')
-    ws.row_dimensions[1].height = 28
-    ws.row_dimensions[2].height = 16
-
-    metric_df = pd.DataFrame({
-        '指标': [
-            '样本占比', '1M30+笔数逾期率', '3M30+笔数逾期率',
-            '1M30+金额逾期率', '3M30+金额逾期率', 'Lift',
-            '累计通过率', '边际风险', 'PSI', 'AUC/KS',
-        ],
-        '核心口径': [
-            '当前箱n / 当前分析样本总n',
-            'duedate_1m_30=1 / duedate_1m_30∈{0,1}',
-            'duedate_3m_30=1 / duedate_3m_30∈{0,1}',
-            'MOB1达到30+样本的剩余本金 / MOB1成熟样本本金',
-            'MOB3达到30+样本的剩余本金 / MOB3成熟样本本金',
-            '当前箱逾期率 / 整体逾期率',
-            '从低风险端累计到当前阈值的样本占比',
-            '新增一个分数区间自身的风险，而非累计风险',
-            'Train与OOT固定分箱分布差异',
-            '仅在模型分非空且标签成熟为0/1的样本上计算',
-        ],
-        '阅读注意': [
-            '需关注单箱过小或高风险尾部样本不足',
-            '最近月份可能未成熟，分母不足时结果为空',
-            '3M观察期更长，OOT成熟度通常更受影响',
-            '分母为成熟样本本金，分子为逾期剩余本金',
-            '金额与笔数口径可能反映不同风险结构',
-            'Lift>1表示高于总体风险，不等于绝对不可接受',
-            '累计方向依赖高分高风险设定',
-            '决定是否继续放宽阈值时优先关注',
-            '分布漂移不等同于风险恶化，需要联动判断',
-            '少量坏样本会造成较大波动',
-        ],
-    }).set_index('指标')
-    next_row = write_block(
-        ws,
-        4,
-        '一、关键指标口径',
-        metric_df,
-        index_label='指标',
-        guidance={
-            'focus': '阅读任何风险率时，先确认观察期、成熟样本、风险标的和分子分母。',
-            'logic': '本报告当前统一使用1M30+与3M30+，同时提供笔数和金额两类口径。',
-            'caution': '分母为0时安全除法返回空值；空值不能按0风险理解。',
-            'key_columns': ['核心口径', '阅读注意'],
-        },
-    )
-
-    logic_df = pd.DataFrame({
-        '步骤': ['样本切分', '等频初分', '相邻合箱', 'OOT验证', '边界取整', '阈值选择'],
-        '处理逻辑': [
-            f'Train：application_month <= {TRAIN_END_MONTH}；OOT：application_month >= {OOT_START_MONTH}',
-            '仅在Train上学习20等频边界，首尾扩展为负无穷和正无穷',
-            '结合样本量、成熟度、倒挂、置信区间和金额/笔数差异合并相邻箱',
-            'OOT直接套用Train边界，不在OOT重新学习分箱',
-            '对最终边界取4位小数后重新分箱并完整复算',
-            '在风险上限、规模和人工审核产能约束下确定自动通过/审核/拒绝阈值',
-        ],
-        '特殊注意': [
-            'gap_or_unknown样本不进入Train或OOT主验证',
-            '分数唯一值不足时实际箱数可能少于20',
-            '最终合箱必须保持相邻，避免不可上线的非连续区间',
-            '最近OOT月份需检查MOB3成熟度',
-            '边界附近分数集中时，小数取整可能导致明显迁移',
-            '累计风险与最后接纳边际风险需要同时满足要求',
-        ],
-    }).set_index('步骤')
-    write_block(
-        ws,
-        next_row,
-        '二、核心加工流程',
-        logic_df,
-        index_label='步骤',
-        guidance={
-            'focus': '理解边界在哪里学习、在哪里复用，以及阈值结果如何形成。',
-            'logic': '整体流程为“Train学习—相邻合并—OOT验证—边界取整复算—阈值敏感性”。',
-            'caution': '若调整样本窗口、模型方向或逾期口径，需从分箱学习阶段开始重新运行。',
-            'key_columns': ['处理逻辑', '特殊注意'],
-        },
-    )
-
-    ws.column_dimensions['A'].width = 18
-    for col in range(2, 9):
-        ws.column_dimensions[get_column_letter(col)].width = 18
-    return ws
-
-
 # ============================================================
 # 写入 Excel
 # ============================================================
 
 wb = openpyxl.Workbook()
 wb.remove(wb.active)
-create_readme_sheet(wb)
 
 # ==================== Sheet 1: 策略推荐结论 ====================
 ws1 = wb.create_sheet('1.策略推荐结论')
@@ -2778,11 +2349,9 @@ r = 1
 
 r = series_block(
     ws1, r, '一、最终推荐结论', strategy_recommendation,
-    guidance=REPORT_GUIDANCE['strategy_recommendation'],
 )
 r = series_block(
     ws1, r, '二、4位小数边界复算结论', rounded4_recalc_decision,
-    guidance=REPORT_GUIDANCE['rounded4_recalc'],
 )
 
 recommended = '平衡方案'
@@ -2802,7 +2371,6 @@ for label, seg_df in [('Train（4位小数）', strategy_segment_report_rounded4
     subset = seg_df.loc[mask, seg_cols].set_index('decision')
     r = write_block(
         ws1, r, f'三、推荐方案「{recommended}」三段指标 — {label}', subset,
-        guidance=REPORT_GUIDANCE['recommended_segment'],
     )
 
 auto_width(ws1)
@@ -2823,7 +2391,6 @@ bin_cols = [
 r = write_block(
     ws2, r, '一、8档最终风险等级（精确边界）',
     bin_stats_final.set_index('bin_order')[bin_cols],
-    guidance=REPORT_GUIDANCE['final_bins'],
 )
 
 tc_cols = [c for c in [
@@ -2838,7 +2405,6 @@ tc_cols = [c for c in [
 r = write_block(
     ws2, r, '二、阈值曲线（各等级右边界作为阈值）',
     threshold_curve_final_bins.set_index('threshold_order')[tc_cols],
-    guidance=REPORT_GUIDANCE['threshold_curve'],
 )
 
 compare_cols = [c for c in [
@@ -2853,7 +2419,6 @@ compare_cols = [c for c in [
 r = write_block(
     ws2, r, '三、Train vs OOT 逐箱对比',
     train_oot_bin_compare.set_index(FINAL_BIN_COL)[compare_cols],
-    guidance=REPORT_GUIDANCE['train_oot_compare'],
 )
 
 psi_label = FINAL_BIN_COL if FINAL_BIN_COL in psi_final.columns else 'bin'
@@ -2861,20 +2426,17 @@ r = write_block(
     ws2, r,
     f'四、PSI 分布稳定性（总 PSI = {psi_final["psi_total"].iloc[0]:.6f}）',
     psi_final.set_index(psi_label)[[c for c in ['expected_cnt', 'expected_pct', 'actual_cnt', 'actual_pct', 'psi_component'] if c in psi_final.columns]],
-    guidance=REPORT_GUIDANCE['psi'],
 )
 
 r = write_block(
     ws2, r, '五、AUC/KS 汇总',
     perf_by_group.set_index('sample_group')[[c for c in ['label', 'n', 'bad_cnt', 'bad_rate', 'auc', 'ks'] if c in perf_by_group.columns]],
-    guidance=REPORT_GUIDANCE['auc_ks'],
 )
 
 mp_cols = [c for c in ['label', 'n', 'bad_cnt', 'bad_rate', 'auc', 'ks'] if c in monthly_perf.columns]
 r = write_block(
     ws2, r, '六、逐月 AUC/KS',
     monthly_perf.set_index('application_month')[mp_cols],
-    guidance=REPORT_GUIDANCE['monthly_auc_ks'],
 )
 
 m_cols = [c for c in [
@@ -2885,7 +2447,6 @@ m_cols = [c for c in [
 r = write_block(
     ws2, r, '七、月度分箱稳定性',
     monthly_stability_summary.set_index('application_month')[m_cols],
-    guidance=REPORT_GUIDANCE['monthly_stability'],
 )
 
 auto_width(ws2)
@@ -2897,7 +2458,6 @@ r = 1
 
 r = series_block(
     ws3, r, '一、20等频箱诊断摘要', diagnosis_summary,
-    guidance=REPORT_GUIDANCE['diagnosis_summary'],
 )
 
 diag_cols = [c for c in [
@@ -2909,7 +2469,6 @@ diag_cols = [c for c in [
 r = write_block(
     ws3, r, '二、20等频箱初步诊断',
     bin_diagnosis_20.set_index('bin_order')[diag_cols],
-    guidance=REPORT_GUIDANCE['diagnosis_detail'],
 )
 
 cand_cols = [c for c in [
@@ -2921,12 +2480,10 @@ cand_cols = [c for c in [
 r = write_block(
     ws3, r, '三、6/7/8/9 档候选分箱方案对比',
     candidate_merge_compare.set_index('candidate_name')[cand_cols],
-    guidance=REPORT_GUIDANCE['candidate_compare'],
 )
 
 r = series_block(
     ws3, r, '四、分箱优化结论', binning_optimization_decision,
-    guidance=REPORT_GUIDANCE['binning_decision'],
 )
 
 sig_cols = [c for c in [
@@ -2937,7 +2494,6 @@ sig_cols = [c for c in [
 r = write_block(
     ws3, r, '五、相邻箱显著性检验（仅显示建议合并的箱）',
     adjacent_sig_tests.loc[adjacent_sig_tests['merge_hint'].eq('建议合并'), sig_cols].reset_index(drop=True),
-    guidance=REPORT_GUIDANCE['significance'],
 )
 
 auto_width(ws3)
@@ -2955,7 +2511,6 @@ round_cols = [c for c in [
 r = write_block(
     ws4, r, '一、3/4 位小数边界取整对比',
     rounded_boundary_compare.set_index('round_decimals')[round_cols],
-    guidance=REPORT_GUIDANCE['rounding_compare'],
 )
 
 r4_bin_name = ROUNDED4_BIN_COL if 'ROUNDED4_BIN_COL' in dir() else 'score_mlt_final_bin_rounded4'
@@ -2970,7 +2525,6 @@ r4_cols = [c for c in [
 r = write_block(
     ws4, r, '二、精确边界 vs 4位小数边界逐箱对比',
     rounded4_bin_compare.set_index('bin_order')[r4_cols],
-    guidance=REPORT_GUIDANCE['rounded4_bin_compare'],
 )
 
 sc_cols = [c for c in [
@@ -2985,13 +2539,11 @@ sc_cols = [c for c in [
 r = write_block(
     ws4, r, '三、精确边界 vs 4位小数策略方案对比',
     strategy_plan_compare_rounded4.set_index('strategy_name')[sc_cols],
-    guidance=REPORT_GUIDANCE['rounded4_strategy_compare'],
 )
 
 r = write_block(
     ws4, r, '四、阈值敏感性矩阵（人工审核产能 × 接纳风险上限）',
     threshold_sensitivity_matrix_rounded4.set_index('max_manual_review_rate'),
-    guidance=REPORT_GUIDANCE['sensitivity_matrix'],
 )
 
 sd_cols = [c for c in [
@@ -3004,12 +2556,10 @@ sd_cols = [c for c in [
 r = write_block(
     ws4, r, '五、阈值敏感性扫描明细',
     threshold_sensitivity_rounded4[sd_cols].reset_index(drop=True),
-    guidance=REPORT_GUIDANCE['sensitivity_detail'],
 )
 
 r = series_block(
     ws4, r, '六、阈值敏感性推荐结论', threshold_sensitivity_decision,
-    guidance=REPORT_GUIDANCE['sensitivity_decision'],
 )
 
 qv_cols = [c for c in [
@@ -3019,7 +2569,6 @@ qv_cols = [c for c in [
 r = write_block(
     ws4, r, '七、分位点曲线 vs 最终箱边界对比',
     threshold_sensitivity_final_vs_quantile.set_index(['max_manual_review_rate', 'max_accepted_3m30p_cnt_bad_rate'])[qv_cols],
-    guidance=REPORT_GUIDANCE['quantile_compare'],
 )
 
 auto_width(ws4)
@@ -3040,7 +2589,6 @@ plan_cols = [c for c in [
 r = write_block(
     ws5, r, '一、三套策略方案总览',
     strategy_plan.set_index('strategy_name')[plan_cols],
-    guidance=REPORT_GUIDANCE['plan_overview'],
 )
 
 seg_out_cols = [c for c in seg_cols if c != 'decision']
@@ -3050,7 +2598,6 @@ if train_mask_all.any():
     r = write_block(
         ws5, r, '二、各方案三段指标 — Train',
         strategy_segment_report.loc[train_mask_all].set_index(['strategy_name', 'decision'])[seg_out_cols],
-        guidance=REPORT_GUIDANCE['segment_train'],
     )
 
 oot_mask_all = strategy_segment_report['sample_group'].eq('oot')
@@ -3058,7 +2605,6 @@ if oot_mask_all.any():
     r = write_block(
         ws5, r, '三、各方案三段指标 — OOT',
         strategy_segment_report.loc[oot_mask_all].set_index(['strategy_name', 'decision'])[seg_out_cols],
-        guidance=REPORT_GUIDANCE['segment_oot'],
     )
 
 auto_width(ws5)
