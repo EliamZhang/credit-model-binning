@@ -18,8 +18,9 @@
    月度稳定性矩阵；
 7. 基于完整 Train 的最终箱统计，构建阈值曲线（累计/边际逾期率），在自动通过/人工审核/
    拒绝策略约束下生成 risk_level 分段与通过率方案；
-8. 汇总概览、合箱过程、各切片统计、Train/OOT 对比、策略阈值、策略分段验证、AUC/KS、
-   月度稳定性、参数配置、指标字典等 sheet；
+8. 汇总为 6 个 sheet：01_总览、02_分箱详情（过程+候选+步骤）、03_最终分箱统计
+   （Dev/Val/Train/OOT 合一）、04_策略方案（阈值选择+策略结果+分段验证）、
+   05_模型验证（Train/OOT 对比+AUC/KS+PSI+单调性+月度稳定性）、06_附录（配置+指标说明）；
 9. 写入 out/binning_strategy_report_YYYYMMDD.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
 
 
@@ -2380,8 +2381,44 @@ def build_config_table(
     return pd.DataFrame(rows)
 
 
+def _detect_sections(ws) -> List[Tuple[int, int, int]]:
+    """通过空行分隔符检测 sheet 中的 section 边界。"""
+    sections: List[Tuple[int, int, int]] = []
+    if ws.max_row < 1:
+        return sections
+
+    header_row = 1
+    data_start = 2
+    data_end = data_start
+    while data_end <= ws.max_row:
+        cells = [ws.cell(data_end, col).value for col in range(1, ws.max_column + 1)]
+        if all(c is None for c in cells):
+            sections.append((header_row, data_start, data_end - 1))
+            header_row = data_end + 1
+            data_start = header_row + 1
+            data_end = data_start
+        else:
+            data_end += 1
+
+    if data_end > data_start:
+        sections.append((header_row, data_start, data_end - 1))
+    elif data_start <= ws.max_row:
+        sections.append((header_row, data_start, data_end))
+    return sections
+
+
+def _write_sections(writer, sheet_name: str, sections: List[Tuple[str, pd.DataFrame]]) -> None:
+    """在一个 sheet 中写入多个 DataFrame，section 之间空一行分隔。"""
+    startrow = 0
+    for label, df in sections:
+        if df is None or df.empty:
+            continue
+        df.to_excel(writer, sheet_name=sheet_name, startrow=startrow, index=False)
+        startrow += len(df) + 2
+
+
 def format_excel_report(path: Path) -> None:
-    """设置基础格式，并突出倒挂、约束失败、选中阈值和选中合箱方案。"""
+    """按 section 设置格式：表头样式、数字格式、条件高亮。"""
     from openpyxl import load_workbook
 
     workbook = load_workbook(path)
@@ -2393,85 +2430,96 @@ def format_excel_report(path: Path) -> None:
     fail_fill = PatternFill("solid", fgColor="F4CCCC")
 
     for sheet in workbook.worksheets:
-        sheet.freeze_panes = "A2"
-        sheet.auto_filter.ref = sheet.dimensions
+        sections = _detect_sections(sheet)
+        if not sections:
+            continue
 
-        for cell in sheet[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+        first_data_row = sections[0][1]
+        sheet.freeze_panes = sheet.cell(first_data_row, 1)
+        first_data_end = sections[0][2]
+        if first_data_end >= first_data_row:
+            sheet.auto_filter.ref = (
+                f"A{sections[0][0]}:"
+                f"{get_column_letter(sheet.max_column)}{first_data_end}"
+            )
 
-        for column_cells in sheet.columns:
-            column_letter = get_column_letter(column_cells[0].column)
+        # 列宽。
+        for col_idx in range(1, sheet.max_column + 1):
             max_length = 0
-            for cell in column_cells:
-                value = "" if cell.value is None else str(cell.value)
-                max_length = max(max_length, len(value))
-            sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 10), 42)
+            for row_idx in range(1, sheet.max_row + 1):
+                value = sheet.cell(row_idx, col_idx).value
+                max_length = max(max_length, len(str(value)) if value is not None else 0)
+            sheet.column_dimensions[get_column_letter(col_idx)].width = min(
+                max(max_length + 2, 10), 42
+            )
 
-        headers = {cell.column: str(cell.value) for cell in sheet[1]}
-        header_to_col = {str(cell.value): cell.column for cell in sheet[1]}
+        # 按 section 格式化。
+        for header_row, data_start, data_end in sections:
+            headers = {cell.column: str(cell.value) for cell in sheet[header_row]}
+            header_to_col = {str(cell.value): cell.column for cell in sheet[header_row]}
 
-        for row in sheet.iter_rows(min_row=2):
-            for cell in row:
-                header = headers.get(cell.column, "").lower()
-                if cell.value is None:
-                    continue
-                if any(key in header for key in ["rate", "pct", "retention"]):
-                    cell.number_format = "0.00%"
-                elif any(key in header for key in ["auc", "ks", "psi", "corr", "p_value"]):
-                    cell.number_format = "0.0000"
-                elif any(key in header for key in ["threshold", "score_left", "score_right", "score_min", "score_max", "score_mean"]):
-                    cell.number_format = "0.0000"
-                elif isinstance(cell.value, (int, float)):
-                    cell.number_format = "#,##0.00"
+            for cell in sheet[header_row]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        if sheet.title == "02_分箱过程":
+            for row_idx in range(data_start, data_end + 1):
+                for cell in sheet[row_idx]:
+                    header = headers.get(cell.column, "").lower()
+                    if cell.value is None:
+                        continue
+                    if any(key in header for key in ["rate", "pct", "retention"]):
+                        cell.number_format = "0.00%"
+                    elif any(key in header for key in ["auc", "ks", "psi", "corr", "p_value"]):
+                        cell.number_format = "0.0000"
+                    elif any(key in header for key in [
+                        "threshold", "score_left", "score_right",
+                        "score_min", "score_max", "score_mean",
+                    ]):
+                        cell.number_format = "0.0000"
+                    elif isinstance(cell.value, (int, float)):
+                        cell.number_format = "#,##0.00"
+
+            # 条件高亮：倒挂标记。
             inversion_cols = [
-                header_to_col.get("1m30p_inversion_flag"),
-                header_to_col.get("3m30p_inversion_flag"),
+                header_to_col.get(k)
+                for k in ["1m30p_inversion_flag", "3m30p_inversion_flag",
+                           "primary_inversion_flag"]
             ]
-            inversion_cols = [col for col in inversion_cols if col is not None]
-            for row_idx in range(2, sheet.max_row + 1):
-                if any(sheet.cell(row_idx, col).value is True for col in inversion_cols):
-                    for cell in sheet[row_idx]:
-                        cell.fill = warning_fill
-
-        if sheet.title == "08_阈值选择过程":
-            selected_col = header_to_col.get("selected_role")
-            auto_ok_col = header_to_col.get("auto_all_constraints_ok")
-            accept_ok_col = header_to_col.get("accept_all_constraints_ok")
-
-            for row_idx in range(2, sheet.max_row + 1):
-                selected_role = sheet.cell(row_idx, selected_col).value if selected_col else ""
-                if selected_role and "自动通过" in str(selected_role):
-                    for cell in sheet[row_idx]:
-                        cell.fill = selected_fill
-                if selected_role and "拒绝阈值" in str(selected_role):
-                    for cell in sheet[row_idx]:
-                        cell.fill = selected_reject_fill
-
-                for check_col in [auto_ok_col, accept_ok_col]:
-                    if check_col and sheet.cell(row_idx, check_col).value is False:
-                        sheet.cell(row_idx, check_col).fill = fail_fill
-
-        if sheet.title == "16_合箱候选评分":
-            selected_col = header_to_col.get("selected")
-            hard_ok_col = header_to_col.get("hard_constraints_ok")
-            for row_idx in range(2, sheet.max_row + 1):
-                if selected_col and sheet.cell(row_idx, selected_col).value is True:
-                    for cell in sheet[row_idx]:
-                        cell.fill = selected_fill
-                elif hard_ok_col and sheet.cell(row_idx, hard_ok_col).value is False:
-                    sheet.cell(row_idx, hard_ok_col).fill = fail_fill
-
-        if sheet.title == "15_月度箱表现":
-            inversion_col = header_to_col.get("primary_inversion_flag")
-            if inversion_col:
-                for row_idx in range(2, sheet.max_row + 1):
-                    if sheet.cell(row_idx, inversion_col).value is True:
+            inversion_cols = [c for c in inversion_cols if c is not None]
+            if inversion_cols:
+                for row_idx in range(data_start, data_end + 1):
+                    if any(sheet.cell(row_idx, col).value is True for col in inversion_cols):
                         for cell in sheet[row_idx]:
                             cell.fill = warning_fill
+
+            # 条件高亮：阈值选中行。
+            selected_role_col = header_to_col.get("selected_role")
+            auto_ok_col = header_to_col.get("auto_all_constraints_ok")
+            accept_ok_col = header_to_col.get("accept_all_constraints_ok")
+            if selected_role_col:
+                for row_idx in range(data_start, data_end + 1):
+                    role = sheet.cell(row_idx, selected_role_col).value or ""
+                    if "自动通过" in str(role):
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_fill
+                    if "拒绝阈值" in str(role):
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_reject_fill
+                    for check_col in [auto_ok_col, accept_ok_col]:
+                        if check_col and sheet.cell(row_idx, check_col).value is False:
+                            sheet.cell(row_idx, check_col).fill = fail_fill
+
+            # 条件高亮：合箱候选选中行。
+            selected_flag_col = header_to_col.get("selected")
+            hard_ok_col = header_to_col.get("hard_constraints_ok")
+            if selected_flag_col:
+                for row_idx in range(data_start, data_end + 1):
+                    if sheet.cell(row_idx, selected_flag_col).value is True:
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_fill
+                    elif hard_ok_col and sheet.cell(row_idx, hard_ok_col).value is False:
+                        sheet.cell(row_idx, hard_ok_col).fill = fail_fill
 
     workbook.save(path)
 
@@ -2497,29 +2545,52 @@ def write_report(
     config_table: pd.DataFrame,
     metric_dictionary: pd.DataFrame,
 ) -> None:
-    """输出优化版策略报告，并保留完整的合箱过程。"""
+    """输出精简版策略报告（6 个 sheet）。"""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 合并 4 个最终分箱统计：同结构 + sample_group 列。
+    final_stats_parts = []
+    for label, stats in [
+        ("Development", final_development_stats),
+        ("Validation", final_validation_stats),
+        ("Train", final_train_stats),
+        ("OOT", final_oot_stats),
+    ]:
+        s = stats.copy()
+        s.insert(0, "sample_group", label)
+        final_stats_parts.append(s)
+    final_stats_all = pd.concat(final_stats_parts, ignore_index=True)
 
     with pd.ExcelWriter(REPORT_PATH, engine="openpyxl") as writer:
         overview.to_excel(writer, sheet_name="01_总览", index=False)
-        binning_process.to_excel(writer, sheet_name="02_分箱过程", index=False)
-        final_development_stats.to_excel(writer, sheet_name="03_最终分箱_开发", index=False)
-        final_validation_stats.to_excel(writer, sheet_name="04_最终分箱_验证", index=False)
-        final_train_stats.to_excel(writer, sheet_name="05_最终分箱_Train", index=False)
-        final_oot_stats.to_excel(writer, sheet_name="06_最终分箱_OOT", index=False)
-        train_oot_compare.to_excel(writer, sheet_name="07_Train_OOT对比", index=False)
-        threshold_selection.to_excel(writer, sheet_name="08_阈值选择过程", index=False)
-        strategy_plan.to_excel(writer, sheet_name="09_策略结果", index=False)
-        strategy_segments.to_excel(writer, sheet_name="10_策略分段验证", index=False)
-        performance.to_excel(writer, sheet_name="11_AUC_KS", index=False)
-        psi.to_excel(writer, sheet_name="12_PSI", index=False)
-        monotonicity.to_excel(writer, sheet_name="13_单调性", index=False)
-        monthly_stability_summary.to_excel(writer, sheet_name="14_月度稳定性汇总", index=False)
-        monthly_stability.to_excel(writer, sheet_name="15_月度箱表现", index=False)
-        merge_candidates.to_excel(writer, sheet_name="16_合箱候选评分", index=False)
-        merge_steps.to_excel(writer, sheet_name="17_合箱步骤", index=False)
-        config_table.to_excel(writer, sheet_name="18_配置参数", index=False)
-        metric_dictionary.to_excel(writer, sheet_name="19_指标说明", index=False)
+
+        _write_sections(writer, "02_分箱详情", [
+            ("分箱过程", binning_process),
+            ("合箱候选评分", merge_candidates),
+            ("合箱步骤", merge_steps),
+        ])
+
+        final_stats_all.to_excel(writer, sheet_name="03_最终分箱统计", index=False)
+
+        _write_sections(writer, "04_策略方案", [
+            ("阈值选择过程", threshold_selection),
+            ("策略结果", strategy_plan),
+            ("策略分段验证", strategy_segments),
+        ])
+
+        _write_sections(writer, "05_模型验证", [
+            ("Train_OOT对比", train_oot_compare),
+            ("AUC_KS", performance),
+            ("PSI", psi),
+            ("单调性", monotonicity),
+            ("月度稳定性汇总", monthly_stability_summary),
+            ("月度箱表现", monthly_stability),
+        ])
+
+        _write_sections(writer, "06_附录", [
+            ("配置参数", config_table),
+            ("指标说明", metric_dictionary),
+        ])
 
     format_excel_report(REPORT_PATH)
 
