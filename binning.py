@@ -26,8 +26,8 @@ plt.rcParams['axes.unicode_minus'] = False
 DATA_DIR = Path('res')
 
 # 时间切分配置：后续可按业务确认后调整
-TRAIN_END_MONTH = '2026-03'
-OOT_START_MONTH = '2026-04'
+TRAIN_END_MONTH = '2025-10'
+OOT_START_MONTH = '2025-11'
 
 # 模型分方向：当前方法论按高分高风险处理
 HIGH_SCORE_HIGH_RISK = True
