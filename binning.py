@@ -23,6 +23,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import time
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -160,7 +161,7 @@ def flatten_dict(prefix: str, values: Dict[str, float]) -> Dict[str, float]:
 
 def load_analysis_data() -> pd.DataFrame:
     """加载首版分箱真正需要的数据，删除未使用的其他模型表和交易特征表。"""
-    print("1/8 加载数据 ...")
+    print("加载数据 ...")
 
     sample = read_csv_clean(DATA_DIR / SAMPLE_FILE)
     application = read_csv_clean(DATA_DIR / APPLICATION_FILE)
@@ -250,7 +251,7 @@ def split_train_oot(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.
     if oot.empty:
         raise ValueError("OOT 样本为空，请检查 OOT_START_MONTH 和 application_month")
 
-    print(f"2/8 样本切分完成：Train {len(train):,} 行，OOT {len(oot):,} 行")
+    print(f"样本切分完成：Train {len(train):,} 行，OOT {len(oot):,} 行")
     return result, train, oot
 
 
@@ -1374,12 +1375,22 @@ def write_report(
 # 8. 主流程
 # ============================================================
 
+def _log_step(label: str, t_prev: float) -> float:
+    t_now = time.time()
+    elapsed = t_now - t_prev
+    print(f"  [{label}] 耗时 {elapsed:.1f}s | 累计 {t_now - _log_step._t0:.1f}s")
+    return t_now
+
+
 def main() -> None:
+    _t = _log_step._t0 = time.time()
+
     data = load_analysis_data()
     source_row_count = data.attrs.get("source_row_count")
     score_missing_count = data.attrs.get("score_missing_count")
 
     all_data, train, oot = split_train_oot(data)
+    _t = _log_step("1/8 数据加载与拼接", _t)
 
     # pandas 的 attrs 在部分切片/合并操作后可能丢失，因此显式保留。
     all_data.attrs["source_row_count"] = source_row_count
@@ -1406,7 +1417,7 @@ def main() -> None:
         order_col="initial_bin_order",
     ).merge(initial_edges, on=["bin_order", INITIAL_BIN_COL], how="left")
 
-    print(f"3/8 等频初分完成：{actual_initial_bin_count} 箱")
+    _t = _log_step(f"3/8 20等频初分：{actual_initial_bin_count} 箱", _t)
 
     # 2) 相邻箱合并。
     merge_map = build_merge_map(FINAL_BIN_RANGES, actual_initial_bin_count)
@@ -1438,7 +1449,7 @@ def main() -> None:
         how="left",
     )
 
-    print(f"4/8 相邻箱合并完成：{len(final_edges)} 档")
+    _t = _log_step(f"4/8 相邻箱合并为 A-E 等级：{len(final_edges)} 档", _t)
 
     # 3) 基础验证。
     rate_cols = [
@@ -1468,7 +1479,7 @@ def main() -> None:
         final_edges,
     )
 
-    print(f"5/8 OOT 验证完成：PSI={psi['psi_total'].iloc[0]:.4f}")
+    _t = _log_step(f"5/8 单调性/PSI/AUC/KS 交叉验证：PSI={psi['psi_total'].iloc[0]:.4f}", _t)
 
     # 4) 阈值与策略。
     threshold_curve = build_threshold_curve(train_final, final_edges)
@@ -1485,7 +1496,7 @@ def main() -> None:
         STRATEGY_CONFIG,
     )
 
-    print("6/8 阈值曲线、选择依据和默认策略生成完成")
+    _t = _log_step("6/8 阈值曲线与自动通过/人工审核/拒绝策略", _t)
 
     # 5) 报告。
     overview = build_overview(
@@ -1518,8 +1529,8 @@ def main() -> None:
         metric_dictionary=metric_dictionary,
     )
 
-    print("7/8 Excel 报告写入完成")
-    print(f"8/8 运行结束：{REPORT_PATH}")
+    _t = _log_step("7/8 写入 Excel 报告", _t)
+    _log_step(f"8/8 完成 => {REPORT_PATH}", _t)
 
 
 if __name__ == "__main__":
