@@ -2422,8 +2422,9 @@ def format_excel_report(path: Path) -> None:
     from openpyxl import load_workbook
 
     workbook = load_workbook(path)
+    body_font = Font(name="微软雅黑", size=10)
     header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
+    header_font = Font(name="微软雅黑", color="FFFFFF", bold=True, size=10)
     selected_fill = PatternFill("solid", fgColor="C6E0B4")
     selected_reject_fill = PatternFill("solid", fgColor="FCE4D6")
     warning_fill = PatternFill("solid", fgColor="FFF2CC")
@@ -2434,10 +2435,8 @@ def format_excel_report(path: Path) -> None:
         if not sections:
             continue
 
-        first_data_row = sections[0][1]
-        sheet.freeze_panes = sheet.cell(first_data_row, 1)
         first_data_end = sections[0][2]
-        if first_data_end >= first_data_row:
+        if first_data_end >= sections[0][1]:
             sheet.auto_filter.ref = (
                 f"A{sections[0][0]}:"
                 f"{get_column_letter(sheet.max_column)}{first_data_end}"
@@ -2465,6 +2464,7 @@ def format_excel_report(path: Path) -> None:
 
             for row_idx in range(data_start, data_end + 1):
                 for cell in sheet[row_idx]:
+                    cell.font = body_font
                     header = headers.get(cell.column, "").lower()
                     if cell.value is None:
                         continue
