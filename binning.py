@@ -20,14 +20,14 @@
    拒绝策略约束下生成 risk_level 分段与通过率方案；
 8. 汇总概览、合箱过程、各切片统计、Train/OOT 对比、策略阈值、策略分段验证、AUC/KS、
    月度稳定性、参数配置、指标字典等 sheet；
-9. 写入 out/策略报告_优化版.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
+9. 写入 out/binning_strategy_report_YYYYMMDD.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
 
 
 运行方式：
     python binning.py
 
 输入目录：res/
-输出文件：out/策略报告_优化版.xlsx
+输出文件：out/binning_strategy_report_YYYYMMDD.xlsx
 """
 
 import ast
@@ -48,7 +48,7 @@ from openpyxl.utils import get_column_letter
 
 DATA_DIR = Path("res")
 OUT_DIR = Path("out")
-REPORT_PATH = OUT_DIR / "策略报告_优化版.xlsx"
+REPORT_PATH = OUT_DIR / f"binning_strategy_report_{time.strftime('%Y%m%d')}.xlsx"
 
 SAMPLE_FILE = "sample.csv"
 APPLICATION_FILE = "application_info.csv"
