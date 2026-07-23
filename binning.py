@@ -10,8 +10,8 @@
    合箱调参，仅用于最终验证；
 3. Development 上按 score_mlt 做 20 等频分箱，生成初始边界；边界复用到 Validation、完整
    Train、OOT，得到统一的 score_mlt_bin20 分箱标签；
-4. 从 Development 初始箱出发，自动执行：小箱清理 → 以 3m30+ 逾期率为主风险指标做相邻箱
-   单调合并 → 策略关键边界保护 → 评分候选方案，输出 6~8 档最终方案；同时生成手工兜底范围；
+4. 从 Development 初始箱出发，自动执行：小箱清理 → 同时监控 1M30+ 与 3M30+ 笔数逾期率
+   做相邻单调合并 → 策略关键边界保护 → 评分候选方案，输出 6~8 档最终方案；同时保留手工兜底；
 5. 将最终合箱映射应用到 Development / Validation / Train / OOT，生成各切片的最终箱统计
    （样本量、主/辅风险指标、PSI 基准等）；
 6. OOT 上验证最终方案：单调性、PSI（训练/OOT 总体及分月）、AUC、KS 和分段对比；输出
@@ -169,6 +169,29 @@ REQUIRED_ANALYSIS_COLS = [
     "dpd_days_ever_mob1",
     "dpd_days_ever_mob3",
 ]
+
+# 风险指标统一配置：避免 1M30+ / 3M30+ 在多个函数中重复写同一套逻辑。
+RISK_PREFIXES = ("1m30p", "3m30p")
+ALL_RISK_RATE_COLS = [
+    "1m30p_cnt_bad_rate",
+    "3m30p_cnt_bad_rate",
+    "1m30p_amt_bad_rate",
+    "3m30p_amt_bad_rate",
+]
+RISK_HELPER_CONFIG = {
+    "1m30p": {
+        "due_col": "duedate_1m_30",
+        "dpd_col": "dpd_days_ever_mob1",
+        "remaining_col": "estimate_principal_remaining_mob1",
+        "helper_prefix": "_m1",
+    },
+    "3m30p": {
+        "due_col": "duedate_3m_30",
+        "dpd_col": "dpd_days_ever_mob3",
+        "remaining_col": "estimate_principal_remaining_mob3",
+        "helper_prefix": "_m3",
+    },
+}
 
 
 # ============================================================
@@ -521,34 +544,85 @@ def build_final_edge_table(
 # ============================================================
 
 def add_risk_helper_columns(data: pd.DataFrame) -> pd.DataFrame:
-    """生成分箱统计所需的成熟、逾期和金额字段。"""
+    """生成分箱统计所需的成熟、逾期、敞口和逾期金额字段。"""
     work = data.copy()
-
     work["_principal"] = work["principal"].fillna(0)
 
-    work["_m1_mature_cnt"] = work["duedate_1m_30"].isin([0, 1])
-    work["_m1_bad_cnt"] = work["duedate_1m_30"].eq(1)
-    work["_m3_mature_cnt"] = work["duedate_3m_30"].isin([0, 1])
-    work["_m3_bad_cnt"] = work["duedate_3m_30"].eq(1)
+    maturity_masks = {}
+    bad_amount_masks = {}
+    for config in RISK_HELPER_CONFIG.values():
+        due_col = config["due_col"]
+        dpd_col = config["dpd_col"]
+        helper = config["helper_prefix"]
 
-    m1_mature_amt = work["dpd_days_ever_mob1"].notna()
-    m3_mature_amt = work["dpd_days_ever_mob3"].notna()
-    m1_bad_amt = m1_mature_amt & work["dpd_days_ever_mob1"].ge(30)
-    m3_bad_amt = m3_mature_amt & work["dpd_days_ever_mob3"].ge(30)
+        maturity_masks[helper] = work[dpd_col].notna()
+        bad_amount_masks[helper] = maturity_masks[helper] & work[dpd_col].ge(30)
+        work[f"{helper}_mature_cnt"] = work[due_col].isin([0, 1])
+        work[f"{helper}_bad_cnt"] = work[due_col].eq(1)
 
-    work["_m1_amt_exposure"] = np.where(m1_mature_amt, work["_principal"], 0)
-    work["_m3_amt_exposure"] = np.where(m3_mature_amt, work["_principal"], 0)
-    work["_m1_amt_bad"] = np.where(
-        m1_bad_amt,
-        work["estimate_principal_remaining_mob1"].fillna(0),
-        0,
-    )
-    work["_m3_amt_bad"] = np.where(
-        m3_bad_amt,
-        work["estimate_principal_remaining_mob3"].fillna(0),
-        0,
-    )
+    for config in RISK_HELPER_CONFIG.values():
+        helper = config["helper_prefix"]
+        work[f"{helper}_amt_exposure"] = np.where(
+            maturity_masks[helper], work["_principal"], 0
+        )
+
+    for config in RISK_HELPER_CONFIG.values():
+        helper = config["helper_prefix"]
+        work[f"{helper}_amt_bad"] = np.where(
+            bad_amount_masks[helper], work[config["remaining_col"]].fillna(0), 0
+        )
+
     return work
+
+
+def add_bin_derived_metrics(
+    stats: pd.DataFrame,
+    order_col: str,
+    include_total_n: bool = True,
+) -> pd.DataFrame:
+    """
+    统一补充分箱派生指标。
+
+    业务口径保持不变：
+    - 笔数逾期率 = 逾期样本量 / 成熟样本量；
+    - 金额逾期率 = 逾期剩余本金 / 成熟本金敞口；
+    - 累计指标始终按低风险到高风险的箱顺序计算。
+    """
+    result = stats.sort_values(order_col).reset_index(drop=True).copy()
+    total_n = result["n"].sum()
+    if include_total_n:
+        result["total_n"] = total_n
+    result["sample_pct"] = safe_div(result["n"], total_n)
+
+    for prefix in RISK_PREFIXES:
+        result[f"{prefix}_cnt_good"] = (
+            result[f"{prefix}_cnt_mature"] - result[f"{prefix}_cnt_bad"]
+        )
+        result[f"{prefix}_cnt_bad_rate"] = safe_div(
+            result[f"{prefix}_cnt_bad"], result[f"{prefix}_cnt_mature"]
+        )
+        result[f"{prefix}_amt_bad_rate"] = safe_div(
+            result[f"{prefix}_amt_bad"], result[f"{prefix}_amt_exposure"]
+        )
+
+    result["cum_n"] = result["n"].cumsum()
+    result["cum_pass_rate"] = safe_div(result["cum_n"], total_n)
+
+    for prefix in RISK_PREFIXES:
+        result[f"cum_{prefix}_cnt_mature"] = result[f"{prefix}_cnt_mature"].cumsum()
+        result[f"cum_{prefix}_cnt_bad"] = result[f"{prefix}_cnt_bad"].cumsum()
+        result[f"cum_{prefix}_cnt_bad_rate"] = safe_div(
+            result[f"cum_{prefix}_cnt_bad"],
+            result[f"cum_{prefix}_cnt_mature"],
+        )
+        result[f"cum_{prefix}_amt_exposure"] = result[f"{prefix}_amt_exposure"].cumsum()
+        result[f"cum_{prefix}_amt_bad"] = result[f"{prefix}_amt_bad"].cumsum()
+        result[f"cum_{prefix}_amt_bad_rate"] = safe_div(
+            result[f"cum_{prefix}_amt_bad"],
+            result[f"cum_{prefix}_amt_exposure"],
+        )
+
+    return result
 
 
 def calc_bin_stats(
@@ -558,12 +632,7 @@ def calc_bin_stats(
     score_col: str = SCORE_COL,
 ) -> pd.DataFrame:
     """
-    按分箱计算核心指标。
-
-    每个率均保留可在 Excel 中复算的分子和分母：
-    - 笔数逾期率 = bad / mature；
-    - 金额逾期率 = bad amount / exposure；
-    - 样本占比 = n / total_n。
+    按分箱计算核心指标，并保留 Excel 可复算的分子和分母。
     """
     required = [
         "application_id",
@@ -575,69 +644,31 @@ def calc_bin_stats(
     require_columns(data, required, "calc_bin_stats")
 
     work = add_risk_helper_columns(data)
+    aggregations = {
+        "n": ("application_id", "count"),
+        "application_id_nunique": ("application_id", "nunique"),
+        "principal_amt": ("_principal", "sum"),
+        "score_min": (score_col, "min"),
+        "score_max": (score_col, "max"),
+        "score_mean": (score_col, "mean"),
+    }
+    for prefix, config in RISK_HELPER_CONFIG.items():
+        helper = config["helper_prefix"]
+        aggregations[f"{prefix}_cnt_mature"] = (f"{helper}_mature_cnt", "sum")
+        aggregations[f"{prefix}_cnt_bad"] = (f"{helper}_bad_cnt", "sum")
+    for prefix, config in RISK_HELPER_CONFIG.items():
+        helper = config["helper_prefix"]
+        aggregations[f"{prefix}_amt_exposure"] = (f"{helper}_amt_exposure", "sum")
+        aggregations[f"{prefix}_amt_bad"] = (f"{helper}_amt_bad", "sum")
+
     stats = (
         work.groupby([bin_col, order_col], dropna=False, observed=True)
-        .agg(
-            n=("application_id", "count"),
-            application_id_nunique=("application_id", "nunique"),
-            principal_amt=("_principal", "sum"),
-            score_min=(score_col, "min"),
-            score_max=(score_col, "max"),
-            score_mean=(score_col, "mean"),
-            **{
-                "1m30p_cnt_mature": ("_m1_mature_cnt", "sum"),
-                "1m30p_cnt_bad": ("_m1_bad_cnt", "sum"),
-                "3m30p_cnt_mature": ("_m3_mature_cnt", "sum"),
-                "3m30p_cnt_bad": ("_m3_bad_cnt", "sum"),
-                "1m30p_amt_exposure": ("_m1_amt_exposure", "sum"),
-                "1m30p_amt_bad": ("_m1_amt_bad", "sum"),
-                "3m30p_amt_exposure": ("_m3_amt_exposure", "sum"),
-                "3m30p_amt_bad": ("_m3_amt_bad", "sum"),
-            },
-        )
+        .agg(**aggregations)
         .reset_index()
         .rename(columns={order_col: "bin_order"})
-        .sort_values("bin_order")
-        .reset_index(drop=True)
     )
+    return add_bin_derived_metrics(stats, order_col="bin_order")
 
-    total_n = stats["n"].sum()
-    stats["total_n"] = total_n
-    stats["sample_pct"] = safe_div(stats["n"], total_n)
-
-    for prefix in ["1m30p", "3m30p"]:
-        stats[f"{prefix}_cnt_good"] = (
-            stats[f"{prefix}_cnt_mature"] - stats[f"{prefix}_cnt_bad"]
-        )
-        stats[f"{prefix}_cnt_bad_rate"] = safe_div(
-            stats[f"{prefix}_cnt_bad"],
-            stats[f"{prefix}_cnt_mature"],
-        )
-        stats[f"{prefix}_amt_bad_rate"] = safe_div(
-            stats[f"{prefix}_amt_bad"],
-            stats[f"{prefix}_amt_exposure"],
-        )
-
-    # 按低风险到高风险累计，直接用于阈值分析。
-    stats["cum_n"] = stats["n"].cumsum()
-    stats["cum_pass_rate"] = safe_div(stats["cum_n"], total_n)
-
-    for prefix in ["1m30p", "3m30p"]:
-        stats[f"cum_{prefix}_cnt_mature"] = stats[f"{prefix}_cnt_mature"].cumsum()
-        stats[f"cum_{prefix}_cnt_bad"] = stats[f"{prefix}_cnt_bad"].cumsum()
-        stats[f"cum_{prefix}_cnt_bad_rate"] = safe_div(
-            stats[f"cum_{prefix}_cnt_bad"],
-            stats[f"cum_{prefix}_cnt_mature"],
-        )
-
-        stats[f"cum_{prefix}_amt_exposure"] = stats[f"{prefix}_amt_exposure"].cumsum()
-        stats[f"cum_{prefix}_amt_bad"] = stats[f"{prefix}_amt_bad"].cumsum()
-        stats[f"cum_{prefix}_amt_bad_rate"] = safe_div(
-            stats[f"cum_{prefix}_amt_bad"],
-            stats[f"cum_{prefix}_amt_exposure"],
-        )
-
-    return stats
 
 
 def check_monotonicity(
@@ -691,11 +722,7 @@ def calc_complete_initial_stats(
     data: pd.DataFrame,
     initial_edges: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    计算完整的初始箱统计表。
-
-    即使 Validation 某个初始箱没有样本，也保留该箱，避免候选范围聚合错位。
-    """
+    """计算完整初始箱统计；无样本的箱也保留，防止候选范围错位。"""
     stats = calc_bin_stats(
         data,
         bin_col=INITIAL_BIN_COL,
@@ -716,73 +743,36 @@ def calc_complete_initial_stats(
         how="left",
     )
 
-    zero_cols = [
-        "n",
-        "application_id_nunique",
-        "principal_amt",
-        "1m30p_cnt_mature",
-        "1m30p_cnt_bad",
-        "1m30p_cnt_good",
-        "3m30p_cnt_mature",
-        "3m30p_cnt_bad",
-        "3m30p_cnt_good",
-        "1m30p_amt_exposure",
-        "1m30p_amt_bad",
-        "3m30p_amt_exposure",
-        "3m30p_amt_bad",
-    ]
-    for col in zero_cols:
+    additive_cols = ["n", "application_id_nunique", "principal_amt"]
+    for prefix in RISK_PREFIXES:
+        additive_cols.extend(
+            [
+                f"{prefix}_cnt_mature",
+                f"{prefix}_cnt_bad",
+                f"{prefix}_cnt_good",
+                f"{prefix}_amt_exposure",
+                f"{prefix}_amt_bad",
+            ]
+        )
+
+    for col in additive_cols:
         if col not in result.columns:
             result[col] = 0.0
         result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
 
-    total_n = float(result["n"].sum())
-    result["total_n"] = total_n
-    result["sample_pct"] = safe_div(result["n"], total_n)
+    return add_bin_derived_metrics(result, order_col="bin_order")
 
-    for prefix in ["1m30p", "3m30p"]:
-        result[f"{prefix}_cnt_good"] = (
-            result[f"{prefix}_cnt_mature"] - result[f"{prefix}_cnt_bad"]
-        )
-        result[f"{prefix}_cnt_bad_rate"] = safe_div(
-            result[f"{prefix}_cnt_bad"],
-            result[f"{prefix}_cnt_mature"],
-        )
-        result[f"{prefix}_amt_bad_rate"] = safe_div(
-            result[f"{prefix}_amt_bad"],
-            result[f"{prefix}_amt_exposure"],
-        )
-
-    result = result.sort_values("bin_order").reset_index(drop=True)
-    result["cum_n"] = result["n"].cumsum()
-    result["cum_pass_rate"] = safe_div(result["cum_n"], total_n)
-
-    for prefix in ["1m30p", "3m30p"]:
-        result[f"cum_{prefix}_cnt_mature"] = result[f"{prefix}_cnt_mature"].cumsum()
-        result[f"cum_{prefix}_cnt_bad"] = result[f"{prefix}_cnt_bad"].cumsum()
-        result[f"cum_{prefix}_cnt_bad_rate"] = safe_div(
-            result[f"cum_{prefix}_cnt_bad"],
-            result[f"cum_{prefix}_cnt_mature"],
-        )
-        result[f"cum_{prefix}_amt_exposure"] = result[f"{prefix}_amt_exposure"].cumsum()
-        result[f"cum_{prefix}_amt_bad"] = result[f"{prefix}_amt_bad"].cumsum()
-        result[f"cum_{prefix}_amt_bad_rate"] = safe_div(
-            result[f"cum_{prefix}_amt_bad"],
-            result[f"cum_{prefix}_amt_exposure"],
-        )
-
-    return result
 
 
 def aggregate_initial_stats_by_ranges(
     initial_stats: pd.DataFrame,
     ranges: Sequence[Tuple[int, int]],
 ) -> pd.DataFrame:
-    """按候选合箱范围聚合初始箱风险表现。"""
+    """将连续初始箱按候选范围聚合为最终风险档。"""
     stats = initial_stats.sort_values("bin_order").reset_index(drop=True)
     total_n = float(stats["n"].sum())
-
     rows = []
+
     for final_order, (start, end) in enumerate(ranges, start=1):
         part = stats.loc[stats["bin_order"].between(start, end, inclusive="both")]
         if part.empty:
@@ -792,7 +782,9 @@ def aggregate_initial_stats_by_ranges(
         row = {
             "final_bin_order": final_order,
             FINAL_BIN_COL: chr(ord("A") + final_order - 1),
-            "merged_from": f"B{start:02d}-B{end:02d}" if start != end else f"B{start:02d}",
+            "merged_from": (
+                f"B{start:02d}-B{end:02d}" if start != end else f"B{start:02d}"
+            ),
             "source_bin_start": start,
             "source_bin_end": end,
             "n": n,
@@ -804,45 +796,31 @@ def aggregate_initial_stats_by_ranges(
             "score_mean": safe_div((part["score_mean"] * part["n"]).sum(), n),
         }
 
-        for prefix in ["1m30p", "3m30p"]:
-            row[f"{prefix}_cnt_mature"] = float(part[f"{prefix}_cnt_mature"].sum())
-            row[f"{prefix}_cnt_bad"] = float(part[f"{prefix}_cnt_bad"].sum())
-            row[f"{prefix}_cnt_good"] = (
-                row[f"{prefix}_cnt_mature"] - row[f"{prefix}_cnt_bad"]
-            )
-            row[f"{prefix}_amt_exposure"] = float(part[f"{prefix}_amt_exposure"].sum())
-            row[f"{prefix}_amt_bad"] = float(part[f"{prefix}_amt_bad"].sum())
-            row[f"{prefix}_cnt_bad_rate"] = safe_div(
-                row[f"{prefix}_cnt_bad"],
-                row[f"{prefix}_cnt_mature"],
-            )
-            row[f"{prefix}_amt_bad_rate"] = safe_div(
-                row[f"{prefix}_amt_bad"],
-                row[f"{prefix}_amt_exposure"],
+        for prefix in RISK_PREFIXES:
+            mature = float(part[f"{prefix}_cnt_mature"].sum())
+            bad = float(part[f"{prefix}_cnt_bad"].sum())
+            exposure = float(part[f"{prefix}_amt_exposure"].sum())
+            bad_amount = float(part[f"{prefix}_amt_bad"].sum())
+            row.update(
+                {
+                    f"{prefix}_cnt_mature": mature,
+                    f"{prefix}_cnt_bad": bad,
+                    f"{prefix}_cnt_good": mature - bad,
+                    f"{prefix}_amt_exposure": exposure,
+                    f"{prefix}_amt_bad": bad_amount,
+                    f"{prefix}_cnt_bad_rate": safe_div(bad, mature),
+                    f"{prefix}_amt_bad_rate": safe_div(bad_amount, exposure),
+                }
             )
 
         row["sample_pct"] = safe_div(n, total_n)
         rows.append(row)
 
-    result = pd.DataFrame(rows)
-    result["cum_n"] = result["n"].cumsum()
-    result["cum_pass_rate"] = safe_div(result["cum_n"], total_n)
-
-    for prefix in ["1m30p", "3m30p"]:
-        result[f"cum_{prefix}_cnt_mature"] = result[f"{prefix}_cnt_mature"].cumsum()
-        result[f"cum_{prefix}_cnt_bad"] = result[f"{prefix}_cnt_bad"].cumsum()
-        result[f"cum_{prefix}_cnt_bad_rate"] = safe_div(
-            result[f"cum_{prefix}_cnt_bad"],
-            result[f"cum_{prefix}_cnt_mature"],
-        )
-        result[f"cum_{prefix}_amt_exposure"] = result[f"{prefix}_amt_exposure"].cumsum()
-        result[f"cum_{prefix}_amt_bad"] = result[f"{prefix}_amt_bad"].cumsum()
-        result[f"cum_{prefix}_amt_bad_rate"] = safe_div(
-            result[f"cum_{prefix}_amt_bad"],
-            result[f"cum_{prefix}_amt_exposure"],
-        )
-
-    return result
+    return add_bin_derived_metrics(
+        pd.DataFrame(rows),
+        order_col="final_bin_order",
+        include_total_n=False,
+    )
 
 
 def oriented_rate(values: pd.Series) -> pd.Series:
@@ -958,31 +936,6 @@ def calc_bin_constraint_details(stats: pd.DataFrame) -> pd.DataFrame:
             {
                 "final_bin_order": int(row["final_bin_order"]),
                 FINAL_BIN_COL: row[FINAL_BIN_COL],
-                "required_sample_pct": min_sample_pct,
-                **checks,
-                "all_constraints_ok": all(checks.values()),
-                "violation_severity": severity,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def identify_protected_boundaries(
-    initial_stats: pd.DataFrame,
-    config: Dict,
-) -> Set[int]:
-    """
-    找出应尽量保留的初始箱边界。
-
-    边界编号 k 代表 Bk 与 B(k+1) 之间的切点。
-    """
-    if not PROTECT_STRATEGY_BOUNDARIES:
-        return set()
-
-    ordered = initial_stats.sort_values("bin_order").reset_index(drop=True)
-    boundaries: Set[int] = set()
-    max_boundary = len(ordered) - 1
-
     for constraint_group in ["auto_constraints", "accept_constraints"]:
         constraints = config[constraint_group]
 
