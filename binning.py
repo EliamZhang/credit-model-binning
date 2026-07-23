@@ -77,8 +77,9 @@ MIN_FINAL_BIN_COUNT = 6
 MAX_FINAL_BIN_COUNT = 8
 TARGET_FINAL_BIN_COUNT = 7
 
-# 合箱主指标：3M30+ 笔数逾期率。
-PRIMARY_RATE_COL = "3m30p_cnt_bad_rate"
+# 合箱主指标：同时监控 1M30+ 和 3M30+ 笔数逾期率。
+PRIMARY_RATE_COLS = ["1m30p_cnt_bad_rate", "3m30p_cnt_bad_rate"]
+PRIMARY_RATE_COL = "3m30p_cnt_bad_rate"  # 保留单列引用，用于 p-value 等需要主锚定指标的场景
 PRIMARY_MATURE_COL = "3m30p_cnt_mature"
 PRIMARY_BAD_COL = "3m30p_cnt_bad"
 PRIMARY_GOOD_COL = "3m30p_cnt_good"
@@ -1031,6 +1032,12 @@ def pair_merge_diagnostics(
         rate_gap = 0.0
     else:
         rate_gap = abs(float(left_rate) - float(right_rate))
+    # 双主指标下取最大差异，确保任一指标差异显著时不会被轻易合并。
+    for rate_col in PRIMARY_RATE_COLS:
+        lr = left.get(rate_col)
+        rr = right.get(rate_col)
+        if pd.notna(lr) and pd.notna(rr):
+            rate_gap = max(rate_gap, abs(float(lr) - float(rr)))
 
     p_value = two_proportion_pvalue(
         left[PRIMARY_BAD_COL],
@@ -1108,11 +1115,14 @@ def choose_best_adjacent_pair(
 
 
 def primary_inversion_pair_indices(stats: pd.DataFrame) -> List[int]:
-    """返回主风险指标发生倒挂的相邻箱左侧位置。"""
+    """返回任一主风险指标发生倒挂的相邻箱左侧位置（去重）。"""
     ordered = stats.sort_values("final_bin_order").reset_index(drop=True)
-    diff = oriented_rate(ordered[PRIMARY_RATE_COL]).diff()
-    violation_rows = diff.lt(-DEVELOPMENT_INVERSION_TOLERANCE).fillna(False)
-    return [int(row_index - 1) for row_index in ordered.index[violation_rows] if row_index > 0]
+    violation_rows: Set[int] = set()
+    for rate_col in PRIMARY_RATE_COLS:
+        diff = oriented_rate(ordered[rate_col]).diff()
+        rows = ordered.index[diff.lt(-DEVELOPMENT_INVERSION_TOLERANCE).fillna(False)]
+        violation_rows.update(int(r - 1) for r in rows if r > 0)
+    return sorted(violation_rows)
 
 
 def evaluate_merge_candidate(
@@ -1136,12 +1146,12 @@ def evaluate_merge_candidate(
     ]
     development_primary_inversions = count_rate_inversions(
         development_stats,
-        [PRIMARY_RATE_COL],
+        PRIMARY_RATE_COLS,
         tolerance=DEVELOPMENT_INVERSION_TOLERANCE,
     )
     validation_primary_inversions = count_rate_inversions(
         validation_stats,
-        [PRIMARY_RATE_COL],
+        PRIMARY_RATE_COLS,
         tolerance=VALIDATION_INVERSION_TOLERANCE,
     )
     validation_all_inversions = count_rate_inversions(
@@ -1158,9 +1168,16 @@ def evaluate_merge_candidate(
     iv_retention = safe_div(final_iv, initial_iv)
 
     adjacent_diffs = oriented_rate(development_stats[PRIMARY_RATE_COL]).diff().dropna()
-    min_adjacent_rate_diff = (
+    min_adjacent_rate_diff: float = (
         float(adjacent_diffs.min()) if not adjacent_diffs.empty else np.nan
     )
+    # 双主指标：取两个指标中更小的相邻差异，确保任一指标区分度不足时都被识别。
+    for rate_col in PRIMARY_RATE_COLS:
+        diffs = oriented_rate(development_stats[rate_col]).diff().dropna()
+        if not diffs.empty:
+            col_min = float(diffs.min())
+            if pd.isna(min_adjacent_rate_diff) or col_min < min_adjacent_rate_diff:
+                min_adjacent_rate_diff = col_min
 
     compare = development_stats[["final_bin_order", PRIMARY_RATE_COL]].merge(
         validation_stats[["final_bin_order", PRIMARY_RATE_COL]],
@@ -1307,7 +1324,7 @@ def build_merge_candidate_score_table(
     按可解释的分阶段流程生成候选合箱方案。
 
     阶段一：清理样本、成熟量、坏样本或好样本不足的箱；
-    阶段二：使用主指标 3M30+ 执行 PAVA 风格单调合并；
+    阶段二：使用双主指标 1M30+/3M30+ 执行 PAVA 风格单调合并；
     阶段三：按相邻风险差异、显著性、IV 损失和策略边界保护压缩到 6~8 档；
     阶段四：继续生成 8、7、6 档候选，由 Development + Validation 评分选择。
     """
@@ -1418,11 +1435,17 @@ def build_merge_candidate_score_table(
         if not inversion_pairs:
             break
 
-        # 从倒挂最严重的一对开始处理。
-        oriented = oriented_rate(current_stats[PRIMARY_RATE_COL])
+        # 从倒挂最严重的一对开始处理（双主指标取跌幅最大者）。
+        oriented = {
+            col: oriented_rate(current_stats[col])
+            for col in PRIMARY_RATE_COLS
+        }
         pair_index = min(
             inversion_pairs,
-            key=lambda idx: oriented.iloc[idx + 1] - oriented.iloc[idx],
+            key=lambda idx: min(
+                oriented[col].iloc[idx + 1] - oriented[col].iloc[idx]
+                for col in PRIMARY_RATE_COLS
+            ),
         )
         diagnostics = choose_best_adjacent_pair(
             ranges,
@@ -1434,7 +1457,7 @@ def build_merge_candidate_score_table(
         perform_merge(
             pair_index,
             "pava_monotonic_merge",
-            "主指标 3M30+ 出现相邻倒挂",
+            "主指标 1M30+/3M30+ 出现相邻倒挂",
             diagnostics,
         )
 
@@ -2586,7 +2609,7 @@ def main() -> None:
                     "ranges": format_merge_ranges(selected_merge_ranges),
                     "development_primary_inversion_cnt": count_rate_inversions(
                         manual_development_stats,
-                        [PRIMARY_RATE_COL],
+                        PRIMARY_RATE_COLS,
                     ),
                 }
             ]
