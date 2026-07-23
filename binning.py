@@ -2,15 +2,24 @@
 """
 模型分数分箱与策略阈值分析（优化版）
 
-核心流程：
-1. 数据加载，并按时间切分 Train / OOT；
-2. 在 Train 内再切分 Development / Validation，OOT 不参与合箱调参；
-3. Development 学习 20 等频初始边界，边界复用到 Validation、Train、OOT；
-4. 对相邻初始箱执行：小箱清理 -> 主风险指标单调合并 -> 候选档位压缩；
-5. 使用 Development + Validation 选择 6~8 档最终方案；
-6. OOT 只用于最终单调性、PSI、AUC、KS 和策略分段验证；
-7. 基于完整 Train 生成自动通过 / 人工审核 / 拒绝阈值；
-8. 输出完整 Excel 报告。
+核心流程（对应日志中 1/9 ~ 9/9）：
+1. 从 res/ 读取 sample.csv + application_info.csv + 模型分文件，融合为宽表；按时间窗口 2025-10
+   / 2025-11 切分 Train（≤2025-10）与 OOT（≥2025-11）；
+2. Train 内最后 3 个月作为合箱 Validation，其余为 Development（≥3 个月）；OOT 全程不参与
+   合箱调参，仅用于最终验证；
+3. Development 上按 score_mlt 做 20 等频分箱，生成初始边界；边界复用到 Validation、完整
+   Train、OOT，得到统一的 score_mlt_bin20 分箱标签；
+4. 从 Development 初始箱出发，自动执行：小箱清理 → 以 3m30+ 逾期率为主风险指标做相邻箱
+   单调合并 → 策略关键边界保护 → 评分候选方案，输出 6~8 档最终方案；同时生成手工兜底范围；
+5. 将最终合箱映射应用到 Development / Validation / Train / OOT，生成各切片的最终箱统计
+   （样本量、主/辅风险指标、PSI 基准等）；
+6. OOT 上验证最终方案：单调性、PSI（训练/OOT 总体及分月）、AUC、KS 和分段对比；输出
+   月度稳定性矩阵；
+7. 基于完整 Train 的最终箱统计，构建阈值曲线（累计/边际逾期率），在自动通过/人工审核/
+   拒绝策略约束下生成 risk_level 分段与通过率方案；
+8. 汇总概览、合箱过程、各切片统计、Train/OOT 对比、策略阈值、策略分段验证、AUC/KS、
+   月度稳定性、参数配置、指标字典等 sheet；
+9. 写入 out/策略报告_优化版.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
 
 运行方式：
     python binning.py
