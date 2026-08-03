@@ -64,15 +64,21 @@
 ### 2. 安装依赖
 
 ```bash
-pip install numpy pandas openpyxl
+"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" -m pip install -r requirements.txt
 ```
 
-当前脚本只依赖这三个包，不依赖 scipy / sklearn / statsmodels / matplotlib：相邻箱显著性检验用不依赖 scipy 的两比例 Z 检验实现，AUC / KS 直接按秩和与累计分布计算。
+默认使用的 Python 解释器为：
+
+```text
+C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe
+```
+
+当前脚本核心依赖 pandas / numpy / openpyxl；`requirements.txt` 中还包含了数据分析时常用的 scipy / statsmodels / matplotlib / jupyter。
 
 ### 3. 运行方式
 
 ```bash
-python binning.py
+"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" binning.py
 ```
 
 脚本运行完成后会输出：

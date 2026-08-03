@@ -64,6 +64,7 @@ OOT_START_MONTH = "2025-11"
 # Train 内最后若干个月作为合箱 Validation；OOT 保持完全独立。
 VALIDATION_MONTH_COUNT = 3
 MIN_DEVELOPMENT_MONTH_COUNT = 3
+FALLBACK_DEVELOPMENT_SAMPLE_PCT = 0.80
 
 INITIAL_BIN_COUNT = 20
 INITIAL_BIN_COL = "score_mlt_bin20"
@@ -90,6 +91,11 @@ MIN_TAIL_BIN_SAMPLE_PCT = 0.025
 MIN_FINAL_BIN_MATURE_COUNT = 1000
 MIN_FINAL_BIN_BAD_COUNT = 20
 MIN_FINAL_BIN_GOOD_COUNT = 200
+MIN_EXTREME_BIN_MATURE_COUNT = 500
+MIN_BEST_EXTREME_BIN_BAD_COUNT = 0
+MIN_BEST_EXTREME_BIN_GOOD_COUNT = 200
+MIN_WORST_EXTREME_BIN_BAD_COUNT = 20
+MIN_WORST_EXTREME_BIN_GOOD_COUNT = 0
 
 # 单调与相邻差异控制。
 DEVELOPMENT_INVERSION_TOLERANCE = 0.0
@@ -104,6 +110,36 @@ MAX_ACCEPTABLE_VALIDATION_PSI = 0.10
 # 策略关键边界保护。强制处理小箱或倒挂时仍允许跨越保护边界。
 PROTECT_LARGEST_RISK_JUMPS = 1
 PROTECTED_BOUNDARY_PENALTY = 100.0
+
+# 极端人群圈选：默认保留最好和最坏各 1 个初始等频箱，不让常规合箱跨越。
+# 如果样本太少或单调性必须修复，可将 ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS 改为 True。
+PROTECT_EXTREME_INITIAL_BINS = True
+BEST_EXTREME_INITIAL_BIN_COUNT = 1
+WORST_EXTREME_INITIAL_BIN_COUNT = 1
+ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS = False
+EXTREME_BOUNDARY_PENALTY = 10000.0
+EXTREME_BOUNDARY_VIOLATION_PENALTY = 50.0
+
+# 候选合箱评分权重。
+MERGE_COST_RATE_GAP_WEIGHT = 100.0
+MERGE_COST_IV_LOSS_WEIGHT = 10.0
+IV_RETENTION_SCORE_CAP = 1.5
+CANDIDATE_SCORE_WEIGHTS = {
+    "hard_constraints_ok": 100.0,
+    "development_primary_inversion": -30.0,
+    "validation_primary_inversion": -12.0,
+    "validation_all_inversion": -4.0,
+    "constraint_violation": -15.0,
+    "validation_psi_excess": -150.0,
+    "iv_retention": 12.0,
+    "min_adjacent_rate_diff": 100.0,
+    "target_bin_distance": -1.5,
+    "extreme_boundary_violation": -EXTREME_BOUNDARY_VIOLATION_PENALTY,
+}
+
+# 指标计算平滑项。
+PSI_EPS = 1e-6
+IV_SMOOTHING_EPS = 0.5
 
 # 默认策略的风险约束。
 STRATEGY_CONFIG = {
@@ -215,6 +251,11 @@ def safe_div(numerator, denominator):
 def flatten_dict(prefix: str, values: Dict[str, float]) -> Dict[str, float]:
     """将策略约束字典展开为平面字段。"""
     return {f"{prefix}_{key}": value for key, value in values.items()}
+
+
+def remove_prefix(text: str, prefix: str) -> str:
+    """兼容 Python 3.7 的字符串前缀移除。"""
+    return text[len(prefix):] if text.startswith(prefix) else text
 
 
 # ============================================================
@@ -345,7 +386,7 @@ def split_development_validation(
         validation = work.loc[validation_mask].copy()
     else:
         ordered = work.sort_values(["application_time", "application_id"]).copy()
-        split_at = max(1, int(len(ordered) * 0.80))
+        split_at = max(1, int(len(ordered) * FALLBACK_DEVELOPMENT_SAMPLE_PCT))
         split_at = min(split_at, len(ordered) - 1)
         development = ordered.iloc[:split_at].copy()
         validation = ordered.iloc[split_at:].copy()
@@ -467,6 +508,7 @@ def apply_merge_map(data: pd.DataFrame, merge_map: pd.DataFrame) -> pd.DataFrame
 def build_final_edge_table(
     initial_edges: pd.DataFrame,
     merge_map: pd.DataFrame,
+    initial_bin_count: int,
 ) -> pd.DataFrame:
     """生成最终风险等级的上线边界表。"""
     merged = initial_edges.merge(
@@ -489,6 +531,14 @@ def build_final_edge_table(
         .reset_index()
         .sort_values("final_bin_order")
         .reset_index(drop=True)
+    )
+    final_edges["extreme_bin_role"] = final_edges.apply(
+        lambda row: classify_extreme_role(
+            row["source_bin_start"],
+            row["source_bin_end"],
+            initial_bin_count,
+        ),
+        axis=1,
     )
     return final_edges
 
@@ -776,10 +826,21 @@ def count_rate_inversions(
     return total
 
 
+def calc_spearman_corr(left: pd.Series, right: pd.Series) -> float:
+    """用 rank + pearson 计算 Spearman 相关性，避免依赖 scipy。"""
+    valid = pd.DataFrame({"left": left, "right": right}).dropna()
+    if len(valid) < 2:
+        return np.nan
+    return valid["left"].rank(method="average").corr(
+        valid["right"].rank(method="average"),
+        method="pearson",
+    )
+
+
 def calc_psi_from_bin_stats(
     base_stats: pd.DataFrame,
     compare_stats: pd.DataFrame,
-    eps: float = 1e-6,
+    eps: float = PSI_EPS,
 ) -> float:
     """用同一候选箱的样本占比计算 PSI。"""
     base_pct = base_stats["sample_pct"].fillna(0).to_numpy(dtype="float64") + eps
@@ -791,7 +852,7 @@ def calc_iv_from_stats(
     stats: pd.DataFrame,
     bad_col: str = PRIMARY_BAD_COL,
     good_col: str = PRIMARY_GOOD_COL,
-    eps: float = 0.5,
+    eps: float = IV_SMOOTHING_EPS,
 ) -> float:
     """使用箱级好坏样本量计算 IV。"""
     bad = pd.to_numeric(stats[bad_col], errors="coerce").fillna(0).to_numpy(float)
@@ -833,29 +894,189 @@ def required_sample_pct(position: int, bin_count: int) -> float:
     return MIN_MIDDLE_BIN_SAMPLE_PCT
 
 
+def _extreme_ranges(initial_bin_count: int) -> Dict[str, Tuple[int, int]]:
+    """按模型风险方向返回最好/最坏极端初始箱范围。"""
+    best_count = max(0, min(BEST_EXTREME_INITIAL_BIN_COUNT, initial_bin_count))
+    worst_count = max(0, min(WORST_EXTREME_INITIAL_BIN_COUNT, initial_bin_count))
+    empty = (0, -1)
+
+    if HIGH_SCORE_HIGH_RISK:
+        best_range = (1, best_count) if best_count > 0 else empty
+        worst_range = (
+            initial_bin_count - worst_count + 1,
+            initial_bin_count,
+        ) if worst_count > 0 else empty
+    else:
+        best_range = (
+            initial_bin_count - best_count + 1,
+            initial_bin_count,
+        ) if best_count > 0 else empty
+        worst_range = (1, worst_count) if worst_count > 0 else empty
+
+    return {
+        "best_extreme": best_range,
+        "worst_extreme": worst_range,
+    }
+
+
+def identify_extreme_boundaries(initial_bin_count: int) -> Set[int]:
+    """
+    返回用于圈出最好/最坏极端人群的边界。
+
+    边界编号 k 代表 Bk 与 B(k+1) 之间的切点。
+    """
+    if not PROTECT_EXTREME_INITIAL_BINS:
+        return set()
+
+    max_boundary = initial_bin_count - 1
+    boundaries: Set[int] = set()
+    for start, end in _extreme_ranges(initial_bin_count).values():
+        if start <= 0 or end < start:
+            continue
+        boundary = end if start == 1 else start - 1
+        if 1 <= boundary <= max_boundary:
+            boundaries.add(int(boundary))
+    return boundaries
+
+
+def _range_overlaps(left: Tuple[int, int], right: Tuple[int, int]) -> bool:
+    """判断两个初始箱范围是否有交集。"""
+    return left[0] <= right[1] and right[0] <= left[1]
+
+
+def classify_extreme_role(
+    source_start: int,
+    source_end: int,
+    initial_bin_count: int,
+) -> str:
+    """标记最终箱是否为最好/最坏极端箱，或是否已经吞并了极端箱。"""
+    if not PROTECT_EXTREME_INITIAL_BINS:
+        return ""
+
+    current = (int(source_start), int(source_end))
+    roles = []
+    for role, expected in _extreme_ranges(initial_bin_count).items():
+        if expected[0] <= 0 or expected[1] < expected[0]:
+            continue
+        if current == expected:
+            roles.append(role)
+        elif _range_overlaps(current, expected):
+            roles.append(f"contains_{role}")
+
+    return ",".join(roles)
+
+
+def count_crossed_boundaries(
+    ranges: Sequence[Tuple[int, int]],
+    boundaries: Set[int],
+) -> int:
+    """统计被当前合箱方案跨越的保护边界数量。"""
+    if not boundaries:
+        return 0
+    preserved = {int(end) for _, end in ranges[:-1]}
+    return len(set(boundaries) - preserved)
+
+
+def bin_constraint_minimums(
+    row: pd.Series,
+    position: int,
+    bin_count: int,
+    initial_bin_count: int,
+) -> Dict[str, float]:
+    """根据普通箱/极端箱返回该最终箱的约束下限。"""
+    role = classify_extreme_role(
+        row["source_bin_start"],
+        row["source_bin_end"],
+        initial_bin_count,
+    )
+    minimums = {
+        "sample_pct": required_sample_pct(position, bin_count),
+        "mature_count": MIN_FINAL_BIN_MATURE_COUNT,
+        "bad_count": MIN_FINAL_BIN_BAD_COUNT,
+        "good_count": MIN_FINAL_BIN_GOOD_COUNT,
+    }
+
+    if role == "best_extreme":
+        minimums.update(
+            {
+                "mature_count": MIN_EXTREME_BIN_MATURE_COUNT,
+                "bad_count": MIN_BEST_EXTREME_BIN_BAD_COUNT,
+                "good_count": MIN_BEST_EXTREME_BIN_GOOD_COUNT,
+            }
+        )
+    elif role == "worst_extreme":
+        minimums.update(
+            {
+                "mature_count": MIN_EXTREME_BIN_MATURE_COUNT,
+                "bad_count": MIN_WORST_EXTREME_BIN_BAD_COUNT,
+                "good_count": MIN_WORST_EXTREME_BIN_GOOD_COUNT,
+            }
+        )
+
+    return minimums
+
+
+def filter_blocked_pair_indices(
+    ranges: Sequence[Tuple[int, int]],
+    pair_indices: Sequence[int],
+    blocked_boundaries: Optional[Set[int]],
+) -> List[int]:
+    """剔除会跨越硬保护边界的相邻合箱位置。"""
+    if not blocked_boundaries:
+        return list(pair_indices)
+    return [
+        pair_index
+        for pair_index in pair_indices
+        if int(ranges[pair_index][1]) not in blocked_boundaries
+    ]
+
+
 def calc_bin_constraint_details(stats: pd.DataFrame) -> pd.DataFrame:
     """计算每个最终箱的样本、成熟量和好坏样本约束。"""
     rows = []
     ordered = stats.sort_values("final_bin_order").reset_index(drop=True)
+    initial_bin_count = (
+        int(ordered["source_bin_end"].max())
+        if "source_bin_end" in ordered.columns and not ordered.empty
+        else len(ordered)
+    )
     for position, row in ordered.iterrows():
-        min_sample_pct = required_sample_pct(position, len(ordered))
+        minimums = bin_constraint_minimums(
+            row,
+            position,
+            len(ordered),
+            initial_bin_count,
+        )
+        min_sample_pct = minimums["sample_pct"]
+        min_mature_count = minimums["mature_count"]
+        min_bad_count = minimums["bad_count"]
+        min_good_count = minimums["good_count"]
         checks = {
             "sample_ok": row["sample_pct"] >= min_sample_pct,
-            "mature_ok": row[PRIMARY_MATURE_COL] >= MIN_FINAL_BIN_MATURE_COUNT,
-            "bad_ok": row[PRIMARY_BAD_COL] >= MIN_FINAL_BIN_BAD_COUNT,
-            "good_ok": row[PRIMARY_GOOD_COL] >= MIN_FINAL_BIN_GOOD_COUNT,
+            "mature_ok": row[PRIMARY_MATURE_COL] >= min_mature_count,
+            "bad_ok": row[PRIMARY_BAD_COL] >= min_bad_count,
+            "good_ok": row[PRIMARY_GOOD_COL] >= min_good_count,
         }
+
+        def shortage(value: float, minimum: float) -> float:
+            if minimum <= 0:
+                return 0.0
+            return max(0.0, 1 - safe_div(value, minimum))
+
         severity = 0.0
-        severity += max(0.0, 1 - safe_div(row["sample_pct"], min_sample_pct))
-        severity += max(0.0, 1 - safe_div(row[PRIMARY_MATURE_COL], MIN_FINAL_BIN_MATURE_COUNT))
-        severity += max(0.0, 1 - safe_div(row[PRIMARY_BAD_COL], MIN_FINAL_BIN_BAD_COUNT))
-        severity += max(0.0, 1 - safe_div(row[PRIMARY_GOOD_COL], MIN_FINAL_BIN_GOOD_COUNT))
+        severity += shortage(row["sample_pct"], min_sample_pct)
+        severity += shortage(row[PRIMARY_MATURE_COL], min_mature_count)
+        severity += shortage(row[PRIMARY_BAD_COL], min_bad_count)
+        severity += shortage(row[PRIMARY_GOOD_COL], min_good_count)
 
         rows.append(
             {
                 "final_bin_order": int(row["final_bin_order"]),
                 FINAL_BIN_COL: row[FINAL_BIN_COL],
                 "required_sample_pct": min_sample_pct,
+                "required_mature_count": min_mature_count,
+                "required_bad_count": min_bad_count,
+                "required_good_count": min_good_count,
                 **checks,
                 "all_constraints_ok": all(checks.values()),
                 "violation_severity": severity,
@@ -874,7 +1095,7 @@ def identify_protected_boundaries(
     边界编号 k 代表 Bk 与 B(k+1) 之间的切点。
     """
     ordered = initial_stats.sort_values("bin_order").reset_index(drop=True)
-    boundaries: Set[int] = set()
+    boundaries: Set[int] = identify_extreme_boundaries(len(ordered))
     max_boundary = len(ordered) - 1
 
     for constraint_group in ["auto_constraints", "accept_constraints"]:
@@ -927,6 +1148,7 @@ def pair_merge_diagnostics(
     pair_index: int,
     initial_stats: pd.DataFrame,
     protected_boundaries: Set[int],
+    extreme_boundaries: Optional[Set[int]] = None,
     ignore_protection: bool = False,
 ) -> Dict[str, float]:
     """计算合并某对相邻箱的风险差异、显著性、IV 损失和综合代价。"""
@@ -964,17 +1186,20 @@ def pair_merge_diagnostics(
 
     boundary = int(ranges[pair_index][1])
     is_protected = boundary in protected_boundaries
+    is_extreme_boundary = boundary in (extreme_boundaries or set())
     protection_penalty = (
         0.0
         if ignore_protection or not is_protected
         else PROTECTED_BOUNDARY_PENALTY
     )
+    if is_extreme_boundary and not ignore_protection:
+        protection_penalty += EXTREME_BOUNDARY_PENALTY
 
     # 风险越接近、差异越不显著、IV 损失越小，越优先合并。
     cost = (
-        rate_gap * 100
+        rate_gap * MERGE_COST_RATE_GAP_WEIGHT
         + (1 - p_for_cost)
-        + iv_loss * 10
+        + iv_loss * MERGE_COST_IV_LOSS_WEIGHT
         + protection_penalty
     )
     return {
@@ -986,6 +1211,7 @@ def pair_merge_diagnostics(
         "p_value": p_value,
         "iv_loss": iv_loss,
         "is_protected_boundary": is_protected,
+        "is_extreme_boundary": is_extreme_boundary,
         "merge_cost": cost,
     }
 
@@ -994,6 +1220,8 @@ def choose_best_adjacent_pair(
     ranges: Sequence[Tuple[int, int]],
     initial_stats: pd.DataFrame,
     protected_boundaries: Set[int],
+    extreme_boundaries: Optional[Set[int]] = None,
+    blocked_boundaries: Optional[Set[int]] = None,
     allowed_pair_indices: Optional[Sequence[int]] = None,
     ignore_protection: bool = False,
 ) -> Dict[str, float]:
@@ -1003,6 +1231,11 @@ def choose_best_adjacent_pair(
         list(allowed_pair_indices)
         if allowed_pair_indices is not None
         else list(range(len(ranges) - 1))
+    )
+    pair_indices = filter_blocked_pair_indices(
+        ranges,
+        pair_indices,
+        blocked_boundaries,
     )
     if not pair_indices:
         raise ValueError("没有可合并的相邻箱")
@@ -1014,6 +1247,7 @@ def choose_best_adjacent_pair(
             pair_index,
             initial_stats,
             protected_boundaries,
+            extreme_boundaries=extreme_boundaries,
             ignore_protection=ignore_protection,
         )
         for pair_index in pair_indices
@@ -1037,6 +1271,7 @@ def evaluate_merge_candidate(
     validation_initial_stats: pd.DataFrame,
     ranges: Sequence[Tuple[int, int]],
     initial_iv: float,
+    extreme_boundaries: Set[int],
     step_no: int,
     stage: str,
     merge_reason: str,
@@ -1086,39 +1321,43 @@ def evaluate_merge_candidate(
         on="final_bin_order",
         suffixes=("_development", "_validation"),
     ).dropna()
-    rank_correlation = (
-        compare[f"{PRIMARY_RATE_COL}_development"].corr(
-            compare[f"{PRIMARY_RATE_COL}_validation"],
-            method="spearman",
-        )
-        if len(compare) >= 2
-        else np.nan
+    rank_correlation = calc_spearman_corr(
+        compare[f"{PRIMARY_RATE_COL}_development"],
+        compare[f"{PRIMARY_RATE_COL}_validation"],
     )
 
     final_bin_count = len(ranges)
     eligible_bin_count = MIN_FINAL_BIN_COUNT <= final_bin_count <= MAX_FINAL_BIN_COUNT
+    extreme_boundary_violation_count = count_crossed_boundaries(ranges, extreme_boundaries)
     hard_constraints_ok = all(
         [
             eligible_bin_count,
             development_primary_inversions == 0,
             constraint_violation_count == 0,
+            extreme_boundary_violation_count == 0,
         ]
     )
     validation_psi_ok = validation_psi <= MAX_ACCEPTABLE_VALIDATION_PSI
 
-    iv_value = 0.0 if pd.isna(iv_retention) else float(np.clip(iv_retention, 0, 1.5))
+    iv_value = (
+        0.0
+        if pd.isna(iv_retention)
+        else float(np.clip(iv_retention, 0, IV_RETENTION_SCORE_CAP))
+    )
     min_sep_value = 0.0 if pd.isna(min_adjacent_rate_diff) else max(0.0, min_adjacent_rate_diff)
+    weights = CANDIDATE_SCORE_WEIGHTS
 
     candidate_score = (
-        100.0 * int(hard_constraints_ok)
-        - 30.0 * development_primary_inversions
-        - 12.0 * validation_primary_inversions
-        - 4.0 * validation_all_inversions
-        - 15.0 * constraint_violation_count
-        - 150.0 * max(0.0, validation_psi - PREFERRED_MAX_VALIDATION_PSI)
-        + 12.0 * iv_value
-        + 100.0 * min_sep_value
-        - 1.5 * abs(final_bin_count - TARGET_FINAL_BIN_COUNT)
+        weights["hard_constraints_ok"] * int(hard_constraints_ok)
+        + weights["development_primary_inversion"] * development_primary_inversions
+        + weights["validation_primary_inversion"] * validation_primary_inversions
+        + weights["validation_all_inversion"] * validation_all_inversions
+        + weights["constraint_violation"] * constraint_violation_count
+        + weights["validation_psi_excess"] * max(0.0, validation_psi - PREFERRED_MAX_VALIDATION_PSI)
+        + weights["iv_retention"] * iv_value
+        + weights["min_adjacent_rate_diff"] * min_sep_value
+        + weights["target_bin_distance"] * abs(final_bin_count - TARGET_FINAL_BIN_COUNT)
+        + weights["extreme_boundary_violation"] * extreme_boundary_violation_count
     )
 
     return {
@@ -1134,6 +1373,7 @@ def evaluate_merge_candidate(
         "validation_primary_inversion_cnt": validation_primary_inversions,
         "validation_all_inversion_cnt": validation_all_inversions,
         "constraint_violation_count": constraint_violation_count,
+        "extreme_boundary_violation_count": extreme_boundary_violation_count,
         "min_development_sample_pct": float(development_stats["sample_pct"].min()),
         "min_development_mature_count": float(development_stats[PRIMARY_MATURE_COL].min()),
         "min_development_bad_count": float(development_stats[PRIMARY_BAD_COL].min()),
@@ -1163,7 +1403,13 @@ def build_merge_candidate_score_table(
     阶段四：继续生成 8、7、6 档候选，由 Development + Validation 评分选择。
     """
     ranges: List[Tuple[int, int]] = [(idx, idx) for idx in range(1, initial_bin_count + 1)]
+    extreme_boundaries = identify_extreme_boundaries(initial_bin_count)
     protected_boundaries = identify_protected_boundaries(development_initial_stats, config)
+    hard_blocked_boundaries = (
+        set()
+        if ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS
+        else set(extreme_boundaries)
+    )
     initial_iv = calc_iv_from_stats(development_initial_stats)
 
     candidate_rows: List[Dict[str, object]] = []
@@ -1193,6 +1439,7 @@ def build_merge_candidate_score_table(
                 "merged_range": str(ranges[pair_index]),
                 "boundary": diagnostics.get("boundary"),
                 "is_protected_boundary": diagnostics.get("is_protected_boundary"),
+                "is_extreme_boundary": diagnostics.get("is_extreme_boundary"),
                 "left_primary_rate": diagnostics.get("left_rate"),
                 "right_primary_rate": diagnostics.get("right_rate"),
                 "abs_primary_rate_diff": diagnostics.get("abs_rate_diff"),
@@ -1209,6 +1456,7 @@ def build_merge_candidate_score_table(
                 validation_initial_stats,
                 ranges,
                 initial_iv,
+                extreme_boundaries,
                 step_no,
                 stage,
                 reason,
@@ -1222,6 +1470,7 @@ def build_merge_candidate_score_table(
             validation_initial_stats,
             ranges,
             initial_iv,
+            extreme_boundaries,
             step_no,
             "initial",
             "20 等频初始箱",
@@ -1248,13 +1497,18 @@ def build_merge_candidate_score_table(
         if target_index < len(ranges) - 1:
             allowed_pairs.append(target_index)
 
-        diagnostics = choose_best_adjacent_pair(
-            ranges,
-            development_initial_stats,
-            protected_boundaries,
-            allowed_pair_indices=allowed_pairs,
-            ignore_protection=True,
-        )
+        try:
+            diagnostics = choose_best_adjacent_pair(
+                ranges,
+                development_initial_stats,
+                protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
+                blocked_boundaries=hard_blocked_boundaries,
+                allowed_pair_indices=allowed_pairs,
+                ignore_protection=True,
+            )
+        except ValueError:
+            break
         perform_merge(
             int(diagnostics["pair_index"]),
             "small_bin_cleanup",
@@ -1281,13 +1535,18 @@ def build_merge_candidate_score_table(
                 for col in PRIMARY_RATE_COLS
             ),
         )
-        diagnostics = choose_best_adjacent_pair(
-            ranges,
-            development_initial_stats,
-            protected_boundaries,
-            allowed_pair_indices=[pair_index],
-            ignore_protection=True,
-        )
+        try:
+            diagnostics = choose_best_adjacent_pair(
+                ranges,
+                development_initial_stats,
+                protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
+                blocked_boundaries=hard_blocked_boundaries,
+                allowed_pair_indices=[pair_index],
+                ignore_protection=True,
+            )
+        except ValueError:
+            break
         perform_merge(
             pair_index,
             "pava_monotonic_merge",
@@ -1297,11 +1556,16 @@ def build_merge_candidate_score_table(
 
     # 3. 如果档位仍多于上限，强制压缩到 MAX_FINAL_BIN_COUNT。
     while len(ranges) > MAX_FINAL_BIN_COUNT:
-        diagnostics = choose_best_adjacent_pair(
-            ranges,
-            development_initial_stats,
-            protected_boundaries,
-        )
+        try:
+            diagnostics = choose_best_adjacent_pair(
+                ranges,
+                development_initial_stats,
+                protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
+                blocked_boundaries=hard_blocked_boundaries,
+            )
+        except ValueError:
+            break
         perform_merge(
             int(diagnostics["pair_index"]),
             "granularity_reduction",
@@ -1312,6 +1576,13 @@ def build_merge_candidate_score_table(
     # 4. 继续生成 7 档和 6 档候选。
     while len(ranges) > MIN_FINAL_BIN_COUNT:
         current_stats = aggregate_initial_stats_by_ranges(development_initial_stats, ranges)
+        candidate_pair_indices = filter_blocked_pair_indices(
+            ranges,
+            range(len(ranges) - 1),
+            hard_blocked_boundaries,
+        )
+        if not candidate_pair_indices:
+            break
         all_diagnostics = [
             pair_merge_diagnostics(
                 current_stats,
@@ -1319,8 +1590,9 @@ def build_merge_candidate_score_table(
                 pair_index,
                 development_initial_stats,
                 protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
             )
-            for pair_index in range(len(ranges) - 1)
+            for pair_index in candidate_pair_indices
         ]
 
         statistically_similar = [
@@ -1403,7 +1675,7 @@ def calc_population_psi(
     oot: pd.DataFrame,
     bin_col: str,
     final_edges: pd.DataFrame,
-    eps: float = 1e-6,
+    eps: float = PSI_EPS,
 ) -> pd.DataFrame:
     """计算 Train 与 OOT 的最终箱分布 PSI。"""
     base = final_edges[["final_bin_order", bin_col]].drop_duplicates()
@@ -1562,7 +1834,13 @@ def build_threshold_curve(
     """使用最终箱右边界生成可上线的候选阈值曲线。"""
     max_score = train[SCORE_COL].max()
     threshold_table = final_edges[
-        ["final_bin_order", FINAL_BIN_COL, "score_right", "merged_from"]
+        [
+            "final_bin_order",
+            FINAL_BIN_COL,
+            "score_right",
+            "merged_from",
+            "extreme_bin_role",
+        ]
     ].copy()
     threshold_table["threshold"] = threshold_table["score_right"].replace(np.inf, max_score)
     threshold_table = threshold_table.loc[threshold_table["threshold"].notna()].copy()
@@ -1603,6 +1881,7 @@ def build_threshold_curve(
             "final_bin_order": threshold_row["final_bin_order"],
             FINAL_BIN_COL: threshold_row[FINAL_BIN_COL],
             "merged_from": threshold_row["merged_from"],
+            "extreme_bin_role": threshold_row["extreme_bin_role"],
         }
         row.update(prefix_metrics(cumulative_metrics, "cum"))
         row.update(prefix_metrics(marginal_metrics, "marginal"))
@@ -1629,7 +1908,7 @@ def select_threshold_under_constraints(
     """选择满足风险约束且累计通过率最高的阈值。"""
     eligible = curve.copy()
     for constraint_name, maximum in constraints.items():
-        metric = constraint_name.removeprefix("max_")
+        metric = remove_prefix(constraint_name, "max_")
         require_columns(eligible, [metric], "策略阈值曲线")
         eligible = eligible.loc[eligible[metric].le(maximum)]
 
@@ -1777,6 +2056,10 @@ def build_binning_process_table(
         how="left",
     )
     process = process.sort_values("initial_bin_order").reset_index(drop=True)
+    initial_bin_count = int(process["initial_bin_order"].max())
+    process["extreme_bin_role"] = process["initial_bin_order"].apply(
+        lambda order: classify_extreme_role(order, order, initial_bin_count)
+    )
 
     for prefix in ["1m30p", "3m30p"]:
         rate_col = f"{prefix}_cnt_bad_rate"
@@ -1823,6 +2106,7 @@ def build_binning_process_table(
         "final_bin_order",
         FINAL_BIN_COL,
         "merged_from",
+        "extreme_bin_role",
         "merge_action",
     ]
     return process[[col for col in key_columns if col in process.columns]]
@@ -1850,7 +2134,7 @@ def build_threshold_selection_table(
     ]:
         check_columns = []
         for constraint_name, limit in constraints.items():
-            metric = constraint_name.removeprefix("max_")
+            metric = remove_prefix(constraint_name, "max_")
             check_col = f"{group_name}_check_{metric}"
             limit_col = f"{group_name}_limit_{metric}"
             result[limit_col] = limit
@@ -1894,6 +2178,7 @@ def build_threshold_selection_table(
         "final_bin_order",
         FINAL_BIN_COL,
         "merged_from",
+        "extreme_bin_role",
         "cum_pass_rate",
         "cum_n",
         "cum_principal_pct",
@@ -1929,6 +2214,8 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("通用", "principal_amt", "箱内样本本金合计", "SUM(principal)"),
         ("分箱", "score_left / score_right", "分箱的模型分左右边界", "(score_left, score_right]"),
         ("分箱", "merged_from", "最终风险档位由哪些初始箱合并而来", "例如 B06-B08"),
+        ("分箱", "extreme_bin_role", "最好/最坏极端箱标识", "由 PROTECT_EXTREME_INITIAL_BINS 相关配置生成"),
+        ("分箱", "extreme_boundary_violation_count", "候选方案跨越极端保护边界的数量", "0 表示最好/最坏极端边界被保留"),
         ("笔数风险", "1m30p_cnt_mature", "1M30+ 已成熟样本量", "duedate_1m_30 IN (0, 1)"),
         ("笔数风险", "1m30p_cnt_bad", "1M30+ 逾期样本量", "duedate_1m_30 = 1"),
         ("笔数风险", "1m30p_cnt_bad_rate", "1M30+ 笔数逾期率", "1m30p_cnt_bad / 1m30p_cnt_mature"),
@@ -2052,7 +2339,14 @@ def build_train_oot_compare(
     )
 
     return final_edges[
-        ["final_bin_order", FINAL_BIN_COL, "merged_from", "score_left", "score_right"]
+        [
+            "final_bin_order",
+            FINAL_BIN_COL,
+            "merged_from",
+            "extreme_bin_role",
+            "score_left",
+            "score_right",
+        ]
     ].merge(comparison, on=FINAL_BIN_COL, how="left")
 
 
@@ -2163,11 +2457,16 @@ def build_config_table(
     protected_boundaries: Set[int],
 ) -> pd.DataFrame:
     """输出便于后续修改和版本管理的参数表。"""
+    actual_initial_bin_count = max((end for _, end in selected_merge_ranges), default=0)
+    extreme_boundaries_text = ",".join(
+        map(str, sorted(identify_extreme_boundaries(actual_initial_bin_count)))
+    )
     rows = [
         {"config_group": "基础配置", "config_name": "DATA_DIR", "config_value": str(DATA_DIR)},
         {"config_group": "基础配置", "config_name": "TRAIN_END_MONTH", "config_value": TRAIN_END_MONTH},
         {"config_group": "基础配置", "config_name": "OOT_START_MONTH", "config_value": OOT_START_MONTH},
         {"config_group": "基础配置", "config_name": "VALIDATION_MONTH_COUNT", "config_value": VALIDATION_MONTH_COUNT},
+        {"config_group": "基础配置", "config_name": "FALLBACK_DEVELOPMENT_SAMPLE_PCT", "config_value": FALLBACK_DEVELOPMENT_SAMPLE_PCT},
         {"config_group": "基础配置", "config_name": "ACTUAL_VALIDATION_MONTHS", "config_value": ",".join(validation_months)},
         {"config_group": "基础配置", "config_name": "INITIAL_BIN_COUNT", "config_value": INITIAL_BIN_COUNT},
         {"config_group": "基础配置", "config_name": "HIGH_SCORE_HIGH_RISK", "config_value": HIGH_SCORE_HIGH_RISK},
@@ -2180,14 +2479,41 @@ def build_config_table(
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_MATURE_COUNT", "config_value": MIN_FINAL_BIN_MATURE_COUNT},
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_BAD_COUNT", "config_value": MIN_FINAL_BIN_BAD_COUNT},
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_GOOD_COUNT", "config_value": MIN_FINAL_BIN_GOOD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_EXTREME_BIN_MATURE_COUNT", "config_value": MIN_EXTREME_BIN_MATURE_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_BEST_EXTREME_BIN_BAD_COUNT", "config_value": MIN_BEST_EXTREME_BIN_BAD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_BEST_EXTREME_BIN_GOOD_COUNT", "config_value": MIN_BEST_EXTREME_BIN_GOOD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_WORST_EXTREME_BIN_BAD_COUNT", "config_value": MIN_WORST_EXTREME_BIN_BAD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_WORST_EXTREME_BIN_GOOD_COUNT", "config_value": MIN_WORST_EXTREME_BIN_GOOD_COUNT},
         {"config_group": "合箱配置", "config_name": "VALIDATION_INVERSION_TOLERANCE", "config_value": VALIDATION_INVERSION_TOLERANCE},
         {"config_group": "合箱配置", "config_name": "ADJACENT_PVALUE_TO_MERGE", "config_value": ADJACENT_PVALUE_TO_MERGE},
         {"config_group": "合箱配置", "config_name": "MIN_ADJACENT_ABS_RATE_DIFF", "config_value": MIN_ADJACENT_ABS_RATE_DIFF},
         {"config_group": "合箱配置", "config_name": "PREFERRED_MAX_VALIDATION_PSI", "config_value": PREFERRED_MAX_VALIDATION_PSI},
         {"config_group": "合箱配置", "config_name": "MAX_ACCEPTABLE_VALIDATION_PSI", "config_value": MAX_ACCEPTABLE_VALIDATION_PSI},
         {"config_group": "合箱配置", "config_name": "PROTECTED_BOUNDARIES", "config_value": ",".join(map(str, sorted(protected_boundaries)))},
+        {"config_group": "极端箱配置", "config_name": "PROTECT_EXTREME_INITIAL_BINS", "config_value": PROTECT_EXTREME_INITIAL_BINS},
+        {"config_group": "极端箱配置", "config_name": "BEST_EXTREME_INITIAL_BIN_COUNT", "config_value": BEST_EXTREME_INITIAL_BIN_COUNT},
+        {"config_group": "极端箱配置", "config_name": "WORST_EXTREME_INITIAL_BIN_COUNT", "config_value": WORST_EXTREME_INITIAL_BIN_COUNT},
+        {"config_group": "极端箱配置", "config_name": "ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS", "config_value": ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS},
+        {"config_group": "极端箱配置", "config_name": "EXTREME_BOUNDARIES", "config_value": extreme_boundaries_text},
+        {"config_group": "极端箱配置", "config_name": "EXTREME_BOUNDARY_PENALTY", "config_value": EXTREME_BOUNDARY_PENALTY},
+        {"config_group": "极端箱配置", "config_name": "EXTREME_BOUNDARY_VIOLATION_PENALTY", "config_value": EXTREME_BOUNDARY_VIOLATION_PENALTY},
+        {"config_group": "评分配置", "config_name": "PROTECTED_BOUNDARY_PENALTY", "config_value": PROTECTED_BOUNDARY_PENALTY},
+        {"config_group": "评分配置", "config_name": "MERGE_COST_RATE_GAP_WEIGHT", "config_value": MERGE_COST_RATE_GAP_WEIGHT},
+        {"config_group": "评分配置", "config_name": "MERGE_COST_IV_LOSS_WEIGHT", "config_value": MERGE_COST_IV_LOSS_WEIGHT},
+        {"config_group": "评分配置", "config_name": "IV_RETENTION_SCORE_CAP", "config_value": IV_RETENTION_SCORE_CAP},
+        {"config_group": "评分配置", "config_name": "PSI_EPS", "config_value": PSI_EPS},
+        {"config_group": "评分配置", "config_name": "IV_SMOOTHING_EPS", "config_value": IV_SMOOTHING_EPS},
         {"config_group": "合箱配置", "config_name": "SELECTED_FINAL_BIN_RANGES", "config_value": format_merge_ranges(selected_merge_ranges)},
     ]
+
+    for name, value in CANDIDATE_SCORE_WEIGHTS.items():
+        rows.append(
+            {
+                "config_group": "候选评分权重",
+                "config_name": name,
+                "config_value": value,
+            }
+        )
 
     flattened = {
         **flatten_dict("auto", STRATEGY_CONFIG["auto_constraints"]),
@@ -2472,7 +2798,11 @@ def main() -> None:
     selected_merge_ranges = selected_ranges_from_candidate_table(merge_candidates)
 
     merge_map = build_merge_map(selected_merge_ranges, actual_initial_bin_count)
-    final_edges = build_final_edge_table(initial_edges, merge_map)
+    final_edges = build_final_edge_table(
+        initial_edges,
+        merge_map,
+        actual_initial_bin_count,
+    )
     _t = _log_step(
         f"3/9 自动合箱完成：{len(final_edges)} 档，方案={format_merge_ranges(selected_merge_ranges)}",
         _t,
