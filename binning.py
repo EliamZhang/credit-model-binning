@@ -72,9 +72,6 @@ FINAL_BIN_COL = "score_mlt_final_bin"
 # 当前模型按“高分高风险”处理。
 HIGH_SCORE_HIGH_RISK = True
 
-# 是否启用优化后的自动合箱；False 时使用手工兜底方案。
-AUTO_SELECT_MERGE_RANGES = True
-
 # 最终风险档位数量。
 MIN_FINAL_BIN_COUNT = 6
 MAX_FINAL_BIN_COUNT = 8
@@ -117,15 +114,6 @@ EXTREME_LIFT_PENALTY_WEIGHT = 10.0
 EXTREME_BOUNDARY_PENALTY = 15.0
 MAX_HEAD_PRIMARY_LIFT = 0.70
 MIN_TAIL_PRIMARY_LIFT = 1.30
-
-# 手工兜底方案，仅在实际初始箱数为 20 时直接使用；否则自动生成连续等宽兜底范围。
-FINAL_BIN_RANGES: List[Tuple[int, int]] = [
-    (1, 4),
-    (5, 8),
-    (9, 12),
-    (13, 16),
-    (17, 20),
-]
 
 # 默认策略的风险约束。
 STRATEGY_CONFIG = {
@@ -425,7 +413,6 @@ def build_initial_edge_table(edges: np.ndarray) -> pd.DataFrame:
                 INITIAL_BIN_COL: f"B{order:02d}",
                 "score_left": edges[idx],
                 "score_right": edges[idx + 1],
-                "interval_rule": "(left, right]",
             }
         )
     return pd.DataFrame(rows)
@@ -534,7 +521,6 @@ def build_final_edge_table(
         .sort_values("final_bin_order")
         .reset_index(drop=True)
     )
-    final_edges["interval_rule"] = "(left, right]"
     return final_edges
 
 
@@ -636,7 +622,6 @@ def calc_bin_stats(
     work = add_risk_helper_columns(data)
     aggregations = {
         "n": ("application_id", "count"),
-        "application_id_nunique": ("application_id", "nunique"),
         "principal_amt": ("_principal", "sum"),
         "score_min": (score_col, "min"),
         "score_max": (score_col, "max"),
@@ -698,16 +683,6 @@ def parse_merge_ranges(text: str) -> List[Tuple[int, int]]:
     return [(int(start), int(end)) for start, end in parsed]
 
 
-def make_equal_contiguous_ranges(
-    initial_bin_count: int,
-    final_bin_count: int,
-) -> List[Tuple[int, int]]:
-    """生成连续、尽量等宽的手工兜底合箱范围。"""
-    final_bin_count = max(1, min(final_bin_count, initial_bin_count))
-    groups = np.array_split(np.arange(1, initial_bin_count + 1), final_bin_count)
-    return [(int(group[0]), int(group[-1])) for group in groups if len(group) > 0]
-
-
 def calc_complete_initial_stats(
     data: pd.DataFrame,
     initial_edges: pd.DataFrame,
@@ -725,15 +700,14 @@ def calc_complete_initial_stats(
         INITIAL_BIN_COL,
         "score_left",
         "score_right",
-        "interval_rule",
     ]
     result = initial_edges[edge_cols].merge(
-        stats.drop(columns=["score_left", "score_right", "interval_rule"], errors="ignore"),
+        stats.drop(columns=["score_left", "score_right"], errors="ignore"),
         on=["bin_order", INITIAL_BIN_COL],
         how="left",
     )
 
-    additive_cols = ["n", "application_id_nunique", "principal_amt"]
+    additive_cols = ["n", "principal_amt"]
     for prefix in RISK_PREFIXES:
         additive_cols.extend(
             [
@@ -1591,14 +1565,11 @@ def build_merge_candidate_score_table(
 
 def selected_ranges_from_candidate_table(
     candidates: pd.DataFrame,
-    fallback_ranges: Sequence[Tuple[int, int]],
 ) -> List[Tuple[int, int]]:
-    """从候选评分表读取最终方案；无结果时使用手工兜底。"""
-    if candidates.empty:
-        return list(fallback_ranges)
+    """从候选评分表读取最终方案。"""
     selected = candidates.loc[candidates["selected"].eq(True)]
     if selected.empty:
-        return list(fallback_ranges)
+        raise ValueError("未生成任何可用的合箱候选方案")
     return parse_merge_ranges(str(selected.iloc[0]["ranges"]))
 
 
@@ -2299,7 +2270,6 @@ def build_overview(
         ("时间切分", "OOT 起始月份", OOT_START_MONTH),
         ("分箱", "初始箱数量", initial_bin_count),
         ("分箱", "最终箱数量", final_bin_count),
-        ("分箱", "自动合箱", AUTO_SELECT_MERGE_RANGES),
         ("分箱", "合箱主指标", PRIMARY_RATE_COL),
         ("分箱", "最终采用合箱方案", format_merge_ranges(selected_merge_ranges)),
         ("分箱", "受保护初始边界", ",".join(map(str, sorted(protected_boundaries)))),
@@ -2381,7 +2351,6 @@ def build_config_table(
         {"config_group": "基础配置", "config_name": "ACTUAL_VALIDATION_MONTHS", "config_value": ",".join(validation_months)},
         {"config_group": "基础配置", "config_name": "INITIAL_BIN_COUNT", "config_value": INITIAL_BIN_COUNT},
         {"config_group": "基础配置", "config_name": "HIGH_SCORE_HIGH_RISK", "config_value": HIGH_SCORE_HIGH_RISK},
-        {"config_group": "合箱配置", "config_name": "AUTO_SELECT_MERGE_RANGES", "config_value": AUTO_SELECT_MERGE_RANGES},
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_COUNT", "config_value": MIN_FINAL_BIN_COUNT},
         {"config_group": "合箱配置", "config_name": "MAX_FINAL_BIN_COUNT", "config_value": MAX_FINAL_BIN_COUNT},
         {"config_group": "合箱配置", "config_name": "TARGET_FINAL_BIN_COUNT", "config_value": TARGET_FINAL_BIN_COUNT},
@@ -2403,7 +2372,6 @@ def build_config_table(
         {"config_group": "合箱配置", "config_name": "PREFERRED_MAX_VALIDATION_PSI", "config_value": PREFERRED_MAX_VALIDATION_PSI},
         {"config_group": "合箱配置", "config_name": "MAX_ACCEPTABLE_VALIDATION_PSI", "config_value": MAX_ACCEPTABLE_VALIDATION_PSI},
         {"config_group": "合箱配置", "config_name": "PROTECTED_BOUNDARIES", "config_value": ",".join(map(str, sorted(protected_boundaries)))},
-        {"config_group": "合箱配置", "config_name": "MANUAL_FALLBACK_FINAL_BIN_RANGES", "config_value": str(FINAL_BIN_RANGES)},
         {"config_group": "合箱配置", "config_name": "SELECTED_FINAL_BIN_RANGES", "config_value": format_merge_ranges(selected_merge_ranges)},
     ]
 
@@ -2681,46 +2649,13 @@ def main() -> None:
     _t = _log_step(f"2/9 Development 等频初分：{actual_initial_bin_count} 箱", _t)
 
     # 2) Development + Validation 自动选择合箱；OOT 不参与。
-    fallback_ranges = (
-        FINAL_BIN_RANGES
-        if actual_initial_bin_count == INITIAL_BIN_COUNT
-        else make_equal_contiguous_ranges(actual_initial_bin_count, TARGET_FINAL_BIN_COUNT)
+    merge_candidates, merge_steps, protected_boundaries = build_merge_candidate_score_table(
+        development_initial_stats,
+        validation_initial_stats,
+        actual_initial_bin_count,
+        STRATEGY_CONFIG,
     )
-
-    if AUTO_SELECT_MERGE_RANGES:
-        merge_candidates, merge_steps, protected_boundaries = build_merge_candidate_score_table(
-            development_initial_stats,
-            validation_initial_stats,
-            actual_initial_bin_count,
-            STRATEGY_CONFIG,
-        )
-        selected_merge_ranges = selected_ranges_from_candidate_table(
-            merge_candidates,
-            fallback_ranges,
-        )
-    else:
-        selected_merge_ranges = list(fallback_ranges)
-        protected_boundaries = set()
-        manual_development_stats = aggregate_initial_stats_by_ranges(
-            development_initial_stats,
-            selected_merge_ranges,
-        )
-        merge_candidates = pd.DataFrame(
-            [
-                {
-                    "selected": True,
-                    "stage": "manual",
-                    "merge_reason": "AUTO_SELECT_MERGE_RANGES=False，使用手工兜底方案",
-                    "final_bin_count": len(selected_merge_ranges),
-                    "ranges": format_merge_ranges(selected_merge_ranges),
-                    "development_primary_inversion_cnt": count_rate_inversions(
-                        manual_development_stats,
-                        PRIMARY_RATE_COLS,
-                    ),
-                }
-            ]
-        )
-        merge_steps = pd.DataFrame()
+    selected_merge_ranges = selected_ranges_from_candidate_table(merge_candidates)
 
     merge_map = build_merge_map(selected_merge_ranges, actual_initial_bin_count)
     final_edges = build_final_edge_table(initial_edges, merge_map)
