@@ -547,28 +547,19 @@ def add_risk_helper_columns(data: pd.DataFrame) -> pd.DataFrame:
     work = data.copy()
     work["_principal"] = work["principal"].fillna(0)
 
-    maturity_masks = {}
-    bad_amount_masks = {}
     for config in RISK_HELPER_CONFIG.values():
         due_col = config["due_col"]
         dpd_col = config["dpd_col"]
         helper = config["helper_prefix"]
 
-        maturity_masks[helper] = work[dpd_col].notna()
-        bad_amount_masks[helper] = maturity_masks[helper] & work[dpd_col].ge(30)
+        mature = work[dpd_col].notna()
         work[f"{helper}_mature_cnt"] = work[due_col].isin([0, 1])
         work[f"{helper}_bad_cnt"] = work[due_col].eq(1)
-
-    for config in RISK_HELPER_CONFIG.values():
-        helper = config["helper_prefix"]
-        work[f"{helper}_amt_exposure"] = np.where(
-            maturity_masks[helper], work["_principal"], 0
-        )
-
-    for config in RISK_HELPER_CONFIG.values():
-        helper = config["helper_prefix"]
+        work[f"{helper}_amt_exposure"] = np.where(mature, work["_principal"], 0)
         work[f"{helper}_amt_bad"] = np.where(
-            bad_amount_masks[helper], work[config["remaining_col"]].fillna(0), 0
+            mature & work[dpd_col].ge(30),
+            work[config["remaining_col"]].fillna(0),
+            0,
         )
 
     return work
@@ -1332,22 +1323,7 @@ def summarize_strategy_from_candidate_stats(
     curve["marginal_sample_pct"] = curve["sample_pct"]
     curve["marginal_3m30p_cnt_bad_rate"] = curve["3m30p_cnt_bad_rate"]
 
-    def choose(constraints: Dict[str, float]) -> Optional[pd.Series]:
-        eligible = curve.copy()
-        for constraint_name, maximum in constraints.items():
-            metric = constraint_name.removeprefix("max_")
-            if metric not in eligible.columns:
-                continue
-            eligible = eligible.loc[eligible[metric].le(maximum)]
-        if eligible.empty:
-            return None
-        return eligible.sort_values(
-            ["cum_pass_rate", "threshold_order"],
-            ascending=[False, False],
-        ).iloc[0]
-
-    auto_row = choose(config["auto_constraints"])
-    accept_row = choose(config["accept_constraints"])
+    auto_row, accept_row = compute_auto_accept_rows(curve, config)
     if auto_row is None or accept_row is None:
         return {
             "strategy_status": "无满足约束的阈值",
@@ -1359,9 +1335,6 @@ def summarize_strategy_from_candidate_stats(
             "accepted_3m30p_cnt_bad_rate": np.nan,
             "last_accepted_marginal_3m30p_cnt_bad_rate": np.nan,
         }
-
-    if accept_row["threshold_order"] < auto_row["threshold_order"]:
-        accept_row = auto_row
 
     return {
         "strategy_status": "OK",
@@ -1754,14 +1727,12 @@ def calc_portfolio_metrics(data: pd.DataFrame) -> Dict[str, float]:
         "principal": float(work["_principal"].sum()),
     }
 
-    for prefix, mature_col, bad_col, exposure_col, bad_amt_col in [
-        ("1m30p", "_m1_mature_cnt", "_m1_bad_cnt", "_m1_amt_exposure", "_m1_amt_bad"),
-        ("3m30p", "_m3_mature_cnt", "_m3_bad_cnt", "_m3_amt_exposure", "_m3_amt_bad"),
-    ]:
-        mature = int(work[mature_col].sum())
-        bad = int(work[bad_col].sum())
-        exposure = float(work[exposure_col].sum())
-        bad_amount = float(work[bad_amt_col].sum())
+    for prefix, config in RISK_HELPER_CONFIG.items():
+        helper = config["helper_prefix"]
+        mature = int(work[f"{helper}_mature_cnt"].sum())
+        bad = int(work[f"{helper}_bad_cnt"].sum())
+        exposure = float(work[f"{helper}_amt_exposure"].sum())
+        bad_amount = float(work[f"{helper}_amt_bad"].sum())
 
         result[f"{prefix}_cnt_mature"] = mature
         result[f"{prefix}_cnt_bad"] = bad
@@ -1776,6 +1747,20 @@ def calc_portfolio_metrics(data: pd.DataFrame) -> Dict[str, float]:
 def prefix_metrics(metrics: Dict[str, float], prefix: str) -> Dict[str, float]:
     """给指标字典统一增加前缀。"""
     return {f"{prefix}_{key}": value for key, value in metrics.items()}
+
+
+def compute_auto_accept_rows(
+    curve: pd.DataFrame,
+    config: Dict,
+) -> Tuple[Optional[pd.Series], Optional[pd.Series]]:
+    """按自动通过 / 整体接纳约束选择阈值行；接纳阈值不能比自动通过更严格。"""
+    auto_row = select_threshold_under_constraints(curve, config["auto_constraints"])
+    accept_row = select_threshold_under_constraints(curve, config["accept_constraints"])
+    if auto_row is None or accept_row is None:
+        return auto_row, accept_row
+    if accept_row["threshold_order"] < auto_row["threshold_order"]:
+        accept_row = auto_row
+    return auto_row, accept_row
 
 
 def build_threshold_curve(
@@ -1870,14 +1855,7 @@ def build_strategy_plan(
     config: Dict,
 ) -> pd.DataFrame:
     """根据唯一一套配置生成自动通过、人工审核和拒绝阈值。"""
-    auto_row = select_threshold_under_constraints(
-        curve,
-        config["auto_constraints"],
-    )
-    accept_row = select_threshold_under_constraints(
-        curve,
-        config["accept_constraints"],
-    )
+    auto_row, accept_row = compute_auto_accept_rows(curve, config)
 
     base = {
         "strategy_name": config["strategy_name"],
@@ -1886,10 +1864,6 @@ def build_strategy_plan(
 
     if auto_row is None or accept_row is None:
         return pd.DataFrame([{**base, "status": "无满足约束的阈值"}])
-
-    # 接纳阈值不能比自动通过阈值更严格。
-    if accept_row["threshold_order"] < auto_row["threshold_order"]:
-        accept_row = auto_row
 
     result = {
         **base,
@@ -2467,11 +2441,7 @@ def _detect_sections(ws) -> List[Tuple[int, int, int]]:
             data_end = data_start
         else:
             data_end += 1
-
-    if data_end > data_start:
-        sections.append((header_row, data_start, data_end - 1))
-    elif data_start <= ws.max_row:
-        sections.append((header_row, data_start, data_end))
+    sections.append((header_row, data_start, data_end - 1))
     return sections
 
 
@@ -2678,15 +2648,10 @@ def main() -> None:
     _t = _log_step._t0 = time.time()
 
     data = load_analysis_data()
-    source_row_count = data.attrs.get("source_row_count")
-    score_missing_count = data.attrs.get("score_missing_count")
 
     all_data, train, oot = split_train_oot(data)
     development, validation, validation_months = split_development_validation(train)
     _t = _log_step("1/9 数据加载与时间切分", _t)
-
-    all_data.attrs["source_row_count"] = source_row_count
-    all_data.attrs["score_missing_count"] = score_missing_count
 
     # 1) Development 学习初始边界，复用到 Validation、完整 Train 和 OOT。
     edges = learn_equal_freq_edges(development, SCORE_COL, INITIAL_BIN_COUNT)
