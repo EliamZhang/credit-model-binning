@@ -105,7 +105,6 @@ PREFERRED_MAX_VALIDATION_PSI = 0.05
 MAX_ACCEPTABLE_VALIDATION_PSI = 0.10
 
 # 策略关键边界保护。强制处理小箱或倒挂时仍允许跨越保护边界。
-PROTECT_STRATEGY_BOUNDARIES = True
 PROTECT_LARGEST_RISK_JUMPS = 1
 PROTECTED_BOUNDARY_PENALTY = 100.0
 
@@ -843,20 +842,6 @@ def count_rate_inversions(
     return total
 
 
-def max_rate_drop(
-    stats: pd.DataFrame,
-    rate_cols: Sequence[str],
-) -> float:
-    """计算所有风险率中最大的相邻倒挂幅度。"""
-    ordered = stats.sort_values("final_bin_order")
-    drops = []
-    for rate_col in rate_cols:
-        diff = oriented_rate(ordered[rate_col]).diff()
-        value = (-diff).clip(lower=0).max()
-        drops.append(float(value) if pd.notna(value) else 0.0)
-    return max(drops) if drops else 0.0
-
-
 def calc_psi_from_bin_stats(
     base_stats: pd.DataFrame,
     compare_stats: pd.DataFrame,
@@ -936,6 +921,28 @@ def calc_bin_constraint_details(stats: pd.DataFrame) -> pd.DataFrame:
             {
                 "final_bin_order": int(row["final_bin_order"]),
                 FINAL_BIN_COL: row[FINAL_BIN_COL],
+                "required_sample_pct": min_sample_pct,
+                **checks,
+                "all_constraints_ok": all(checks.values()),
+                "violation_severity": severity,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def identify_protected_boundaries(
+    initial_stats: pd.DataFrame,
+    config: Dict,
+) -> Set[int]:
+    """
+    找出应尽量保留的初始箱边界。
+
+    边界编号 k 代表 Bk 与 B(k+1) 之间的切点。
+    """
+    ordered = initial_stats.sort_values("bin_order").reset_index(drop=True)
+    boundaries: Set[int] = set()
+    max_boundary = len(ordered) - 1
+
     for constraint_group in ["auto_constraints", "accept_constraints"]:
         constraints = config[constraint_group]
 
@@ -1197,12 +1204,7 @@ def evaluate_merge_candidate(
     development_stats = aggregate_initial_stats_by_ranges(development_initial_stats, ranges)
     validation_stats = aggregate_initial_stats_by_ranges(validation_initial_stats, ranges)
 
-    rate_cols = [
-        "1m30p_cnt_bad_rate",
-        "3m30p_cnt_bad_rate",
-        "1m30p_amt_bad_rate",
-        "3m30p_amt_bad_rate",
-    ]
+    rate_cols = ALL_RISK_RATE_COLS
     development_primary_inversions = count_rate_inversions(
         development_stats,
         PRIMARY_RATE_COLS,
@@ -1302,7 +1304,6 @@ def evaluate_merge_candidate(
         "development_primary_inversion_cnt": development_primary_inversions,
         "validation_primary_inversion_cnt": validation_primary_inversions,
         "validation_all_inversion_cnt": validation_all_inversions,
-        "validation_max_rate_drop": max_rate_drop(validation_stats, rate_cols),
         "constraint_violation_count": constraint_violation_count,
         "min_development_sample_pct": float(development_stats["sample_pct"].min()),
         "min_development_mature_count": float(development_stats[PRIMARY_MATURE_COL].min()),
@@ -2789,12 +2790,7 @@ def main() -> None:
     _t = _log_step("4/9 生成 Development/Validation/Train/OOT 最终箱统计", _t)
 
     # 4) 最终验证。
-    rate_cols = [
-        "1m30p_cnt_bad_rate",
-        "3m30p_cnt_bad_rate",
-        "1m30p_amt_bad_rate",
-        "3m30p_amt_bad_rate",
-    ]
+    rate_cols = ALL_RISK_RATE_COLS
     monotonicity = pd.concat(
         [
             check_monotonicity(final_development_stats, rate_cols, "development"),
