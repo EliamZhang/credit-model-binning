@@ -97,7 +97,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 
 - 以 `sample` 为底表，`application_info` 只补充 sample 中不存在的字段，避免出现 `_x` / `_y` 后缀。
 - 模型分表按 `application_id` 去重（保留第一条）后左连接。
-- `application_month` 缺失时，用 `application_time` 的月份补齐；若仍缺失则归入 `gap_or_unknown`。
+- `application_month` 缺失时，用 `application_time` 的月份补齐；若仍缺失则该行不进入 Train / OOT，不参与任何分析。
 - **分箱分析只保留存在模型分的样本**；模型分缺失的样本会在总览中单独展示数量和比例。
 
 ### 5. 当前必须存在的关键字段
@@ -139,7 +139,7 @@ TARGET_FINAL_BIN_COUNT = 7
 
 - `application_month <= 2025-10`：进入 `train`。
 - `application_month >= 2025-11`：进入 `oot`。
-- 时间为空或不能归入上述范围：进入 `gap_or_unknown`。
+- 时间不在上述范围的样本不进入 Train / OOT，不参与任何分析。
 - Train 内最后 3 个月作为合箱 Validation，其余为 Development；OOT 完全独立，不参与任何合箱调参。
 - 初始等频分 20 箱，自动合箱到 6~8 档（目标 7 档）。
 - `application_month` 必须使用可按字符串正确比较的 `YYYY-MM` 格式。
@@ -354,7 +354,7 @@ data
 ```text
 train：application_month <= 2025-10
 oot：application_month >= 2025-11
-gap_or_unknown：其他情况
+其他（时间缺失或不在上述范围）：不参与任何分析
 ```
 
 主要结果：
@@ -457,7 +457,6 @@ merge_cost = 风险率差距 × 100
            + (1 - 两比例 Z 检验 p 值)
            + IV 损失 × 10
            + 保护边界惩罚（100，若该边界受保护）
-           + 头尾箱边界惩罚（15，若合并涉及最左/最右边界）
 ```
 
 风险越接近、差异越不显著、IV 损失越小，越优先合并。
@@ -494,10 +493,7 @@ candidate_score
 - 15 × 单箱约束违反数
 - 150 × max(0, Validation PSI - 0.05)
 + 12 × 主指标 IV 保留率（截断到 0~1.5）
-+ 5  × Development/Validation 风险排序 Spearman 相关
 + 100 × 最小相邻风险差距
-+ 2  × 候选策略接纳率
-+ 头尾箱纯度评分
 - 1.5 × |档位数 - 7|
 ```
 
@@ -506,21 +502,10 @@ candidate_score
 ```text
 硬约束通过 → Development 倒挂数 → 约束违反数 → Validation 倒挂数
 → Validation PSI 可接受 → Validation PSI 偏好 → candidate_score
-→ IV 保留率 → 跨样本排序相关 → 档位距离
+→ IV 保留率 → 档位距离
 ```
 
-#### 7.7 头尾箱纯度评分
-
-`extreme_score_component` 用于偏好“头箱更干净、尾箱更分明”的方案：
-
-```text
-= 8 × max(0, 尾箱 Lift - 头箱 Lift)          # Lift 差越大越好
-+ 250 × max(0, 头相邻差 + 尾相邻差)            # 首尾与相邻箱的风险跳升
-- 10 × max(0, 头箱 Lift - 0.70)              # 头箱 Lift 过高则惩罚
-- 10 × max(0, 1.30 - 尾箱 Lift)              # 尾箱 Lift 不足则惩罚
-```
-
-#### 7.8 最终选定
+#### 7.7 最终选定
 
 按上述排序取第一名的合箱范围作为最终方案。运行日志会打印实际档位数和方案，例如：
 
@@ -780,7 +765,7 @@ final_bin_order / score_mlt_final_bin / merged_from / merge_action
 merge_candidates
 ```
 
-每个候选方案一行，`selected=True` 的行即为最终方案。字段包括档位数、合箱范围、各阶段合并原因、Development/Validation 倒挂数、单箱约束违反数、Validation PSI、IV 保留率、跨样本排序相关、头尾箱指标和 `candidate_score`。
+每个候选方案一行，`selected=True` 的行即为最终方案。字段包括档位数、合箱范围、各阶段合并原因、Development/Validation 倒挂数、单箱约束违反数、Validation PSI、IV 保留率和 `candidate_score`。
 
 查看方法：
 
@@ -951,7 +936,7 @@ config_table
 基础配置：DATA_DIR / TRAIN_END_MONTH / OOT_START_MONTH / VALIDATION_MONTH_COUNT
         / ACTUAL_VALIDATION_MONTHS / INITIAL_BIN_COUNT / HIGH_SCORE_HIGH_RISK
 合箱配置：MIN/MAX/TARGET_FINAL_BIN_COUNT / PRIMARY_RATE_COL / 单箱约束
-        / 头尾箱评分权重 / 单调与相邻差异控制 / Validation PSI 阈值
+        / 单调与相邻差异控制 / Validation PSI 阈值
         / PROTECTED_BOUNDARIES / SELECTED_FINAL_BIN_RANGES
 策略配置：自动通过与总接纳的累计/边际风险上限
 ```
@@ -1116,4 +1101,4 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 
 ## 九、一句话总结
 
-> **当前脚本在 Development 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度、风险倒挂、跨期稳定性和头尾箱纯度自动合箱为 6~8 个风险等级（目标 7 档），在 Validation 上验证、OOT 上确认；随后沿低风险到高风险方向计算累计与边际风险，并在风险上限约束下划分自动通过、人工审核和拒绝阈值，最终输出 6 个 sheet 的 Excel 策略报告。**
+> **当前脚本在 Development 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度、风险倒挂和跨期稳定性自动合箱为 6~8 个风险等级（目标 7 档），在 Validation 上验证、OOT 上确认；随后沿低风险到高风险方向计算累计与边际风险，并在风险上限约束下划分自动通过、人工审核和拒绝阈值，最终输出 6 个 sheet 的 Excel 策略报告。**

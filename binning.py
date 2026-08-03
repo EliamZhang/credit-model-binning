@@ -105,16 +105,6 @@ MAX_ACCEPTABLE_VALIDATION_PSI = 0.10
 PROTECT_LARGEST_RISK_JUMPS = 1
 PROTECTED_BOUNDARY_PENALTY = 100.0
 
-# Extreme-bin preferences are soft scoring terms. They prefer a cleaner
-# low-risk head bin and a clearer high-risk tail bin, while hard sample and
-# monotonicity constraints still decide basic eligibility.
-EXTREME_BIN_SCORE_WEIGHT = 8.0
-EXTREME_ADJACENT_GAP_WEIGHT = 250.0
-EXTREME_LIFT_PENALTY_WEIGHT = 10.0
-EXTREME_BOUNDARY_PENALTY = 15.0
-MAX_HEAD_PRIMARY_LIFT = 0.70
-MIN_TAIL_PRIMARY_LIFT = 1.30
-
 # 默认策略的风险约束。
 STRATEGY_CONFIG = {
     "strategy_name": "默认策略",
@@ -312,7 +302,7 @@ def split_train_oot(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.
             oot_mask.to_numpy(dtype=bool, na_value=False),
         ],
         ["train", "oot"],
-        default="gap_or_unknown",
+        default="",
     )
 
     train = result.loc[result["sample_group"].eq("train")].copy()
@@ -441,32 +431,11 @@ def apply_edges(
     return result
 
 
-def validate_merge_ranges(
-    ranges: Sequence[Tuple[int, int]],
-    initial_bin_count: int,
-) -> None:
-    """检查合箱范围是否连续、无重叠，并覆盖所有初始箱。"""
-    flattened: List[int] = []
-    for start, end in ranges:
-        if start > end:
-            raise ValueError(f"无效合箱范围: ({start}, {end})")
-        flattened.extend(range(start, end + 1))
-
-    expected = list(range(1, initial_bin_count + 1))
-    if flattened != expected:
-        raise ValueError(
-            "FINAL_BIN_RANGES 必须连续且完整覆盖所有初始箱。"
-            f"当前实际初始箱数={initial_bin_count}，覆盖结果={flattened}"
-        )
-
-
 def build_merge_map(
     ranges: Sequence[Tuple[int, int]],
     initial_bin_count: int,
 ) -> pd.DataFrame:
     """生成初始箱到最终风险等级的映射。"""
-    validate_merge_ranges(ranges, initial_bin_count)
-
     rows = []
     for final_order, (start, end) in enumerate(ranges, start=1):
         final_label = chr(ord("A") + final_order - 1)
@@ -1000,12 +969,6 @@ def pair_merge_diagnostics(
         if ignore_protection or not is_protected
         else PROTECTED_BOUNDARY_PENALTY
     )
-    is_extreme_boundary = pair_index == 0 or pair_index == len(ranges) - 2
-    extreme_boundary_penalty = (
-        0.0
-        if ignore_protection or not is_extreme_boundary
-        else EXTREME_BOUNDARY_PENALTY
-    )
 
     # 风险越接近、差异越不显著、IV 损失越小，越优先合并。
     cost = (
@@ -1013,7 +976,6 @@ def pair_merge_diagnostics(
         + (1 - p_for_cost)
         + iv_loss * 10
         + protection_penalty
-        + extreme_boundary_penalty
     )
     return {
         "pair_index": pair_index,
@@ -1024,8 +986,6 @@ def pair_merge_diagnostics(
         "p_value": p_value,
         "iv_loss": iv_loss,
         "is_protected_boundary": is_protected,
-        "is_extreme_boundary": is_extreme_boundary,
-        "extreme_boundary_penalty": extreme_boundary_penalty,
         "merge_cost": cost,
     }
 
@@ -1070,90 +1030,6 @@ def primary_inversion_pair_indices(stats: pd.DataFrame) -> List[int]:
         rows = ordered.index[diff.lt(-DEVELOPMENT_INVERSION_TOLERANCE).fillna(False)]
         violation_rows.update(int(r - 1) for r in rows if r > 0)
     return sorted(violation_rows)
-
-
-def calc_extreme_bin_metrics(stats: pd.DataFrame) -> Dict[str, float]:
-    """Calculate head/tail purity metrics for automatic merge scoring."""
-    ordered = stats.sort_values("final_bin_order").reset_index(drop=True)
-    if ordered.empty:
-        return {
-            "head_primary_bad_rate": np.nan,
-            "tail_primary_bad_rate": np.nan,
-            "head_primary_lift": np.nan,
-            "tail_primary_lift": np.nan,
-            "extreme_primary_gap": np.nan,
-            "head_adjacent_primary_gap": np.nan,
-            "tail_adjacent_primary_gap": np.nan,
-            "extreme_score_component": 0.0,
-            "extreme_lift_penalty": 0.0,
-        }
-
-    primary_rates = pd.to_numeric(ordered[PRIMARY_RATE_COL], errors="coerce")
-    oriented = oriented_rate(primary_rates)
-    portfolio_rate = safe_div(
-        ordered[PRIMARY_BAD_COL].sum(),
-        ordered[PRIMARY_MATURE_COL].sum(),
-    )
-
-    head_rate = primary_rates.iloc[0]
-    tail_rate = primary_rates.iloc[-1]
-    head_lift = safe_div(head_rate, portfolio_rate)
-    tail_lift = safe_div(tail_rate, portfolio_rate)
-
-    extreme_gap = (
-        float(oriented.iloc[-1] - oriented.iloc[0])
-        if len(oriented) >= 2 and pd.notna(oriented.iloc[-1]) and pd.notna(oriented.iloc[0])
-        else np.nan
-    )
-    head_adjacent_gap = (
-        float(oriented.iloc[1] - oriented.iloc[0])
-        if len(oriented) >= 2 and pd.notna(oriented.iloc[1]) and pd.notna(oriented.iloc[0])
-        else np.nan
-    )
-    tail_adjacent_gap = (
-        float(oriented.iloc[-1] - oriented.iloc[-2])
-        if len(oriented) >= 2 and pd.notna(oriented.iloc[-1]) and pd.notna(oriented.iloc[-2])
-        else np.nan
-    )
-
-    lift_spread = (
-        float(tail_lift - head_lift)
-        if pd.notna(head_lift) and pd.notna(tail_lift)
-        else 0.0
-    )
-    adjacent_gap_sum = sum(
-        max(0.0, value)
-        for value in [head_adjacent_gap, tail_adjacent_gap]
-        if pd.notna(value)
-    )
-    head_lift_penalty = (
-        max(0.0, float(head_lift) - MAX_HEAD_PRIMARY_LIFT)
-        if pd.notna(head_lift)
-        else 0.0
-    )
-    tail_lift_penalty = (
-        max(0.0, MIN_TAIL_PRIMARY_LIFT - float(tail_lift))
-        if pd.notna(tail_lift)
-        else 0.0
-    )
-    extreme_lift_penalty = head_lift_penalty + tail_lift_penalty
-    extreme_score_component = (
-        EXTREME_BIN_SCORE_WEIGHT * max(0.0, lift_spread)
-        + EXTREME_ADJACENT_GAP_WEIGHT * adjacent_gap_sum
-        - EXTREME_LIFT_PENALTY_WEIGHT * extreme_lift_penalty
-    )
-
-    return {
-        "head_primary_bad_rate": float(head_rate) if pd.notna(head_rate) else np.nan,
-        "tail_primary_bad_rate": float(tail_rate) if pd.notna(tail_rate) else np.nan,
-        "head_primary_lift": float(head_lift) if pd.notna(head_lift) else np.nan,
-        "tail_primary_lift": float(tail_lift) if pd.notna(tail_lift) else np.nan,
-        "extreme_primary_gap": extreme_gap,
-        "head_adjacent_primary_gap": head_adjacent_gap,
-        "tail_adjacent_primary_gap": tail_adjacent_gap,
-        "extreme_score_component": extreme_score_component,
-        "extreme_lift_penalty": extreme_lift_penalty,
-    }
 
 
 def evaluate_merge_candidate(
@@ -1219,12 +1095,6 @@ def evaluate_merge_candidate(
         else np.nan
     )
 
-    strategy_metrics = summarize_strategy_from_candidate_stats(
-        development_stats,
-        STRATEGY_CONFIG,
-    )
-    extreme_metrics = calc_extreme_bin_metrics(development_stats)
-
     final_bin_count = len(ranges)
     eligible_bin_count = MIN_FINAL_BIN_COUNT <= final_bin_count <= MAX_FINAL_BIN_COUNT
     hard_constraints_ok = all(
@@ -1236,11 +1106,8 @@ def evaluate_merge_candidate(
     )
     validation_psi_ok = validation_psi <= MAX_ACCEPTABLE_VALIDATION_PSI
 
-    rank_value = 0.0 if pd.isna(rank_correlation) else float(rank_correlation)
     iv_value = 0.0 if pd.isna(iv_retention) else float(np.clip(iv_retention, 0, 1.5))
     min_sep_value = 0.0 if pd.isna(min_adjacent_rate_diff) else max(0.0, min_adjacent_rate_diff)
-    accepted_rate = strategy_metrics.get("accepted_rate", np.nan)
-    accepted_rate_value = 0.0 if pd.isna(accepted_rate) else float(accepted_rate)
 
     candidate_score = (
         100.0 * int(hard_constraints_ok)
@@ -1250,10 +1117,7 @@ def evaluate_merge_candidate(
         - 15.0 * constraint_violation_count
         - 150.0 * max(0.0, validation_psi - PREFERRED_MAX_VALIDATION_PSI)
         + 12.0 * iv_value
-        + 5.0 * rank_value
         + 100.0 * min_sep_value
-        + 2.0 * accepted_rate_value
-        + extreme_metrics["extreme_score_component"]
         - 1.5 * abs(final_bin_count - TARGET_FINAL_BIN_COUNT)
     )
 
@@ -1279,48 +1143,8 @@ def evaluate_merge_candidate(
         "validation_psi_acceptable_ok": validation_psi_ok,
         "primary_iv": final_iv,
         "primary_iv_retention": iv_retention,
-        "development_validation_rank_corr": rank_correlation,
         "min_adjacent_primary_rate_diff": min_adjacent_rate_diff,
-        **extreme_metrics,
         "candidate_score": candidate_score,
-        **strategy_metrics,
-    }
-
-
-def summarize_strategy_from_candidate_stats(
-    final_stats: pd.DataFrame,
-    config: Dict,
-) -> Dict[str, float]:
-    """在候选合箱累计曲线上快速评估策略通过率和风险。"""
-    curve = final_stats.sort_values("final_bin_order").reset_index(drop=True).copy()
-    curve["threshold_order"] = curve["final_bin_order"]
-    curve["marginal_sample_pct"] = curve["sample_pct"]
-    curve["marginal_3m30p_cnt_bad_rate"] = curve["3m30p_cnt_bad_rate"]
-
-    auto_row, accept_row = compute_auto_accept_rows(curve, config)
-    if auto_row is None or accept_row is None:
-        return {
-            "strategy_status": "无满足约束的阈值",
-            "auto_pass_rate": np.nan,
-            "accepted_rate": np.nan,
-            "manual_review_rate": np.nan,
-            "reject_rate": np.nan,
-            "accepted_1m30p_cnt_bad_rate": np.nan,
-            "accepted_3m30p_cnt_bad_rate": np.nan,
-            "last_accepted_marginal_3m30p_cnt_bad_rate": np.nan,
-        }
-
-    return {
-        "strategy_status": "OK",
-        "auto_pass_rate": auto_row["cum_pass_rate"],
-        "accepted_rate": accept_row["cum_pass_rate"],
-        "manual_review_rate": accept_row["cum_pass_rate"] - auto_row["cum_pass_rate"],
-        "reject_rate": 1 - accept_row["cum_pass_rate"],
-        "accepted_1m30p_cnt_bad_rate": accept_row["cum_1m30p_cnt_bad_rate"],
-        "accepted_3m30p_cnt_bad_rate": accept_row["cum_3m30p_cnt_bad_rate"],
-        "last_accepted_marginal_3m30p_cnt_bad_rate": accept_row[
-            "marginal_3m30p_cnt_bad_rate"
-        ],
     }
 
 
@@ -1369,8 +1193,6 @@ def build_merge_candidate_score_table(
                 "merged_range": str(ranges[pair_index]),
                 "boundary": diagnostics.get("boundary"),
                 "is_protected_boundary": diagnostics.get("is_protected_boundary"),
-                "is_extreme_boundary": diagnostics.get("is_extreme_boundary"),
-                "extreme_boundary_penalty": diagnostics.get("extreme_boundary_penalty"),
                 "left_primary_rate": diagnostics.get("left_rate"),
                 "right_primary_rate": diagnostics.get("right_rate"),
                 "abs_primary_rate_diff": diagnostics.get("abs_rate_diff"),
@@ -1542,10 +1364,9 @@ def build_merge_candidate_score_table(
             "preferred_validation_psi_ok",
             "candidate_score",
             "primary_iv_retention",
-            "development_validation_rank_corr",
             "target_bin_distance",
         ],
-        ascending=[False, True, True, True, False, False, False, False, False, True],
+        ascending=[False, True, True, True, False, False, False, False, True],
         na_position="last",
     )
 
@@ -2283,7 +2104,6 @@ def build_overview(
                 ("候选评分", "Validation 主指标倒挂数", selected_candidate.get("validation_primary_inversion_cnt")),
                 ("候选评分", "Development/Validation PSI", selected_candidate.get("validation_psi")),
                 ("候选评分", "主指标 IV 保留率", selected_candidate.get("primary_iv_retention")),
-                ("候选评分", "跨样本风险排序相关性", selected_candidate.get("development_validation_rank_corr")),
                 ("候选评分", "候选综合得分", selected_candidate.get("candidate_score")),
             ]
         )
@@ -2360,12 +2180,6 @@ def build_config_table(
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_MATURE_COUNT", "config_value": MIN_FINAL_BIN_MATURE_COUNT},
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_BAD_COUNT", "config_value": MIN_FINAL_BIN_BAD_COUNT},
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_GOOD_COUNT", "config_value": MIN_FINAL_BIN_GOOD_COUNT},
-        {"config_group": "合箱配置", "config_name": "EXTREME_BIN_SCORE_WEIGHT", "config_value": EXTREME_BIN_SCORE_WEIGHT},
-        {"config_group": "合箱配置", "config_name": "EXTREME_ADJACENT_GAP_WEIGHT", "config_value": EXTREME_ADJACENT_GAP_WEIGHT},
-        {"config_group": "合箱配置", "config_name": "EXTREME_LIFT_PENALTY_WEIGHT", "config_value": EXTREME_LIFT_PENALTY_WEIGHT},
-        {"config_group": "合箱配置", "config_name": "EXTREME_BOUNDARY_PENALTY", "config_value": EXTREME_BOUNDARY_PENALTY},
-        {"config_group": "合箱配置", "config_name": "MAX_HEAD_PRIMARY_LIFT", "config_value": MAX_HEAD_PRIMARY_LIFT},
-        {"config_group": "合箱配置", "config_name": "MIN_TAIL_PRIMARY_LIFT", "config_value": MIN_TAIL_PRIMARY_LIFT},
         {"config_group": "合箱配置", "config_name": "VALIDATION_INVERSION_TOLERANCE", "config_value": VALIDATION_INVERSION_TOLERANCE},
         {"config_group": "合箱配置", "config_name": "ADJACENT_PVALUE_TO_MERGE", "config_value": ADJACENT_PVALUE_TO_MERGE},
         {"config_group": "合箱配置", "config_name": "MIN_ADJACENT_ABS_RATE_DIFF", "config_value": MIN_ADJACENT_ABS_RATE_DIFF},
