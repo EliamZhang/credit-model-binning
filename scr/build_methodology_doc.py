@@ -7,6 +7,7 @@
 - 正文从第 2 页起：页眉左文档名 / 右“评审稿 V1.0”，主题色分隔线；页脚灰色“第 X 页 共 Y 页”
 - 一级标题黑体四号深蓝 + 底部横线并分页；二级标题黑体小四深蓝
 - 表格：深蓝表头白字、隔行浅蓝斑马纹、首列加粗、浅灰细边框；表格末行可附浅黄提示合并行
+- 优先级分组标签：浅蓝底纹黑体深蓝加粗（用于"局限性与待讨论问题"三级分级）
 - 正文宋体小四、1.5 倍行距、首行缩进 2 字符、两端对齐
 - 公式居中、编号右对齐；表题居表上、图题居图下（黑体五号深蓝）
 """
@@ -186,6 +187,21 @@ def bullet(doc, text, size=BODY_SIZE, bold_prefix=None):
         set_run_font(p.add_run(text), EAST_FONT, size)
     else:
         set_run_font(p.add_run("• " + text), EAST_FONT, size)
+    return p
+
+
+def priority_label(doc, text):
+    """优先级分组标签：浅蓝底纹黑体深蓝加粗，用于"局限性与待讨论问题"分级。"""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_after = Pt(4)
+    p.paragraph_format.keep_with_next = True
+    pPr = p._p.get_or_add_pPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:fill"), BAND_FILL)
+    pPr.append(shd)
+    set_run_font(p.add_run(text), HEI_FONT, 11, bold=True, color=rgb(PRIMARY))
     return p
 
 
@@ -540,12 +556,25 @@ def main():
 
     # ============ 六、局限性与待讨论问题 ============
     heading(doc, 1, "六、局限性与待讨论问题")
+    body(doc, "以下局限按对上线决策的影响程度分为三级：高——上线前必须解决；中——上线前应明确处理方案；低——持续优化，不阻塞上线。")
+
+    priority_label(doc, "高优先级 · 上线前必须解决")
+    bullet(doc, "拒绝样本与选择偏差：三段阈值与约束仅基于已获贷人群（自动通过 + 人工审核通过）的表现，被拒人群无标签、不进入逾期率估计；若模型在被拒人群上排序失效，实际风险可能被系统性低估，未引入拒绝推断或补充样本校准。")
+    bullet(doc, "尾部箱风险估计精度：坏样本量下限 20 仅保证点估计，最坏端箱的 3M30+ 率置信区间宽度可达 ±10~20 个百分点，策略边际风险线可能落入区间内而无法与相邻约束水平可靠区分；未引入置信区间或精确检验（如 Clopper-Pearson）作为达标判定与约束加严的依据。")
+    bullet(doc, "目标函数与约束取值：阈值优化目标仅为累计通过率最大化，未嵌入逾期损失、资金成本与收入模型，也未量化收严 / 放松一档对规模与风险的边际影响；表 6 约束值为示例配置，其业务依据需评审确认。")
+    bullet(doc, "阈值边界取整与上线执行细节（边界落入真实分数值）待细化。")
+
+    priority_label(doc, "中优先级 · 上线前应明确处理方案")
+    bullet(doc, "分箱保鲜期与刷新机制：边界与阈值绑定当前 score_mlt 版本，模型重构、重校准或客群结构变化后边界逐步退化；未定义定期重估周期、刷新触发条件及新旧分箱并轨验证（shadow）安排。")
+    bullet(doc, "账龄结构干扰：1M30+ / 3M30+ 需要 1~3 个月观察窗，Train 尾部与 OOT 前期账龄未成熟、成熟率低，月度稳定性与分月指标易受账龄结构变化（而非真实风险变化）干扰；未按账龄分层复核成熟度充分性。")
+    bullet(doc, "当前仅输出一套“平衡型”策略，未做保守 / 增长多策略对比与人工审核产能约束的联动分析。")
+    bullet(doc, "金额口径依赖剩余本金估计字段，其估计准确性直接影响金额指标可信度。")
     bullet(doc, "候选评分权重与 PSI 偏好线（0.05）、可接受线（0.10）、Validation 容忍倒挂（0.3pp）等经验值，未做系统性敏感性分析。")
+
+    priority_label(doc, "低优先级 · 持续优化")
+    bullet(doc, "候选择优的抽样稳定性：候选评分与选择仅在 Development 单一样本上执行一次，未用 bootstrap / 子样本扰动验证最优方案与箱边界是否会翻转；最优与次优候选得分接近时结论稳健性未知。")
     bullet(doc, "初始 20 箱、最终 6~8 档（目标 7）为经验设定，未用数据驱动方式确定最优档位数。")
     bullet(doc, "单调性仅做相邻箱检查，无全局趋势检验（如 Cochran-Armitage）；金额口径单调性未纳入硬约束。")
-    bullet(doc, "金额口径依赖剩余本金估计字段，其估计准确性直接影响金额指标可信度。")
-    bullet(doc, "当前仅输出一套“平衡型”策略，未做保守 / 增长多策略对比与人工审核产能约束的联动分析。")
-    bullet(doc, "阈值边界取整与上线执行细节（边界落入真实分数值）待细化。")
     bullet(doc, "极端人群圈选数量（最好 / 最坏各 1 箱）为主观设定，其敏感性未检验。")
 
     doc.save(OUTPUT)
