@@ -133,6 +133,7 @@ TRAIN_END_MONTH = "2025-10"
 OOT_START_MONTH = "2025-11"
 VALIDATION_MONTH_COUNT = 3
 MIN_DEVELOPMENT_MONTH_COUNT = 3
+FALLBACK_DEVELOPMENT_SAMPLE_PCT = 0.80
 HIGH_SCORE_HIGH_RISK = True
 SCORE_COL = "score_mlt"
 INITIAL_BIN_COUNT = 20
@@ -448,6 +449,16 @@ validation_initial_stats
 | 主指标坏样本量 | >= 20 | `3m30p_cnt_bad` |
 | 主指标好样本量 | >= 200 | `3m30p_cnt_good` |
 
+最好/最坏两个极端初始箱（默认各圈选 1 个，见 7.4）使用放宽约束（`bin_constraint_minimums`）：
+
+| 极端箱约束 | 默认值 | 说明 |
+| --- | ---: | --- |
+| 主指标成熟量 | >= 500 | 放宽到普通箱的一半 |
+| 最好箱坏样本量 | >= 0 | 低风险端天然坏样本少，不设下限 |
+| 最好箱好样本量 | >= 200 | 与普通箱一致 |
+| 最坏箱坏样本量 | >= 20 | 与普通箱一致 |
+| 最坏箱好样本量 | >= 0 | 高风险端天然好样本少，不设下限 |
+
 #### 7.2 单调性要求
 
 - Development 上主指标（1M30+、3M30+ 笔数逾期率）不允许相邻倒挂。
@@ -459,21 +470,28 @@ validation_initial_stats
 合并某对相邻箱时计算综合代价：
 
 ```text
-merge_cost = 风险率差距 × 100
+merge_cost = 风险率差距 × MERGE_COST_RATE_GAP_WEIGHT（默认 100）
            + (1 - 两比例 Z 检验 p 值)
-           + IV 损失 × 10
-           + 保护边界惩罚（100，若该边界受保护）
+           + IV 损失 × MERGE_COST_IV_LOSS_WEIGHT（默认 10）
+           + 保护边界惩罚（默认 100，若该边界受策略保护）
+           + 极端边界惩罚（默认 10000，若该边界为极端圈选边界）
 ```
 
-风险越接近、差异越不显著、IV 损失越小，越优先合并。
+风险越接近、差异越不显著、IV 损失越小，越优先合并；跨越策略保护边界或极端圈选边界会显著抬高代价。
 
 #### 7.4 保护边界
 
-以下边界在自动合箱中默认尽量保留（强制处理小箱或倒挂时仍允许跨越）：
+合箱中有两类边界需要保护，机制不同：
 
-- 自动通过 / 整体接纳约束对应的累计 3M30+ 风险边界。
-- 边际 3M30+ 风险超过上限的边界。
-- `PROTECT_LARGEST_RISK_JUMPS`（默认 1）个风险跳升最大的边界。
+1. **策略保护边界**（尽量保留，必要场景仍可跨越，跨越按 `PROTECTED_BOUNDARY_PENALTY=100` 计入合并代价）：
+   - 自动通过 / 整体接纳约束对应的累计 3M30+ 风险边界。
+   - 边际 3M30+ 风险超过上限的边界。
+   - `PROTECT_LARGEST_RISK_JUMPS`（默认 1）个风险跳升最大的边界。
+
+2. **极端圈选边界**（默认 `PROTECT_EXTREME_INITIAL_BINS=True`，从低风险端圈选 1 个最好初始箱、从高风险端圈选 1 个最坏初始箱，两处切点即极端边界）：
+   - 默认**硬禁止跨越**：`ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS=False` 时，极端边界不进入任何合箱候选，四个合箱阶段都不会跨过它，保证最好箱不被高风险相邻箱稀释、最坏箱不被低风险相邻箱稀释。
+   - 若改为 `True`：允许跨越，但按 `EXTREME_BOUNDARY_PENALTY=10000` 计入合并代价，且候选评分按 `EXTREME_BOUNDARY_VIOLATION_PENALTY=50` 每次扣分。
+   - 硬约束要求极端边界跨越数为 0（见 7.6）。
 
 #### 7.5 合并顺序
 
@@ -481,7 +499,7 @@ merge_cost = 风险率差距 × 100
 第 1 步 小箱清理：样本占比、成熟量或好坏样本量不足的箱优先合并
 第 2 步 单调合并：主指标出现相邻倒挂时，从倒挂最严重的一对开始合并（PAVA 风格）
 第 3 步 档位压缩：若仍超过 8 档，强制合并到 <= 8 档
-第 4 步 候选生成：继续按“统计不显著或风险率接近”合并出 6 档、7 档等候选
+第 4 步 候选生成：继续按“统计不显著或风险率接近”合并出 8 档、7 档、6 档候选
 ```
 
 每一步产生一个候选方案并记录合并原因；初始 20 箱也作为一个候选。
@@ -492,16 +510,19 @@ merge_cost = 风险率差距 × 100
 
 ```text
 candidate_score
-= 100 × 硬约束全部满足
+= +100 × 硬约束全部满足
 - 30 × Development 主指标倒挂数
 - 12 × Validation 主指标倒挂数
 - 4  × Validation 全指标倒挂数
 - 15 × 单箱约束违反数
 - 150 × max(0, Validation PSI - 0.05)
-+ 12 × 主指标 IV 保留率（截断到 0~1.5）
-+ 100 × 最小相邻风险差距
++ 12 × min(主指标 IV 保留率, 1.5)
++ 100 × max(0, 最小相邻风险差距)
 - 1.5 × |档位数 - 7|
+- 50 × 极端边界跨越数
 ```
+
+各权重由 `CANDIDATE_SCORE_WEIGHTS` 统一配置（键名同上，值会输出到 `06_附录`）。**硬约束** = 档位数在 6~8 之间 + Development 主指标倒挂为 0 + 单箱约束全部满足 + 极端边界跨越数为 0。
 
 排序优先级（依次）：
 
@@ -513,7 +534,7 @@ candidate_score
 
 #### 7.7 最终选定
 
-按上述排序取第一名的合箱范围作为最终方案。运行日志会打印实际档位数和方案，例如：
+按上述排序取第一名的合箱范围作为最终方案。若没有任何候选通过全部硬约束，则退而求其次：忽略硬约束筛选，直接从全部候选中按同样排序取第一名（此时 `hard_constraints_ok` 为 False，需在候选评分表中确认原因）。运行日志会打印实际档位数和方案，例如：
 
 ```text
 3/9 自动合箱完成：7 档，方案=[(1,2), (3,5), (6,8), (9,11), (12,14), (15,18), (19,20)]
@@ -719,7 +740,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 | 时间切分 | Train 截止月份、Validation 月份、OOT 起始月份 |
 | 分箱 | 初始箱数量、最终箱数量、合箱主指标、最终采用合箱方案、受保护初始边界 |
 | 稳定性 | 最终箱 Train/OOT PSI |
-| 候选评分 | Development/Validation 倒挂数、两者 PSI、IV 保留率、跨样本排序相关、候选综合得分 |
+| 候选评分 | Development/Validation 主指标倒挂数、两者 PSI、主指标 IV 保留率、候选综合得分 |
 | 模型效果 | 各样本组 × 各标签的 bad_rate / AUC / KS |
 | 单调性 | development / validation / train / oot 最终箱是否全部单调 |
 | 策略 | 自动通过阈值及截止档、人工审核上限/拒绝阈值及截止档、三段占比 |
@@ -940,10 +961,18 @@ config_table
 
 ```text
 基础配置：DATA_DIR / TRAIN_END_MONTH / OOT_START_MONTH / VALIDATION_MONTH_COUNT
-        / ACTUAL_VALIDATION_MONTHS / INITIAL_BIN_COUNT / HIGH_SCORE_HIGH_RISK
+        / FALLBACK_DEVELOPMENT_SAMPLE_PCT / ACTUAL_VALIDATION_MONTHS
+        / INITIAL_BIN_COUNT / HIGH_SCORE_HIGH_RISK
 合箱配置：MIN/MAX/TARGET_FINAL_BIN_COUNT / PRIMARY_RATE_COL / 单箱约束
         / 单调与相邻差异控制 / Validation PSI 阈值
         / PROTECTED_BOUNDARIES / SELECTED_FINAL_BIN_RANGES
+极端箱配置：PROTECT_EXTREME_INITIAL_BINS / BEST/WORST_EXTREME_INITIAL_BIN_COUNT
+        / ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS / EXTREME_BOUNDARIES
+        / EXTREME_BOUNDARY_PENALTY / EXTREME_BOUNDARY_VIOLATION_PENALTY
+        / MIN_EXTREME_BIN_MATURE_COUNT / MIN_BEST/WORST_EXTREME_BIN_*_COUNT
+评分配置：PROTECTED_BOUNDARY_PENALTY / MERGE_COST_RATE_GAP_WEIGHT
+        / MERGE_COST_IV_LOSS_WEIGHT / IV_RETENTION_SCORE_CAP / PSI_EPS / IV_SMOOTHING_EPS
+候选评分权重：CANDIDATE_SCORE_WEIGHTS 全部键值（hard_constraints_ok 等）
 策略配置：自动通过与总接纳的累计/边际风险上限
 ```
 
@@ -965,10 +994,11 @@ metric_dictionary
 
 - 审批漏斗函数（`calc_funnel_stats`）。
 - `score_apply` 和交易子模型表的读取与拼接。
-- 6/7/8/9 档候选合箱方案的横向比较。
 - 3/4 位小数边界取整敏感性分析。
 - 阈值敏感性扫描（人工审核产能 × 风险上限矩阵）。
 - 三套策略方案（保守/平衡/增长）对比。
+
+> 说明：多档位候选的横向比较并未移除——当前通过“候选生成 + 候选评分”在同一流程内比较 8/7/6 档候选并选出最优方案（见 7.5 / 7.6），只是不再像历史版本那样把每个档位作为独立完整方案并列对比。
 
 当前报告本质上是对 `score_mlt` 的一套自动合箱 + 一套默认策略的完整报告。
 
@@ -1101,7 +1131,15 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 
 ### 7. 合箱候选评分的权重是经验值
 
-`candidate_score` 的各权重（倒挂惩罚、PSI 惩罚、IV 保留率加分等）是代码中的经验值，用于在多个可行方案中挑选“更单调、更稳定、区分度更好”的方案。它们只影响候选排序，不影响硬约束（档位数、单调性、单箱规模）的判定。
+`candidate_score` 的各权重（倒挂惩罚、PSI 惩罚、IV 保留率加分等）是代码中的经验值，用于在多个可行方案中挑选“更单调、更稳定、区分度更好”的方案。它们只影响候选排序，不影响硬约束（档位数、单调性、单箱规模、极端边界跨越）的判定。
+
+### 8. 极端箱保护会限制合箱自由度
+
+`PROTECT_EXTREME_INITIAL_BINS=True`（默认）时，最好/最坏各 1 个初始箱的边界默认被硬禁止跨越，任何合箱阶段都不能跨过。代价是合箱自由度受限：
+
+- 如果极端箱本身样本量很小，硬保护可能让该档位区间异常窄。
+- 数据或时间范围变化后，极端箱边界会随初始等频分箱移动，最终方案可能随之变化。
+- 若最终没有任何候选满足全部硬约束（含极端边界跨越数 = 0），脚本会退化为忽略硬约束、直接按综合得分取第一名，需在 `02_分箱详情` 的合箱候选评分表中确认该方案的可解释性。
 
 ---
 
