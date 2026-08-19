@@ -817,17 +817,24 @@ merge_steps
 final_development_stats / final_validation_stats / final_train_stats / final_oot_stats
 ```
 
-四个切片的最终箱统计合并为一张表，用 `sample_group` 列区分 Development / Validation / Train / OOT。字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等）。
+四个切片的最终箱统计合并为一张表，用 `sample_group` 列区分 Development / Validation / Train / OOT。字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等），并在 1M30+ / 3M30+ 笔数逾期率及累计口径旁附带 95% Wilson 置信区间：
+
+```text
+1m30p_cnt_bad_rate_ci_low / 1m30p_cnt_bad_rate_ci_high
+3m30p_cnt_bad_rate_ci_low / 3m30p_cnt_bad_rate_ci_high
+cum_1m30p_cnt_bad_rate_ci_low / cum_3m30p_cnt_bad_rate_ci_high（含 _high 上界）
+```
 
 查看方法：
 
 - 从 `bin_order=1` 向下看风险是否逐步升高。
 - 同一风险等级在四个切片中的风险方向是否一致。
 - OOT 单箱成熟量很小时，不要过度解释短期波动。
+- 尾部箱样本量小、置信区间宽，应结合 `*_cnt_bad_rate_ci_high`（保守风险上界）解读风险率，不能只看点估计。
 
 ### Sheet 4：`04_策略方案`
 
-包含三个 section：
+包含四个 section：
 
 #### 表 1：阈值选择过程
 
@@ -837,7 +844,7 @@ final_development_stats / final_validation_stats / final_train_stats / final_oot
 threshold_selection
 ```
 
-每个候选阈值一行，展示累计/边际指标，并标记：
+每个候选阈值一行，展示累计/边际指标（含 3M30+ 累计与边际的 95% Wilson 置信区间上界 `cum_3m30p_cnt_bad_rate_ci_high` / `marginal_3m30p_cnt_bad_rate_ci_high`），并标记：
 
 ```text
 auto_all_constraints_ok / accept_all_constraints_ok（约束是否满足）
@@ -845,7 +852,7 @@ selected_role（自动通过阈值 / 人工审核上限·拒绝阈值 / 两者�
 selection_reason
 ```
 
-选中行有绿色/橙色高亮，约束不满足的标记为红色。
+选中行有绿色/橙色高亮，约束不满足的标记为红色。当累计风险点估计满足约束但 `_ci_high` 越过约束线时，说明该阈值恰好落在不确定区间，需结合尾部箱样本量判断是否从严选择。
 
 #### 表 2：策略结果
 
@@ -867,7 +874,29 @@ accepted_1m30p_amt_bad_rate / accepted_3m30p_amt_bad_rate
 last_accepted_marginal_3m30p_cnt_bad_rate
 ```
 
-#### 表 3：策略分段验证
+#### 表 3：阈值敏感性
+
+底层对象：
+
+```text
+threshold_sensitivity
+```
+
+对自动通过 / 总接纳阈值各输出当前、收严一档、放松一档（一档 = 相邻箱边界）的对比，供风险与业务确认风险上限取值时参考：
+
+```text
+threshold_type（自动通过阈值 / 总接纳阈值）  scenario（当前 / 收严一档 / 放松一档）
+threshold（变体后阈值）  auto_pass_rate  manual_review_rate  reject_rate
+auto_1m30p_cnt_bad_rate / auto_3m30p_cnt_bad_rate（自动通过人群风险）
+accept_3m30p_cnt_bad_rate / accept_marginal_3m30p_cnt_bad_rate（接纳人群风险）
+accept_marginal_3m30p_cnt_bad_rate_ci_high（接纳边际 3M30+ 风险 95% Wilson 上界）
+auto_pass_rate_delta / manual_review_rate_delta / reject_rate_delta（与当前方案的差异）
+note（无更严/更松候选、越过对方阈值按规则对齐等说明）
+```
+
+当前方案行绿色高亮；阈值移动越过对方阈值时按“总接纳阈值不得严于自动通过阈值”规则对齐，并在 note 中说明。
+
+#### 表 4：策略分段验证
 
 底层对象：
 
@@ -976,7 +1005,25 @@ config_table
 策略配置：自动通过与总接纳的累计/边际风险上限
 ```
 
-#### 表 2：指标说明
+#### 表 2：上线执行规则
+
+底层对象：
+
+```text
+online_execution_rules
+```
+
+供引擎团队上线时逐项核对的静态清单，覆盖：
+
+```text
+分数精度：模型分与边界的精度要求、不二次取整
+阈值取整：默认原始精度部署；工程必须取整时只允许向更严方向（floor）+ 取整后复核
+区间开闭：(left, right] 分档规则、边界相等归入右闭档、数值比较禁止字符串比较
+空值与异常值：缺失分按拒绝、NaN/Inf 不入自动通过、超界分数按极端箱兜底
+一致性校验：阈值清单逐项核对、离线/线上分档对照一致率 100%、上线后分档占比监控
+```
+
+#### 表 3：指标说明
 
 底层对象：
 
@@ -984,7 +1031,7 @@ config_table
 metric_dictionary
 ```
 
-核心字段的名称和计算口径说明。
+核心字段的名称和计算口径说明（含 `*_cnt_bad_rate_ci_low / ci_high` 置信区间字段）。
 
 ---
 
@@ -995,7 +1042,7 @@ metric_dictionary
 - 审批漏斗函数（`calc_funnel_stats`）。
 - `score_apply` 和交易子模型表的读取与拼接。
 - 3/4 位小数边界取整敏感性分析。
-- 阈值敏感性扫描（人工审核产能 × 风险上限矩阵）。
+- 阈值敏感性全矩阵扫描（人工审核产能 × 风险上限矩阵）；当前仅输出自动通过 / 总接纳阈值收严、放松一档的敏感性表（见 Sheet 4 表 3），未做全矩阵扫描。
 - 三套策略方案（保守/平衡/增长）对比。
 
 > 说明：多档位候选的横向比较并未移除——当前通过“候选生成 + 候选评分”在同一流程内比较 8/7/6 档候选并选出最优方案（见 7.5 / 7.6），只是不再像历史版本那样把每个档位作为独立完整方案并列对比。

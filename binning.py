@@ -19,8 +19,8 @@
 7. 基于完整 Train 的最终箱统计，构建阈值曲线（累计/边际逾期率），在自动通过/人工审核/
    拒绝策略约束下生成 risk_level 分段与通过率方案；
 8. 汇总为 6 个 sheet：01_总览、02_分箱详情（过程+候选+步骤）、03_最终分箱统计
-   （Dev/Val/Train/OOT 合一）、04_策略方案（阈值选择+策略结果+分段验证）、
-   05_模型验证（Train/OOT 对比+AUC/KS+PSI+单调性+月度稳定性）、06_附录（配置+指标说明）；
+   （Dev/Val/Train/OOT 合一）、04_策略方案（阈值选择+策略结果+阈值敏感性+分段验证）、
+   05_模型验证（Train/OOT 对比+AUC/KS+PSI+单调性+月度稳定性）、06_附录（配置+上线执行规则+指标说明）；
 9. 写入 out/binning_strategy_report_YYYYMMDD.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
 
 
@@ -246,6 +246,30 @@ def safe_div(numerator, denominator):
     if isinstance(denominator, pd.Series):
         return pd.Series(result, index=denominator.index)
     return result
+
+
+def wilson_ci(
+    bad: np.ndarray,
+    mature: np.ndarray,
+    z: float = 1.96,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    笔数比例的 95% Wilson 置信区间（下界, 上界）。
+
+    成熟量为 0 时返回 NaN；上界可用于尾部小样本箱的保守风险估计。
+    """
+    bad_arr = np.asarray(bad, dtype="float64")
+    mature_arr = np.asarray(mature, dtype="float64")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p = safe_div(bad_arr, mature_arr)
+        denom = 1.0 + z**2 / mature_arr
+        center = (p + z**2 / (2.0 * mature_arr)) / denom
+        half = z * np.sqrt(
+            np.maximum(p * (1.0 - p) / mature_arr + z**2 / (4.0 * mature_arr**2), 0.0)
+        ) / denom
+    low = np.maximum(center - half, 0.0)
+    high = np.minimum(center + half, 1.0)
+    return low, high
 
 
 def flatten_dict(prefix: str, values: Dict[str, float]) -> Dict[str, float]:
@@ -596,6 +620,11 @@ def add_bin_derived_metrics(
         result[f"{prefix}_cnt_bad_rate"] = safe_div(
             result[f"{prefix}_cnt_bad"], result[f"{prefix}_cnt_mature"]
         )
+        ci_low, ci_high = wilson_ci(
+            result[f"{prefix}_cnt_bad"], result[f"{prefix}_cnt_mature"]
+        )
+        result[f"{prefix}_cnt_bad_rate_ci_low"] = ci_low
+        result[f"{prefix}_cnt_bad_rate_ci_high"] = ci_high
         result[f"{prefix}_amt_bad_rate"] = safe_div(
             result[f"{prefix}_amt_bad"], result[f"{prefix}_amt_exposure"]
         )
@@ -610,6 +639,12 @@ def add_bin_derived_metrics(
             result[f"cum_{prefix}_cnt_bad"],
             result[f"cum_{prefix}_cnt_mature"],
         )
+        cum_ci_low, cum_ci_high = wilson_ci(
+            result[f"cum_{prefix}_cnt_bad"],
+            result[f"cum_{prefix}_cnt_mature"],
+        )
+        result[f"cum_{prefix}_cnt_bad_rate_ci_low"] = cum_ci_low
+        result[f"cum_{prefix}_cnt_bad_rate_ci_high"] = cum_ci_high
         result[f"cum_{prefix}_amt_exposure"] = result[f"{prefix}_amt_exposure"].cumsum()
         result[f"cum_{prefix}_amt_bad"] = result[f"{prefix}_amt_bad"].cumsum()
         result[f"cum_{prefix}_amt_bad_rate"] = safe_div(
@@ -1885,6 +1920,19 @@ def build_threshold_curve(
         }
         row.update(prefix_metrics(cumulative_metrics, "cum"))
         row.update(prefix_metrics(marginal_metrics, "marginal"))
+        for prefix in RISK_PREFIXES:
+            cum_ci_low, cum_ci_high = wilson_ci(
+                cumulative_metrics[f"{prefix}_cnt_bad"],
+                cumulative_metrics[f"{prefix}_cnt_mature"],
+            )
+            row[f"cum_{prefix}_cnt_bad_rate_ci_low"] = cum_ci_low
+            row[f"cum_{prefix}_cnt_bad_rate_ci_high"] = cum_ci_high
+            marginal_ci_low, marginal_ci_high = wilson_ci(
+                marginal_metrics[f"{prefix}_cnt_bad"],
+                marginal_metrics[f"{prefix}_cnt_mature"],
+            )
+            row[f"marginal_{prefix}_cnt_bad_rate_ci_low"] = marginal_ci_low
+            row[f"marginal_{prefix}_cnt_bad_rate_ci_high"] = marginal_ci_high
         row["cum_pass_rate"] = safe_div(cumulative_metrics["n"], total_n)
         row["cum_principal_pct"] = safe_div(
             cumulative_metrics["principal"],
@@ -1958,6 +2006,137 @@ def build_strategy_plan(
         ],
     }
     return pd.DataFrame([result])
+
+
+def build_threshold_sensitivity(
+    curve: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    生成阈值敏感性表：对自动通过 / 总接纳阈值各展示当前、收严一档、放松一档
+    对通过率、风险率和人工审核量的边际影响，供风险与业务确认风险上限取值时参考。
+    """
+    valid = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if valid.empty or curve.empty:
+        return pd.DataFrame()
+
+    strategy = valid.iloc[0]
+    auto_threshold = float(strategy["auto_pass_threshold"])
+    accept_threshold = float(strategy["reject_threshold"])
+
+    curve = curve.reset_index(drop=True)
+    threshold_values = curve["threshold"].astype(float).to_numpy()
+
+    def row_position(value: float) -> int:
+        return int(np.flatnonzero(np.isclose(threshold_values, value))[0])
+
+    auto_pos = row_position(auto_threshold)
+    accept_pos = row_position(accept_threshold)
+
+    def collect(
+        threshold_type: str,
+        base_pos: int,
+        other_pos: int,
+    ) -> List[Dict]:
+        rows: List[Dict] = []
+        for scenario, variant_pos, note in [
+            ("当前", base_pos, ""),
+            ("收严一档", base_pos - 1, ""),
+            ("放松一档", base_pos + 1, ""),
+        ]:
+            variant = curve.iloc[variant_pos] if 0 <= variant_pos < len(curve) else None
+            if variant is None:
+                edge_note = (
+                    "已是曲线最严档位，无更严候选"
+                    if scenario == "收严一档"
+                    else "已是曲线最松档位，无更松候选"
+                )
+                rows.append({
+                    "threshold_type": threshold_type,
+                    "scenario": scenario,
+                    "threshold": np.nan,
+                    FINAL_BIN_COL: "",
+                    "note": edge_note,
+                })
+                continue
+
+            if threshold_type == "自动通过阈值":
+                auto_row, accept_row = variant, curve.iloc[other_pos]
+                if accept_row["threshold_order"] < variant["threshold_order"]:
+                    auto_row = accept_row
+                    note = "放松后越过总接纳阈值，按规则对齐（人工审核量为 0）"
+            else:
+                auto_row, accept_row = curve.iloc[other_pos], variant
+                if variant["threshold_order"] < auto_row["threshold_order"]:
+                    accept_row = auto_row
+                    note = "收严后严于自动通过阈值，按规则对齐"
+
+            row = {
+                "threshold_type": threshold_type,
+                "scenario": scenario,
+                "threshold": (
+                    auto_row["threshold"] if threshold_type == "自动通过阈值"
+                    else accept_row["threshold"]
+                ),
+                FINAL_BIN_COL: (
+                    auto_row[FINAL_BIN_COL] if threshold_type == "自动通过阈值"
+                    else accept_row[FINAL_BIN_COL]
+                ),
+                "auto_pass_rate": float(auto_row["cum_pass_rate"]),
+                "manual_review_rate": max(
+                    0.0, float(accept_row["cum_pass_rate"] - auto_row["cum_pass_rate"])
+                ),
+                "reject_rate": 1.0 - float(accept_row["cum_pass_rate"]),
+                "auto_1m30p_cnt_bad_rate": float(auto_row["cum_1m30p_cnt_bad_rate"]),
+                "auto_3m30p_cnt_bad_rate": float(auto_row["cum_3m30p_cnt_bad_rate"]),
+                "accept_3m30p_cnt_bad_rate": float(accept_row["cum_3m30p_cnt_bad_rate"]),
+                "accept_marginal_3m30p_cnt_bad_rate": float(
+                    accept_row["marginal_3m30p_cnt_bad_rate"]
+                ),
+                "accept_marginal_3m30p_cnt_bad_rate_ci_high": float(
+                    accept_row["marginal_3m30p_cnt_bad_rate_ci_high"]
+                ),
+                "note": note,
+            }
+            rows.append(row)
+        return rows
+
+    rows = [
+        *collect("自动通过阈值", auto_pos, accept_pos),
+        *collect("总接纳阈值", accept_pos, auto_pos),
+    ]
+    result = pd.DataFrame(rows)
+
+    for threshold_type in result["threshold_type"].unique():
+        mask = result["threshold_type"].eq(threshold_type)
+        base = result.loc[mask & result["scenario"].eq("当前")]
+        if base.empty:
+            continue
+        for metric in ["auto_pass_rate", "manual_review_rate", "reject_rate"]:
+            result.loc[mask, f"{metric}_delta"] = (
+                result.loc[mask, metric] - base.iloc[0][metric]
+            )
+
+    first_columns = [
+        "threshold_type",
+        "scenario",
+        "threshold",
+        FINAL_BIN_COL,
+        "auto_pass_rate",
+        "manual_review_rate",
+        "reject_rate",
+        "auto_1m30p_cnt_bad_rate",
+        "auto_3m30p_cnt_bad_rate",
+        "accept_3m30p_cnt_bad_rate",
+        "accept_marginal_3m30p_cnt_bad_rate",
+        "accept_marginal_3m30p_cnt_bad_rate_ci_high",
+        "auto_pass_rate_delta",
+        "manual_review_rate_delta",
+        "reject_rate_delta",
+        "note",
+    ]
+    remaining_columns = [col for col in result.columns if col not in first_columns]
+    return result[[col for col in first_columns if col in result.columns] + remaining_columns]
 
 
 def calc_segment_metrics(
@@ -2188,6 +2367,7 @@ def build_threshold_selection_table(
         "cum_3m30p_cnt_mature",
         "cum_3m30p_cnt_bad",
         "cum_3m30p_cnt_bad_rate",
+        "cum_3m30p_cnt_bad_rate_ci_high",
         "cum_1m30p_amt_exposure",
         "cum_1m30p_amt_bad",
         "cum_1m30p_amt_bad_rate",
@@ -2199,6 +2379,7 @@ def build_threshold_selection_table(
         "marginal_3m30p_cnt_mature",
         "marginal_3m30p_cnt_bad",
         "marginal_3m30p_cnt_bad_rate",
+        "marginal_3m30p_cnt_bad_rate_ci_high",
         "auto_all_constraints_ok",
         "accept_all_constraints_ok",
     ]
@@ -2222,6 +2403,9 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("笔数风险", "3m30p_cnt_mature", "3M30+ 已成熟样本量", "duedate_3m_30 IN (0, 1)"),
         ("笔数风险", "3m30p_cnt_bad", "3M30+ 逾期样本量", "duedate_3m_30 = 1"),
         ("笔数风险", "3m30p_cnt_bad_rate", "3M30+ 笔数逾期率", "3m30p_cnt_bad / 3m30p_cnt_mature"),
+        ("笔数风险", "1m30p_cnt_bad_rate_ci_low / ci_high", "1M30+ 笔数逾期率 95% Wilson 置信区间下/上界", "Wilson 区间（z=1.96）；成熟量为 0 时为空"),
+        ("笔数风险", "3m30p_cnt_bad_rate_ci_low / ci_high", "3M30+ 笔数逾期率 95% Wilson 置信区间下/上界", "Wilson 区间（z=1.96）；成熟量为 0 时为空"),
+        ("笔数风险", "cum_*_cnt_bad_rate_ci_low / ci_high", "累计笔数逾期率的 95% Wilson 置信区间下/上界", "按累计成熟量与逾期量计算"),
         ("金额风险", "1m30p_amt_exposure", "1M30+ 已成熟样本的本金敞口", "SUM(principal) WHERE MOB1 已成熟"),
         ("金额风险", "1m30p_amt_bad", "MOB1 30+ 样本的剩余本金", "SUM(estimate_principal_remaining_mob1)"),
         ("金额风险", "1m30p_amt_bad_rate", "1M30+ 金额逾期率", "1m30p_amt_bad / 1m30p_amt_exposure"),
@@ -2231,12 +2415,32 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("阈值", "cum_pass_rate", "从低风险端累计到当前阈值的通过率", "cum_n / total_n"),
         ("阈值", "marginal_sample_pct", "当前档位新增样本占比", "marginal_n / total_n"),
         ("阈值", "marginal_3m30p_cnt_bad_rate", "当前新增档位自身的 3M30+ 风险", "marginal_bad / marginal_mature"),
+        ("阈值", "marginal_*_cnt_bad_rate_ci_low / ci_high", "边际档位笔数逾期率 95% Wilson 置信区间下/上界", "按边际档位成熟量与逾期量计算"),
         ("阈值", "auto_all_constraints_ok", "该候选阈值是否满足自动通过全部约束", "全部自动通过检查项均为 True"),
         ("阈值", "accept_all_constraints_ok", "该候选阈值是否满足整体接纳全部约束", "全部整体接纳检查项均为 True"),
         ("验证", "PSI", "Train 与 OOT 的分箱分布稳定性", "SUM((OOT%-Train%) * LN(OOT%/Train%))"),
         ("验证", "AUC / KS", "模型风险区分能力指标", "分别衡量排序能力和好坏样本累计差异"),
     ]
     return pd.DataFrame(rows, columns=["category", "field", "definition", "calculation"])
+
+
+def build_online_execution_rules() -> pd.DataFrame:
+    """输出上线执行规则的静态清单，供引擎团队上线时逐项核对。"""
+    rows = [
+        ("分数精度", "模型分精度", "线上评分引擎输出与离线一致的 float 模型分（score_mlt），不限制小数位"),
+        ("分数精度", "边界精度", "阈值 = 最终箱右边界原始值（末档为 Train 最大分数），不做二次取整"),
+        ("阈值取整", "取整原则", "默认按原始精度部署；若工程必须取整（如存储小数位限制），只允许向更严方向取整：自动通过阈值、总接纳阈值均向下取整（floor），不放大接纳人群"),
+        ("阈值取整", "取整后复核", "取整后须重新计算三段占比与风险，与未取整版本对比，确认无风险放大"),
+        ("区间开闭", "分档规则", "采用 (left, right]：自动通过 = score ≤ 自动通过阈值；人工审核 = 自动通过阈值 < score ≤ 总接纳阈值；拒绝 = score > 总接纳阈值"),
+        ("区间开闭", "边界相等", "分数精确等于阈值时归入右闭档（score == 阈值 → 通过/接纳）"),
+        ("区间开闭", "比较方式", "线上用数值比较（float），禁止格式化字符串比较"),
+        ("空值与异常值", "缺失模型分", "线上无法产出模型分或为空 → 按拒绝处理；离线报告中缺失样本已从分箱统计剔除，并在 01_总览 展示缺失量与缺失率，两个口径需知悉"),
+        ("空值与异常值", "异常分数", "NaN/Inf 不入自动通过，按拒绝处理；分数超出训练范围 → 归入对应极端箱（±∞ 边界兜底）"),
+        ("一致性校验", "阈值清单核对", "上线前逐项核对：阈值原始值、开闭符号、末档全量通过点（score ≤ Train 最大分数）"),
+        ("一致性校验", "离线/线上对照", "上线前取最近批次样本，离线分档 vs 线上引擎分档，一致率必须 100%，重点覆盖等于边界及边界 ± 1 ulp 的分数"),
+        ("一致性校验", "上线后监控", "监控线上分档占比与离线报告各档占比（PSI），边界漂移及时告警复核"),
+    ]
+    return pd.DataFrame(rows, columns=["category", "item", "rule"])
 
 
 def build_monthly_bin_stability(data: pd.DataFrame) -> pd.DataFrame:
@@ -2656,6 +2860,14 @@ def format_excel_report(path: Path) -> None:
                         if check_col and sheet.cell(row_idx, check_col).value is False:
                             sheet.cell(row_idx, check_col).fill = fail_fill
 
+            # 条件高亮：阈值敏感性表中的当前方案行。
+            scenario_col = header_to_col.get("scenario")
+            if scenario_col:
+                for row_idx in range(data_start, data_end + 1):
+                    if sheet.cell(row_idx, scenario_col).value == "当前":
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_fill
+
             # 条件高亮：合箱候选选中行。
             selected_flag_col = header_to_col.get("selected")
             hard_ok_col = header_to_col.get("hard_constraints_ok")
@@ -2680,6 +2892,7 @@ def write_report(
     train_oot_compare: pd.DataFrame,
     threshold_selection: pd.DataFrame,
     strategy_plan: pd.DataFrame,
+    threshold_sensitivity: pd.DataFrame,
     strategy_segments: pd.DataFrame,
     performance: pd.DataFrame,
     psi: pd.DataFrame,
@@ -2689,6 +2902,7 @@ def write_report(
     merge_candidates: pd.DataFrame,
     merge_steps: pd.DataFrame,
     config_table: pd.DataFrame,
+    online_execution_rules: pd.DataFrame,
     metric_dictionary: pd.DataFrame,
 ) -> None:
     """输出精简版策略报告（6 个 sheet）。"""
@@ -2721,6 +2935,7 @@ def write_report(
         _write_sections(writer, "04_策略方案", [
             ("阈值选择过程", threshold_selection),
             ("策略结果", strategy_plan),
+            ("阈值敏感性", threshold_sensitivity),
             ("策略分段验证", strategy_segments),
         ])
 
@@ -2735,6 +2950,7 @@ def write_report(
 
         _write_sections(writer, "06_附录", [
             ("配置参数", config_table),
+            ("上线执行规则", online_execution_rules),
             ("指标说明", metric_dictionary),
         ])
 
@@ -2862,6 +3078,7 @@ def main() -> None:
     # 5) 使用完整 Train 生成策略阈值。
     threshold_curve = build_threshold_curve(train_final, final_edges)
     strategy_plan = build_strategy_plan(threshold_curve, STRATEGY_CONFIG)
+    threshold_sensitivity = build_threshold_sensitivity(threshold_curve, strategy_plan)
     strategy_segments = build_strategy_segment_report(
         train_final,
         oot_final,
@@ -2904,6 +3121,7 @@ def main() -> None:
         validation_months,
         protected_boundaries,
     )
+    online_execution_rules = build_online_execution_rules()
     metric_dictionary = build_metric_dictionary()
 
     write_report(
@@ -2916,6 +3134,7 @@ def main() -> None:
         train_oot_compare=train_oot_compare,
         threshold_selection=threshold_selection,
         strategy_plan=strategy_plan,
+        threshold_sensitivity=threshold_sensitivity,
         strategy_segments=strategy_segments,
         performance=performance,
         psi=psi,
@@ -2925,6 +3144,7 @@ def main() -> None:
         merge_candidates=merge_candidates,
         merge_steps=merge_steps,
         config_table=config_table,
+        online_execution_rules=online_execution_rules,
         metric_dictionary=metric_dictionary,
     )
 
