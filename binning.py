@@ -17,7 +17,7 @@
 7. 基于完整 Train 的最终箱统计，构建阈值曲线（累计/边际逾期率），在自动通过/人工审核/
    拒绝策略约束下生成 risk_level 分段与通过率方案；
 8. 汇总为 6 个 sheet：01_总览、02_分箱详情（过程+候选+步骤）、03_最终分箱统计
-   （Dev/Val/Train/OOT 合一）、04_策略方案（阈值选择+策略结果+阈值敏感性+分段验证）、
+   （Train/OOT 合一）、04_策略方案（历史实际审批漏斗+模型策略测算流量+阈值选择+分段验证）、
    05_模型验证（Train/OOT 对比+AUC/KS+PSI+单调性+月度稳定性）、06_附录（配置+上线执行规则+指标说明）；
 9. 写入 out/binning_strategy_report_YYYYMMDD.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
 
@@ -168,6 +168,10 @@ REQUIRED_ANALYSIS_COLS = [
     "estimate_principal_remaining_mob3",
     "dpd_days_ever_mob1",
     "dpd_days_ever_mob3",
+    # 历史实际审批漏斗字段，均来自 application_info.csv。
+    "status",
+    "application_status",
+    "assessment_status",
 ]
 
 # 风险指标统一配置：避免 1M30+ / 3M30+ 在多个函数中重复写同一套逻辑。
@@ -273,6 +277,75 @@ def remove_prefix(text: str, prefix: str) -> str:
 # 2. 数据加载与样本切分
 # ============================================================
 
+
+def _actual_funnel_row(data: pd.DataFrame, sample_group: str) -> Dict[str, object]:
+    """按 application_id 去重计算 application_info 历史实际审批漏斗。"""
+    require_columns(
+        data,
+        ["application_id", "application_status", "assessment_status", "status"],
+        "历史实际审批漏斗",
+    )
+
+    application_status = data["application_status"].astype("string")
+    assessment_status = data["assessment_status"].astype("string")
+    account_status = data["status"].astype("string")
+
+    completed_mask = (
+        application_status.notna()
+        & ~application_status.isin(["0.Incomplete", "1.In Progress"])
+    )
+    approved_mask = application_status.str.slice(0, 1).isin(["3", "4"]).fillna(False)
+    auto_approved_mask = (
+        approved_mask
+        & assessment_status.str.contains("Auto Approved", na=False, regex=False)
+    )
+    manual_approved_mask = (
+        approved_mask
+        & assessment_status.str.contains("Manual Approved", na=False, regex=False)
+    )
+    deal_mask = account_status.isin(["Active_Account", "Closed", "Blocked"]).fillna(False)
+
+    def unique_count(mask: Optional[pd.Series] = None) -> int:
+        selected = data if mask is None else data.loc[mask]
+        return int(selected["application_id"].nunique(dropna=True))
+
+    apply_cnt = unique_count()
+    completed_cnt = unique_count(completed_mask)
+    approved_cnt = unique_count(approved_mask)
+    auto_approved_cnt = unique_count(auto_approved_mask)
+    manual_approved_cnt = unique_count(manual_approved_mask)
+    deal_cnt = unique_count(deal_mask)
+
+    return {
+        "metric_scope": "历史实际审批漏斗（application_info）",
+        "sample_group": sample_group,
+        "actual_apply_cnt": apply_cnt,
+        "actual_completed_application_cnt": completed_cnt,
+        "actual_approved_application_cnt": approved_cnt,
+        "actual_auto_approved_application_cnt": auto_approved_cnt,
+        "actual_manual_approved_application_cnt": manual_approved_cnt,
+        "actual_deal_sample_cnt": deal_cnt,
+        "actual_completion_rate": safe_div(completed_cnt, apply_cnt),
+        "actual_approval_rate": safe_div(approved_cnt, completed_cnt),
+        "actual_auto_approval_rate": safe_div(auto_approved_cnt, completed_cnt),
+        "actual_manual_approval_rate": safe_div(manual_approved_cnt, completed_cnt),
+        "actual_auto_approval_share": safe_div(auto_approved_cnt, approved_cnt),
+        "actual_manual_approval_share": safe_div(manual_approved_cnt, approved_cnt),
+        "actual_deal_rate": safe_div(deal_cnt, approved_cnt),
+    }
+
+
+def build_actual_funnel_report(data: pd.DataFrame) -> pd.DataFrame:
+    """分别输出 Train、OOT 与全量的历史实际审批漏斗。"""
+    month = data["application_month"].astype("string")
+    groups = [
+        ("Train", data.loc[month.notna() & month.le(TRAIN_END_MONTH)]),
+        ("OOT", data.loc[month.notna() & month.ge(OOT_START_MONTH)]),
+        ("All", data),
+    ]
+    return pd.DataFrame([_actual_funnel_row(frame, label) for label, frame in groups])
+
+
 def load_analysis_data() -> pd.DataFrame:
     """加载首版分箱真正需要的数据，删除未使用的其他模型表和交易特征表。"""
     print("加载数据 ...")
@@ -323,15 +396,20 @@ def load_analysis_data() -> pd.DataFrame:
     for col in RISK_NUMERIC_COLS:
         data[col] = pd.to_numeric(data[col], errors="coerce")
 
-    # 分箱分析只使用存在模型分的样本；缺失比例会在总览中单独展示。
+    # 历史实际审批漏斗独立于模型分，先基于完整申请样本计算并保留。
+    actual_funnel_report = build_actual_funnel_report(data)
+
+    # 分箱与模型策略测算只使用存在模型分的样本；缺失比例在总览中单独展示。
     source_row_count = len(data)
     score_missing_count = int(data[SCORE_COL].isna().sum())
-    data.attrs["source_row_count"] = source_row_count
-    data.attrs["score_missing_count"] = score_missing_count
 
     data = data.loc[data[SCORE_COL].notna()].copy()
     if data.empty:
         raise ValueError(f"{SCORE_COL} 全为空，无法进行分箱")
+
+    data.attrs["source_row_count"] = source_row_count
+    data.attrs["score_missing_count"] = score_missing_count
+    data.attrs["actual_funnel_report"] = actual_funnel_report
 
     print(
         f"   原始 {source_row_count:,} 行；有效模型分 {len(data):,} 行；"
@@ -1897,12 +1975,12 @@ def build_strategy_plan(
         "auto_pass_bin": auto_row[FINAL_BIN_COL],
         "reject_threshold": accept_row["threshold"],
         "manual_review_upper_bin": accept_row[FINAL_BIN_COL],
-        "auto_pass_rate": auto_row["cum_pass_rate"],
-        "accepted_rate": accept_row["cum_pass_rate"],
-        "manual_review_rate": (
+        "strategy_estimated_auto_pass_rate": auto_row["cum_pass_rate"],
+        "strategy_estimated_total_accept_rate": accept_row["cum_pass_rate"],
+        "strategy_estimated_manual_review_rate": (
             accept_row["cum_pass_rate"] - auto_row["cum_pass_rate"]
         ),
-        "reject_rate": 1 - accept_row["cum_pass_rate"],
+        "strategy_estimated_reject_rate": 1 - accept_row["cum_pass_rate"],
         "accepted_1m30p_cnt_bad_rate": accept_row["cum_1m30p_cnt_bad_rate"],
         "accepted_3m30p_cnt_bad_rate": accept_row["cum_3m30p_cnt_bad_rate"],
         "accepted_1m30p_amt_bad_rate": accept_row["cum_1m30p_amt_bad_rate"],
@@ -1988,11 +2066,12 @@ def build_threshold_sensitivity(
                     auto_row[FINAL_BIN_COL] if threshold_type == "自动通过阈值"
                     else accept_row[FINAL_BIN_COL]
                 ),
-                "auto_pass_rate": float(auto_row["cum_pass_rate"]),
-                "manual_review_rate": max(
+                "strategy_estimated_auto_pass_rate": float(auto_row["cum_pass_rate"]),
+                "strategy_estimated_manual_review_rate": max(
                     0.0, float(accept_row["cum_pass_rate"] - auto_row["cum_pass_rate"])
                 ),
-                "reject_rate": 1.0 - float(accept_row["cum_pass_rate"]),
+                "strategy_estimated_total_accept_rate": float(accept_row["cum_pass_rate"]),
+                "strategy_estimated_reject_rate": 1.0 - float(accept_row["cum_pass_rate"]),
                 "auto_1m30p_cnt_bad_rate": float(auto_row["cum_1m30p_cnt_bad_rate"]),
                 "auto_3m30p_cnt_bad_rate": float(auto_row["cum_3m30p_cnt_bad_rate"]),
                 "accept_3m30p_cnt_bad_rate": float(accept_row["cum_3m30p_cnt_bad_rate"]),
@@ -2018,7 +2097,12 @@ def build_threshold_sensitivity(
         base = result.loc[mask & result["scenario"].eq("当前")]
         if base.empty:
             continue
-        for metric in ["auto_pass_rate", "manual_review_rate", "reject_rate"]:
+        for metric in [
+            "strategy_estimated_auto_pass_rate",
+            "strategy_estimated_manual_review_rate",
+            "strategy_estimated_total_accept_rate",
+            "strategy_estimated_reject_rate",
+        ]:
             result.loc[mask, f"{metric}_delta"] = (
                 result.loc[mask, metric] - base.iloc[0][metric]
             )
@@ -2028,17 +2112,19 @@ def build_threshold_sensitivity(
         "scenario",
         "threshold",
         FINAL_BIN_COL,
-        "auto_pass_rate",
-        "manual_review_rate",
-        "reject_rate",
+        "strategy_estimated_auto_pass_rate",
+        "strategy_estimated_manual_review_rate",
+        "strategy_estimated_total_accept_rate",
+        "strategy_estimated_reject_rate",
         "auto_1m30p_cnt_bad_rate",
         "auto_3m30p_cnt_bad_rate",
         "accept_3m30p_cnt_bad_rate",
         "accept_marginal_3m30p_cnt_bad_rate",
         "accept_marginal_3m30p_cnt_bad_rate_ci_high",
-        "auto_pass_rate_delta",
-        "manual_review_rate_delta",
-        "reject_rate_delta",
+        "strategy_estimated_auto_pass_rate_delta",
+        "strategy_estimated_manual_review_rate_delta",
+        "strategy_estimated_total_accept_rate_delta",
+        "strategy_estimated_reject_rate_delta",
         "note",
     ]
     remaining_columns = [col for col in result.columns if col not in first_columns]
@@ -2098,6 +2184,8 @@ def build_strategy_segment_report(
     for sample_group, data in [("train", train), ("oot", oot)]:
         for decision, lower, upper in segments:
             metrics = calc_segment_metrics(data, lower, upper)
+            segment_rate = metrics.pop("sample_pct")
+            segment_principal_rate = metrics.pop("principal_pct")
             rows.append(
                 {
                     "sample_group": sample_group,
@@ -2105,9 +2193,68 @@ def build_strategy_segment_report(
                     "decision": decision,
                     "lower_threshold_exclusive": lower,
                     "upper_threshold_inclusive": upper,
+                    "strategy_estimated_segment_rate": segment_rate,
+                    "strategy_estimated_segment_principal_rate": segment_principal_rate,
                     **metrics,
                 }
             )
+
+    return pd.DataFrame(rows)
+
+
+def build_strategy_estimated_flow_report(
+    train: pd.DataFrame,
+    oot: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+) -> pd.DataFrame:
+    """按模型分阈值输出 Train、OOT 与全量的模型策略测算流量。"""
+    valid = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if valid.empty:
+        return pd.DataFrame()
+
+    strategy = valid.iloc[0]
+    auto_threshold = float(strategy["auto_pass_threshold"])
+    accept_threshold = float(strategy["reject_threshold"])
+    all_data = pd.concat([train, oot], ignore_index=True)
+    rows = []
+
+    for sample_group, data in [("Train", train), ("OOT", oot), ("All", all_data)]:
+        score = data[SCORE_COL]
+        valid_score = score.notna()
+        if HIGH_SCORE_HIGH_RISK:
+            auto_mask = valid_score & score.le(auto_threshold)
+            manual_mask = valid_score & score.gt(auto_threshold) & score.le(accept_threshold)
+            reject_mask = valid_score & score.gt(accept_threshold)
+        else:
+            auto_mask = valid_score & score.ge(auto_threshold)
+            manual_mask = valid_score & score.lt(auto_threshold) & score.ge(accept_threshold)
+            reject_mask = valid_score & score.lt(accept_threshold)
+
+        def unique_count(mask: pd.Series) -> int:
+            return int(data.loc[mask, "application_id"].nunique(dropna=True))
+
+        total_cnt = unique_count(valid_score)
+        auto_cnt = unique_count(auto_mask)
+        manual_cnt = unique_count(manual_mask)
+        reject_cnt = unique_count(reject_mask)
+        accepted_cnt = auto_cnt + manual_cnt
+        rows.append(
+            {
+                "metric_scope": "模型策略测算流量（score_mlt阈值）",
+                "sample_group": sample_group,
+                "strategy_estimated_total_application_cnt": total_cnt,
+                "strategy_estimated_auto_pass_cnt": auto_cnt,
+                "strategy_estimated_manual_review_cnt": manual_cnt,
+                "strategy_estimated_total_accept_cnt": accepted_cnt,
+                "strategy_estimated_reject_cnt": reject_cnt,
+                "strategy_estimated_auto_pass_rate": safe_div(auto_cnt, total_cnt),
+                "strategy_estimated_manual_review_rate": safe_div(manual_cnt, total_cnt),
+                "strategy_estimated_total_accept_rate": safe_div(accepted_cnt, total_cnt),
+                "strategy_estimated_reject_rate": safe_div(reject_cnt, total_cnt),
+                "auto_pass_threshold": auto_threshold,
+                "total_accept_threshold": accept_threshold,
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -2318,12 +2465,23 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("金额风险", "3m30p_amt_exposure", "3M30+ 已成熟样本的本金敞口", "SUM(principal) WHERE MOB3 已成熟"),
         ("金额风险", "3m30p_amt_bad", "MOB3 30+ 样本的剩余本金", "SUM(estimate_principal_remaining_mob3)"),
         ("金额风险", "3m30p_amt_bad_rate", "3M30+ 金额逾期率", "3m30p_amt_bad / 3m30p_amt_exposure"),
-        ("阈值", "cum_pass_rate", "从低风险端累计到当前阈值的通过率", "cum_n / total_n"),
+        ("模型策略测算", "cum_pass_rate", "从低风险端累计到当前阈值的模型策略测算通过率", "cum_n / total_n"),
         ("阈值", "marginal_sample_pct", "当前档位新增样本占比", "marginal_n / total_n"),
         ("阈值", "marginal_3m30p_cnt_bad_rate", "当前新增档位自身的 3M30+ 风险", "marginal_bad / marginal_mature"),
         ("阈值", "marginal_*_cnt_bad_rate_ci_low / ci_high", "边际档位笔数逾期率 95% Wilson 置信区间下/上界", "按边际档位成熟量与逾期量计算"),
         ("阈值", "auto_all_constraints_ok", "该候选阈值是否满足自动通过全部约束", "全部自动通过检查项均为 True"),
         ("阈值", "accept_all_constraints_ok", "该候选阈值是否满足整体接纳全部约束", "全部整体接纳检查项均为 True"),
+        ("历史实际审批漏斗", "actual_completion_rate", "历史实际进件完成率", "completed_application_cnt / apply_cnt"),
+        ("历史实际审批漏斗", "actual_approval_rate", "历史实际审批通过率", "approved_application_cnt / completed_application_cnt"),
+        ("历史实际审批漏斗", "actual_auto_approval_rate", "历史实际自动审批通过率", "auto_approved_application_cnt / completed_application_cnt"),
+        ("历史实际审批漏斗", "actual_manual_approval_rate", "历史实际人工审批通过率", "manual_approved_application_cnt / completed_application_cnt"),
+        ("历史实际审批漏斗", "actual_auto_approval_share", "历史实际通过件中的自动审批占比", "auto_approved_application_cnt / approved_application_cnt"),
+        ("历史实际审批漏斗", "actual_manual_approval_share", "历史实际通过件中的人工审批占比", "manual_approved_application_cnt / approved_application_cnt"),
+        ("历史实际审批漏斗", "actual_deal_rate", "历史实际成交转化率", "deal_sample_cnt / approved_application_cnt"),
+        ("模型策略测算", "strategy_estimated_auto_pass_rate", "模型阈值测算的自动通过样本占比", "score_mlt 满足自动通过阈值的申请数 / 有效模型分申请数"),
+        ("模型策略测算", "strategy_estimated_manual_review_rate", "模型阈值测算的人工审核样本占比", "人工审核分数区间申请数 / 有效模型分申请数"),
+        ("模型策略测算", "strategy_estimated_total_accept_rate", "模型阈值测算的总接纳样本占比", "自动通过数与人工审核数之和 / 有效模型分申请数"),
+        ("模型策略测算", "strategy_estimated_reject_rate", "模型阈值测算的拒绝样本占比", "超过总接纳阈值的申请数 / 有效模型分申请数"),
         ("验证", "PSI", "Train 与 OOT 的分箱分布稳定性", "SUM((OOT%-Train%) * LN(OOT%/Train%))"),
         ("验证", "AUC / KS", "模型风险区分能力指标", "分别衡量排序能力和好坏样本累计差异"),
     ]
@@ -2473,6 +2631,8 @@ def build_overview(
     performance: pd.DataFrame,
     monotonicity: pd.DataFrame,
     strategy_plan: pd.DataFrame,
+    actual_funnel_report: pd.DataFrame,
+    strategy_estimated_flow: pd.DataFrame,
 ) -> pd.DataFrame:
     """整理报告首页的核心结论，并按模块分组展示。"""
     source_row_count = int(data.attrs.get("source_row_count", len(data)))
@@ -2489,7 +2649,7 @@ def build_overview(
         ("时间切分", "OOT 起始月份", OOT_START_MONTH),
         ("分箱", "初始箱数量", initial_bin_count),
         ("分箱", "最终箱数量", final_bin_count),
-        ("分箱", "合箱主指标", PRIMARY_RATE_COL),
+        ("分箱", "合箱主指标", " / ".join(PRIMARY_RATE_COLS)),
         ("分箱", "最终采用合箱方案", format_merge_ranges(selected_merge_ranges)),
         ("分箱", "受保护初始边界", ",".join(map(str, sorted(protected_boundaries)))),
         ("稳定性", "最终箱 Train/OOT PSI", psi["psi_total"].iloc[0]),
@@ -2527,19 +2687,48 @@ def build_overview(
             )
         )
 
+    for sample_group in ["Train", "OOT"]:
+        actual_rows = actual_funnel_report.loc[
+            actual_funnel_report["sample_group"].eq(sample_group)
+        ]
+        if not actual_rows.empty:
+            actual = actual_rows.iloc[0]
+            rows.extend(
+                [
+                    ("历史实际审批漏斗", f"{sample_group}_进件完成率", actual["actual_completion_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_审批通过率", actual["actual_approval_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_自动审批通过率", actual["actual_auto_approval_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_人工审批通过率", actual["actual_manual_approval_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_自动审批占比", actual["actual_auto_approval_share"]),
+                    ("历史实际审批漏斗", f"{sample_group}_人工审批占比", actual["actual_manual_approval_share"]),
+                    ("历史实际审批漏斗", f"{sample_group}_成交转化率", actual["actual_deal_rate"]),
+                ]
+            )
+
+        estimated_rows = strategy_estimated_flow.loc[
+            strategy_estimated_flow["sample_group"].eq(sample_group)
+        ]
+        if not estimated_rows.empty:
+            estimated = estimated_rows.iloc[0]
+            rows.extend(
+                [
+                    ("模型策略测算流量", f"{sample_group}_测算自动通过率", estimated["strategy_estimated_auto_pass_rate"]),
+                    ("模型策略测算流量", f"{sample_group}_测算人工审核率", estimated["strategy_estimated_manual_review_rate"]),
+                    ("模型策略测算流量", f"{sample_group}_测算总接纳率", estimated["strategy_estimated_total_accept_rate"]),
+                    ("模型策略测算流量", f"{sample_group}_测算拒绝率", estimated["strategy_estimated_reject_rate"]),
+                ]
+            )
+
     valid_strategy = strategy_plan.loc[strategy_plan["status"].eq("OK")]
     if not valid_strategy.empty:
         row = valid_strategy.iloc[0]
         rows.extend(
             [
-                ("策略", "策略名称", row["strategy_name"]),
-                ("策略", "自动通过阈值", row["auto_pass_threshold"]),
-                ("策略", "自动通过截止风险档", row["auto_pass_bin"]),
-                ("策略", "人工审核上限/拒绝阈值", row["reject_threshold"]),
-                ("策略", "人工审核截止风险档", row["manual_review_upper_bin"]),
-                ("策略", "自动通过率", row["auto_pass_rate"]),
-                ("策略", "人工审核率", row["manual_review_rate"]),
-                ("策略", "拒绝率", row["reject_rate"]),
+                ("模型策略阈值", "策略名称", row["strategy_name"]),
+                ("模型策略阈值", "自动通过阈值", row["auto_pass_threshold"]),
+                ("模型策略阈值", "自动通过截止风险档", row["auto_pass_bin"]),
+                ("模型策略阈值", "人工审核上限/拒绝阈值", row["reject_threshold"]),
+                ("模型策略阈值", "人工审核截止风险档", row["manual_review_upper_bin"]),
                 ("策略风险", "接纳人群1M30+笔数逾期率", row["accepted_1m30p_cnt_bad_rate"]),
                 ("策略风险", "接纳人群3M30+笔数逾期率", row["accepted_3m30p_cnt_bad_rate"]),
                 ("策略风险", "接纳人群1M30+金额逾期率", row["accepted_1m30p_amt_bad_rate"]),
@@ -2569,9 +2758,15 @@ def build_config_table(
         {"config_group": "基础配置", "config_name": "OOT_START_MONTH", "config_value": OOT_START_MONTH},
         {"config_group": "基础配置", "config_name": "INITIAL_BIN_COUNT", "config_value": INITIAL_BIN_COUNT},
         {"config_group": "基础配置", "config_name": "HIGH_SCORE_HIGH_RISK", "config_value": HIGH_SCORE_HIGH_RISK},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_SOURCE", "config_value": "application_info.csv"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_COUNT_KEY", "config_value": "COUNT DISTINCT application_id"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_COMPLETED_EXCLUSIONS", "config_value": "0.Incomplete,1.In Progress"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_APPROVED_PREFIXES", "config_value": "3,4"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_DEAL_STATUSES", "config_value": "Active_Account,Closed,Blocked"},
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_COUNT", "config_value": MIN_FINAL_BIN_COUNT},
         {"config_group": "合箱配置", "config_name": "MAX_FINAL_BIN_COUNT", "config_value": MAX_FINAL_BIN_COUNT},
         {"config_group": "合箱配置", "config_name": "TARGET_FINAL_BIN_COUNT", "config_value": TARGET_FINAL_BIN_COUNT},
+        {"config_group": "合箱配置", "config_name": "PRIMARY_RATE_COLS", "config_value": " / ".join(PRIMARY_RATE_COLS)},
         {"config_group": "合箱配置", "config_name": "PRIMARY_RATE_COL", "config_value": PRIMARY_RATE_COL},
         {"config_group": "合箱配置", "config_name": "MIN_MIDDLE_BIN_SAMPLE_PCT", "config_value": MIN_MIDDLE_BIN_SAMPLE_PCT},
         {"config_group": "合箱配置", "config_name": "MIN_TAIL_BIN_SAMPLE_PCT", "config_value": MIN_TAIL_BIN_SAMPLE_PCT},
@@ -2679,6 +2874,9 @@ def format_excel_report(path: Path) -> None:
         if not sections:
             continue
 
+        sheet.freeze_panes = "A2"
+        sheet.sheet_view.showGridLines = False
+
         first_data_end = sections[0][2]
         if first_data_end >= sections[0][1]:
             sheet.auto_filter.ref = (
@@ -2712,7 +2910,8 @@ def format_excel_report(path: Path) -> None:
                     header = headers.get(cell.column, "").lower()
                     if cell.value is None:
                         continue
-                    if any(key in header for key in ["rate", "pct", "retention"]):
+                    header_tokens = set(header.split("_"))
+                    if header_tokens.intersection({"rate", "pct", "retention", "share"}):
                         cell.number_format = "0.00%"
                     elif any(key in header for key in ["auc", "ks", "psi", "corr", "p_value"]):
                         cell.number_format = "0.0000"
@@ -2721,6 +2920,8 @@ def format_excel_report(path: Path) -> None:
                         "score_min", "score_max", "score_mean",
                     ]):
                         cell.number_format = "0.0000"
+                    elif isinstance(cell.value, (int, np.integer)) and not isinstance(cell.value, bool):
+                        cell.number_format = "#,##0"
                     elif isinstance(cell.value, (int, float)):
                         cell.number_format = "#,##0.00"
 
@@ -2782,6 +2983,8 @@ def write_report(
     final_train_stats: pd.DataFrame,
     final_oot_stats: pd.DataFrame,
     train_oot_compare: pd.DataFrame,
+    actual_funnel_report: pd.DataFrame,
+    strategy_estimated_flow: pd.DataFrame,
     threshold_selection: pd.DataFrame,
     strategy_plan: pd.DataFrame,
     threshold_sensitivity: pd.DataFrame,
@@ -2823,10 +3026,12 @@ def write_report(
         final_stats_all.to_excel(writer, sheet_name="03_最终分箱统计", index=False)
 
         _write_sections(writer, "04_策略方案", [
+            ("历史实际审批漏斗", actual_funnel_report),
+            ("模型策略测算流量", strategy_estimated_flow),
             ("阈值选择过程", threshold_selection),
-            ("策略结果", strategy_plan),
-            ("阈值敏感性", threshold_sensitivity),
-            ("策略分段验证", strategy_segments),
+            ("模型策略测算结果", strategy_plan),
+            ("模型策略测算阈值敏感性", threshold_sensitivity),
+            ("模型策略测算分段风险验证", strategy_segments),
         ])
 
         _write_sections(writer, "05_模型验证", [
@@ -2862,6 +3067,7 @@ def main() -> None:
     _t = _log_step._t0 = time.time()
 
     data = load_analysis_data()
+    actual_funnel_report = data.attrs.get("actual_funnel_report", pd.DataFrame())
 
     all_data, train, oot = split_train_oot(data)
     _t = _log_step("1/9 数据加载与时间切分", _t)
@@ -2960,13 +3166,18 @@ def main() -> None:
         oot_final,
         strategy_plan,
     )
+    strategy_estimated_flow = build_strategy_estimated_flow_report(
+        train_final,
+        oot_final,
+        strategy_plan,
+    )
     binning_process = build_binning_process_table(train_initial_stats, merge_map)
     threshold_selection = build_threshold_selection_table(
         threshold_curve,
         strategy_plan,
         STRATEGY_CONFIG,
     )
-    _t = _log_step("6/9 阈值曲线与自动通过/人工审核/拒绝策略", _t)
+    _t = _log_step("6/9 历史实际审批漏斗与模型策略测算流量", _t)
 
     selected_candidate_rows = merge_candidates.loc[
         merge_candidates.get("selected", pd.Series(False, index=merge_candidates.index)).eq(True)
@@ -2988,6 +3199,8 @@ def main() -> None:
         performance,
         monotonicity,
         strategy_plan,
+        actual_funnel_report,
+        strategy_estimated_flow,
     )
     config_table = build_config_table(
         selected_merge_ranges,
@@ -3002,6 +3215,8 @@ def main() -> None:
         final_train_stats=final_train_stats,
         final_oot_stats=final_oot_stats,
         train_oot_compare=train_oot_compare,
+        actual_funnel_report=actual_funnel_report,
+        strategy_estimated_flow=strategy_estimated_flow,
         threshold_selection=threshold_selection,
         strategy_plan=strategy_plan,
         threshold_sensitivity=threshold_sensitivity,

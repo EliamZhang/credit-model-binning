@@ -21,6 +21,7 @@
 → 验证单调性、PSI、AUC、KS 和月度稳定性
 → 在完整 Train 上生成最终箱边界阈值曲线
 → 按风险约束选择自动通过、人工审核、拒绝阈值
+→ 计算 application_info 历史实际审批漏斗，并与模型策略测算流量对照
 → 输出 6 个 sheet 的 Excel 策略报告
 ```
 
@@ -128,6 +129,9 @@ estimate_principal_remaining_mob1
 estimate_principal_remaining_mob3
 dpd_days_ever_mob1
 dpd_days_ever_mob3
+status
+application_status
+assessment_status
 ```
 
 ### 6. 当前核心配置
@@ -331,6 +335,36 @@ cum_3m30p_amt_bad_rate
 ```
 
 其中 `m` 为成熟样本量。尾部箱样本较少时，应结合置信区间上界判断保守风险，不应只比较点估计。
+
+### 8. 历史实际审批与模型策略测算口径
+
+报告严格区分两类指标：
+
+- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重。
+- **模型策略测算流量（`strategy_estimated_*`）**：按 `score_mlt` 和 Train 确定的策略阈值测算，不代表历史真实审批结果。
+
+历史实际审批漏斗定义：
+
+| 指标 | 计算公式 | 判定条件 |
+| --- | --- | --- |
+| `actual_completion_rate` | 完成进件数 / 申请数 | `application_status` 不属于 `0.Incomplete`、`1.In Progress` |
+| `actual_approval_rate` | 审批通过数 / 完成进件数 | `application_status` 首字符为 3 或 4 |
+| `actual_auto_approval_rate` | 自动审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Auto Approved` |
+| `actual_manual_approval_rate` | 人工审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Manual Approved` |
+| `actual_auto_approval_share` | 自动审批通过数 / 全部审批通过数 | 衡量通过件中的自动审批构成 |
+| `actual_manual_approval_share` | 人工审批通过数 / 全部审批通过数 | 衡量通过件中的人工审批构成 |
+| `actual_deal_rate` | 成交数 / 全部审批通过数 | `status` 属于 `Active_Account`、`Closed`、`Blocked` |
+
+模型策略测算流量定义：
+
+```text
+strategy_estimated_auto_pass_rate   = score ≤ 自动通过阈值的申请数 / 有效模型分申请数
+strategy_estimated_manual_review_rate = 自动通过阈值 < score ≤ 总接纳阈值的申请数 / 有效模型分申请数
+strategy_estimated_total_accept_rate  = 自动通过数与人工审核数之和 / 有效模型分申请数
+strategy_estimated_reject_rate        = score > 总接纳阈值的申请数 / 有效模型分申请数
+```
+
+当前模型为高分高风险；低分高风险模型的比较方向相反。
 
 ---
 
@@ -690,7 +724,7 @@ marginal_3m30p_cnt_bad_rate
 - `marginal_*_bad_rate`：本次放宽阈值新增人群的风险。
 - 如果累计风险尚可，但边际风险快速上升，说明阈值已接近风险拐点。
 
-### 10. 生成策略方案
+### 10. 生成模型策略测算方案
 
 当前版本只生成**一套默认策略**（不再是保守/平衡/增长三套），在最终箱边界阈值曲线上，选择满足风险约束且累计通过率最高的阈值。
 
@@ -739,11 +773,23 @@ STRATEGY_CONFIG = {
 ```text
 strategy_plan（策略结果表，status=OK 表示有解）
 strategy_segments（Train / OOT 三段验证表）
+actual_funnel_report（Train / OOT / All 历史实际审批漏斗）
+strategy_estimated_flow（Train / OOT / All 模型策略测算流量）
 ```
 
 `strategy_segments` 分别计算自动通过、人工审核、拒绝三段在 Train 和 OOT 的规模及风险。
 
-#### 10.3 阈值上线规则
+#### 10.3 历史实际审批与模型策略测算对照
+
+代码按相同的 Train/OOT 时间切片分别输出：
+
+- 历史实际审批漏斗：完成率、审批通过率、自动/人工审批通过率、自动/人工审批占比和成交转化率；
+- 模型策略测算流量：自动通过率、人工审核率、总接纳率和拒绝率；
+- 全量汇总：用于核对 Train 与 OOT 加总以及两套口径的总体差异。
+
+两套口径只能并列比较，不可互相替代：历史实际指标包含当期完整业务审批流程，模型策略测算指标仅反映当前模型阈值下的理论流量。
+
+#### 10.4 阈值上线规则
 
 - 线上使用与离线一致的浮点模型分和原始边界精度，不对阈值二次取整；工程上必须限制小数位时，只允许向更严方向向下取整，并重新验证三段规模和风险。
 - 分档采用 `(left, right]`：分数等于阈值时进入右闭档；线上必须使用数值比较，不得使用格式化字符串比较。
@@ -783,7 +829,9 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 | 候选评分 | Train 主指标与全指标倒挂数、主指标 IV 保留率、候选综合得分 |
 | 模型效果 | 各样本组 × 各标签的 bad_rate / AUC / KS |
 | 单调性 | train / oot 最终箱是否全部单调 |
-| 策略 | 自动通过阈值及截止档、人工审核上限/拒绝阈值及截止档、三段占比 |
+| 历史实际审批漏斗 | Train/OOT 的完成率、审批通过率、自动/人工审批指标和成交转化率 |
+| 模型策略测算流量 | Train/OOT 的测算自动通过率、人工审核率、总接纳率和拒绝率 |
+| 模型策略阈值 | 自动通过阈值及截止档、人工审核上限/拒绝阈值及截止档 |
 | 策略风险 | 接纳人群 1M30+ / 3M30+ 笔数与金额逾期率、最后接纳档边际 3M30+ |
 
 查看方法：
@@ -874,9 +922,29 @@ cum_1m30p_cnt_bad_rate_ci_low / cum_3m30p_cnt_bad_rate_ci_high（含 _high 上�
 
 ### Sheet 4：`04_策略方案`
 
-包含四个 section：
+包含六个 section：
 
-#### 表 1：阈值选择过程
+#### 表 1：历史实际审批漏斗
+
+底层对象：
+
+```text
+actual_funnel_report
+```
+
+按 Train / OOT / All 输出 `actual_*` 数量和比率，数据来自 `application_info.csv`，所有数量按唯一 `application_id` 统计。
+
+#### 表 2：模型策略测算流量
+
+底层对象：
+
+```text
+strategy_estimated_flow
+```
+
+按 Train / OOT / All 输出 `strategy_estimated_*` 数量和比率，并列展示测算自动通过、人工审核、总接纳和拒绝流量。
+
+#### 表 3：阈值选择过程
 
 底层对象：
 
@@ -894,7 +962,7 @@ selection_reason
 
 选中行有绿色/橙色高亮，约束不满足的标记为红色。当累计风险点估计满足约束但 `_ci_high` 越过约束线时，说明该阈值恰好落在不确定区间，需结合尾部箱样本量判断是否从严选择。
 
-#### 表 2：策略结果
+#### 表 4：模型策略测算结果
 
 底层对象：
 
@@ -908,13 +976,14 @@ strategy_plan
 status（OK 或 无满足约束的阈值）
 auto_pass_threshold / auto_pass_bin
 reject_threshold / manual_review_upper_bin
-auto_pass_rate / accepted_rate / manual_review_rate / reject_rate
+strategy_estimated_auto_pass_rate / strategy_estimated_total_accept_rate
+strategy_estimated_manual_review_rate / strategy_estimated_reject_rate
 accepted_1m30p_cnt_bad_rate / accepted_3m30p_cnt_bad_rate
 accepted_1m30p_amt_bad_rate / accepted_3m30p_amt_bad_rate
 last_accepted_marginal_3m30p_cnt_bad_rate
 ```
 
-#### 表 3：阈值敏感性
+#### 表 5：模型策略测算阈值敏感性
 
 底层对象：
 
@@ -926,17 +995,19 @@ threshold_sensitivity
 
 ```text
 threshold_type（自动通过阈值 / 总接纳阈值）  scenario（当前 / 收严一档 / 放松一档）
-threshold（变体后阈值）  auto_pass_rate  manual_review_rate  reject_rate
+threshold（变体后阈值）
+strategy_estimated_auto_pass_rate / strategy_estimated_manual_review_rate
+strategy_estimated_total_accept_rate / strategy_estimated_reject_rate
 auto_1m30p_cnt_bad_rate / auto_3m30p_cnt_bad_rate（自动通过人群风险）
 accept_3m30p_cnt_bad_rate / accept_marginal_3m30p_cnt_bad_rate（接纳人群风险）
 accept_marginal_3m30p_cnt_bad_rate_ci_high（接纳边际 3M30+ 风险 95% Wilson 上界）
-auto_pass_rate_delta / manual_review_rate_delta / reject_rate_delta（与当前方案的差异）
+strategy_estimated_*_rate_delta（与当前方案的差异）
 note（无更严/更松候选、越过对方阈值按规则对齐等说明）
 ```
 
 当前方案行绿色高亮；阈值移动越过对方阈值时按“总接纳阈值不得严于自动通过阈值”规则对齐，并在 note 中说明。
 
-#### 表 4：策略分段验证
+#### 表 6：模型策略测算分段风险验证
 
 底层对象：
 
@@ -1078,7 +1149,6 @@ metric_dictionary
 
 当前脚本没有定义未使用的分析功能。历史版本中的以下内容已移除：
 
-- 审批漏斗函数（`calc_funnel_stats`）。
 - `score_apply` 和交易子模型表的读取与拼接。
 - 3/4 位小数边界取整敏感性分析。
 - 阈值敏感性全矩阵扫描（人工审核产能 × 风险上限矩阵）；当前仅输出自动通过 / 总接纳阈值收严、放松一档的敏感性表（见 Sheet 4 表 3），未做全矩阵扫描。
@@ -1086,7 +1156,7 @@ metric_dictionary
 
 > 说明：多档位候选的横向比较并未移除——当前通过“候选生成 + 候选评分”在同一流程内比较 8/7/6 档候选并选出最优方案（见 6.5 / 6.6），只是不再像历史版本那样把每个档位作为独立完整方案并列对比。
 
-当前报告本质上是对 `score_mlt` 的一套自动合箱 + 一套默认策略的完整报告。
+历史实际审批漏斗已恢复，并与 `score_mlt` 阈值下的模型策略测算流量分开输出。当前报告包含一套自动合箱、一套默认模型策略，以及历史实际审批表现对照。
 
 ---
 
@@ -1231,4 +1301,4 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 
 ## 九、一句话总结
 
-> **当前脚本在完整 Train 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度和风险倒挂自动合箱为 6~8 个风险等级（目标 7 档），并在 OOT 上进行独立验证；随后沿低风险到高风险方向计算累计与边际风险，在风险上限约束下划分自动通过、人工审核和拒绝阈值，最终输出 6 个 sheet 的 Excel 策略报告。**
+> **当前脚本在完整 Train 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度和风险倒挂自动合箱为 6~8 个风险等级（目标 7 档），并在 OOT 上进行独立验证；随后在风险约束下测算自动通过、人工审核、总接纳和拒绝流量，同时基于 `application_info` 计算历史实际审批漏斗，最终将两套口径分开输出到 6 个 sheet 的 Excel 策略报告。**
