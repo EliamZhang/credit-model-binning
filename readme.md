@@ -2,7 +2,7 @@
 
 > 本文档与当前 `binning.py` 的实际执行逻辑对应，按脚本运行顺序说明数据准备、模型分箱、分箱评估、阈值搜索、策略划分和结果表解读。
 >
-> 当前脚本的核心目标是：以 `score_mlt` 为主模型分，在 Development 样本上建立稳定风险等级，并划分自动通过、人工审核和拒绝阈值，最终生成 `out/binning_strategy_report_YYYYMMDD.xlsx`。
+> 当前脚本的核心目标是：以 `score_mlt` 为主模型分，在完整 Train 上建立稳定风险等级，并划分自动通过、人工审核和拒绝阈值，最终生成 `out/binning_strategy_report_YYYYMMDD.xlsx`。
 
 ---
 
@@ -14,11 +14,10 @@
 加载 3 张 CSV
 → 清理字段名并拼接分析宽表
 → 检查关键字段，按月份切分 Train / OOT
-→ 在 Train 内切出最后 3 个月作为合箱 Validation，其余为 Development
-→ 在 Development 上对 score_mlt 做 20 等频初分，边界复用到所有样本
+→ 在完整 Train 上对 score_mlt 做 20 等频初分，边界复用到 OOT
 → 计算每箱规模、1M30+、3M30+、金额风险、Lift 和累计指标
 → 自动合箱：小箱清理 → 单调合并 → 档位压缩 → 生成 6~8 档候选方案并评分
-→ 将最终合箱映射应用到 Development / Validation / Train / OOT
+→ 将最终合箱映射应用到 Train / OOT
 → 验证单调性、PSI、AUC、KS 和月度稳定性
 → 在完整 Train 上生成最终箱边界阈值曲线
 → 按风险约束选择自动通过、人工审核、拒绝阈值
@@ -131,9 +130,6 @@ dpd_days_ever_mob3
 DATA_DIR = Path("res")
 TRAIN_END_MONTH = "2025-10"
 OOT_START_MONTH = "2025-11"
-VALIDATION_MONTH_COUNT = 3
-MIN_DEVELOPMENT_MONTH_COUNT = 3
-FALLBACK_DEVELOPMENT_SAMPLE_PCT = 0.80
 HIGH_SCORE_HIGH_RISK = True
 SCORE_COL = "score_mlt"
 INITIAL_BIN_COUNT = 20
@@ -147,7 +143,7 @@ TARGET_FINAL_BIN_COUNT = 7
 - `application_month <= 2025-10`：进入 `train`。
 - `application_month >= 2025-11`：进入 `oot`。
 - 时间不在上述范围的样本不进入 Train / OOT，不参与任何分析。
-- Train 内最后 3 个月作为合箱 Validation，其余为 Development；OOT 完全独立，不参与任何合箱调参。
+- 完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 完全独立，不参与调参。
 - 初始等频分 20 箱，自动合箱到 6~8 档（目标 7 档）。
 - `application_month` 必须使用可按字符串正确比较的 `YYYY-MM` 格式。
 
@@ -377,21 +373,7 @@ sample_group 列
 - OOT 是否有足够样本和成熟标签。
 - OOT 只用于最终验证，不能参与任何合箱方案选择。
 
-### 4. 切分 Development / Validation
-
-在 Train 内再切两段：
-
-- 优先取最后 `VALIDATION_MONTH_COUNT`（默认 3）个完整月份作为 Validation。
-- 如果 Train 月份数不足 `MIN_DEVELOPMENT_MONTH_COUNT + 1`（默认 4），则按 `application_time` 顺序切出最后 20% 作为 Validation。
-- 合箱只在 Development + Validation 上完成；OOT 全程不参与。
-
-主要结果：
-
-```text
-development / validation / validation_months
-```
-
-### 5. 在 Development 上做 20 等频初分
+### 4. 在 Train 上做 20 等频初分
 
 主模型字段：
 
@@ -407,12 +389,12 @@ score_mlt_bin20
 
 处理逻辑：
 
-1. 使用 `pd.qcut` 在 Development 上按分位数切 20 箱。
+1. 使用 `pd.qcut` 在完整 Train 上按分位数切 20 箱。
 2. 相同分数过多时使用 `duplicates='drop'`，实际箱数可能少于 20；少于 `MIN_FINAL_BIN_COUNT`（6）时直接报错。
 3. 最左边界改为 `-inf`，最右边界改为 `inf`。
 4. 区间规则为 `(left, right]`。
 5. 初始箱编号为 `B01`、`B02`……。
-6. 将 Development 学到的边界原样应用到 Validation、完整 Train、OOT 和全量数据。
+6. 将 Train 学到的边界原样应用到 OOT 和全量数据。
 
 主要结果：
 
@@ -421,26 +403,25 @@ score_mlt_bin_edges（edges 数组）
 score_mlt_bin20（分箱标签）
 ```
 
-### 6. 计算初始箱指标
+### 5. 计算初始箱指标
 
-在 Development 和 Validation 上分别计算 20 箱的完整统计（无样本的箱也保留，防止候选范围错位）。
+在 Train 上计算 20 箱的完整统计（无样本的箱也保留，防止候选范围错位）。
 
 主要结果：
 
 ```text
-development_initial_stats
-validation_initial_stats
+train_initial_stats
 ```
 
 指标包括：每箱规模、1M30+ / 3M30+ 笔数与金额指标、Lift、累计指标等。
 
-### 7. 自动合箱到最终风险等级
+### 6. 自动合箱到最终风险等级
 
-这是当前版本的核心变化：**不再使用固定合箱方案，而是自动搜索并评分选出 6~8 档方案**（默认目标 7 档）。合箱只在 Development + Validation 上进行。
+这是当前版本的核心变化：**不再使用固定合箱方案，而是基于完整 Train 自动搜索并评分选出 6~8 档方案**（默认目标 7 档）。OOT 不参与合箱或候选选择。
 
-#### 7.1 单箱硬约束
+#### 6.1 单箱硬约束
 
-每个最终箱都必须满足（Development 上检查）：
+每个最终箱都必须满足（Train 上检查）：
 
 | 约束 | 默认值 | 说明 |
 | --- | ---: | --- |
@@ -449,7 +430,7 @@ validation_initial_stats
 | 主指标坏样本量 | >= 20 | `3m30p_cnt_bad` |
 | 主指标好样本量 | >= 200 | `3m30p_cnt_good` |
 
-最好/最坏两个极端初始箱（默认各圈选 1 个，见 7.4）使用放宽约束（`bin_constraint_minimums`）：
+最好/最坏两个极端初始箱（默认各圈选 1 个，见 6.4）使用放宽约束（`bin_constraint_minimums`）：
 
 | 极端箱约束 | 默认值 | 说明 |
 | --- | ---: | --- |
@@ -459,13 +440,13 @@ validation_initial_stats
 | 最坏箱坏样本量 | >= 20 | 与普通箱一致 |
 | 最坏箱好样本量 | >= 0 | 高风险端天然好样本少，不设下限 |
 
-#### 7.2 单调性要求
+#### 6.2 单调性要求
 
-- Development 上主指标（1M30+、3M30+ 笔数逾期率）不允许相邻倒挂。
-- Validation 上允许不超过 0.3 个百分点的容忍倒挂。
-- 候选评分同时监控四个风险率（含金额口径）的 Validation 倒挂数。
+- Train 上主指标（1M30+、3M30+ 笔数逾期率）不允许相邻倒挂。
+- 候选评分同时监控 Train 上四个风险率（含金额口径）的倒挂数。
+- 月度稳定性检查允许 0.3 个百分点的容忍倒挂。
 
-#### 7.3 合并代价
+#### 6.3 合并代价
 
 合并某对相邻箱时计算综合代价：
 
@@ -479,7 +460,7 @@ merge_cost = 风险率差距 × MERGE_COST_RATE_GAP_WEIGHT（默认 100）
 
 风险越接近、差异越不显著、IV 损失越小，越优先合并；跨越策略保护边界或极端圈选边界会显著抬高代价。
 
-#### 7.4 保护边界
+#### 6.4 保护边界
 
 合箱中有两类边界需要保护，机制不同：
 
@@ -491,9 +472,9 @@ merge_cost = 风险率差距 × MERGE_COST_RATE_GAP_WEIGHT（默认 100）
 2. **极端圈选边界**（默认 `PROTECT_EXTREME_INITIAL_BINS=True`，从低风险端圈选 1 个最好初始箱、从高风险端圈选 1 个最坏初始箱，两处切点即极端边界）：
    - 默认**硬禁止跨越**：`ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS=False` 时，极端边界不进入任何合箱候选，四个合箱阶段都不会跨过它，保证最好箱不被高风险相邻箱稀释、最坏箱不被低风险相邻箱稀释。
    - 若改为 `True`：允许跨越，但按 `EXTREME_BOUNDARY_PENALTY=10000` 计入合并代价，且候选评分按 `EXTREME_BOUNDARY_VIOLATION_PENALTY=50` 每次扣分。
-   - 硬约束要求极端边界跨越数为 0（见 7.6）。
+   - 硬约束要求极端边界跨越数为 0（见 6.6）。
 
-#### 7.5 合并顺序
+#### 6.5 合并顺序
 
 ```text
 第 1 步 小箱清理：样本占比、成熟量或好坏样本量不足的箱优先合并
@@ -504,35 +485,32 @@ merge_cost = 风险率差距 × MERGE_COST_RATE_GAP_WEIGHT（默认 100）
 
 每一步产生一个候选方案并记录合并原因；初始 20 箱也作为一个候选。
 
-#### 7.6 候选方案评分
+#### 6.6 候选方案评分
 
 每个候选方案计算综合得分：
 
 ```text
 candidate_score
 = +100 × 硬约束全部满足
-- 30 × Development 主指标倒挂数
-- 12 × Validation 主指标倒挂数
-- 4  × Validation 全指标倒挂数
+- 30 × Train 主指标倒挂数
+- 4  × Train 全指标倒挂数
 - 15 × 单箱约束违反数
-- 150 × max(0, Validation PSI - 0.05)
 + 12 × min(主指标 IV 保留率, 1.5)
 + 100 × max(0, 最小相邻风险差距)
 - 1.5 × |档位数 - 7|
 - 50 × 极端边界跨越数
 ```
 
-各权重由 `CANDIDATE_SCORE_WEIGHTS` 统一配置（键名同上，值会输出到 `06_附录`）。**硬约束** = 档位数在 6~8 之间 + Development 主指标倒挂为 0 + 单箱约束全部满足 + 极端边界跨越数为 0。
+各权重由 `CANDIDATE_SCORE_WEIGHTS` 统一配置（键名同上，值会输出到 `06_附录`）。**硬约束** = 档位数在 6~8 之间 + Train 主指标倒挂为 0 + 单箱约束全部满足 + 极端边界跨越数为 0。
 
 排序优先级（依次）：
 
 ```text
-硬约束通过 → Development 倒挂数 → 约束违反数 → Validation 倒挂数
-→ Validation PSI 可接受 → Validation PSI 偏好 → candidate_score
-→ IV 保留率 → 档位距离
+硬约束通过 → Train 主指标倒挂数 → 约束违反数 → Train 全指标倒挂数
+→ candidate_score → IV 保留率 → 档位距离
 ```
 
-#### 7.7 最终选定
+#### 6.7 最终选定
 
 按上述排序取第一名的合箱范围作为最终方案。若没有任何候选通过全部硬约束，则退而求其次：忽略硬约束筛选，直接从全部候选中按同样排序取第一名（此时 `hard_constraints_ok` 为 False，需在候选评分表中确认原因）。运行日志会打印实际档位数和方案，例如：
 
@@ -549,19 +527,19 @@ protected_boundaries（受保护边界集合）
 score_mlt_final_bin（最终风险等级，A、B、C……按风险从低到高编号）
 ```
 
-### 8. 将最终合箱映射应用到所有样本
+### 7. 将最终合箱映射应用到所有样本
 
 ```text
-development_final / validation_final / train_final / oot_final / all_final
+train_final / oot_final / all_final
 ```
 
-并生成 Development / Validation / Train / OOT 四个切片的最终箱统计（`bin_stats_final_*`）。
+并生成 Train / OOT 两个数据集的最终箱统计。
 
-### 9. 最终验证
+### 8. 最终验证
 
-#### 9.1 单调性检查
+#### 8.1 单调性检查
 
-对四个切片分别检查四类风险率是否随风险等级非递减：
+对 Train / OOT 分别检查四类风险率是否随风险等级非递减：
 
 ```text
 1m30p_cnt_bad_rate
@@ -570,9 +548,9 @@ development_final / validation_final / train_final / oot_final / all_final
 3m30p_amt_bad_rate
 ```
 
-输出每个切片的单调性结论、倒挂次数和倒挂位置。
+输出每个数据集的单调性结论、倒挂次数和倒挂位置。
 
-#### 9.2 PSI
+#### 8.2 PSI
 
 比较 Train 和 OOT 在最终风险等级上的分布差异。
 
@@ -593,9 +571,9 @@ PSI < 0.10：分布较稳定
 PSI >= 0.25：分布变化较明显
 ```
 
-上述区间是常用经验值，当前代码只计算 PSI，不自动按该区间给出结论。合箱选型中使用的两个阈值是：`PREFERRED_MAX_VALIDATION_PSI = 0.05`（偏好）、`MAX_ACCEPTABLE_VALIDATION_PSI = 0.10`（可接受）。
+上述区间是常用经验值，当前代码计算 Train/OOT PSI，但不将其用于合箱候选选择，以保持 OOT 的独立性。
 
-#### 9.3 AUC 和 KS
+#### 8.3 AUC 和 KS
 
 代码分别对 `duedate_1m_30` 和 `duedate_3m_30`，按 Train / OOT 计算：
 
@@ -610,7 +588,7 @@ ks
 
 AUC 和 KS 直接按秩和与累计好坏分布计算，不依赖 sklearn。
 
-#### 9.4 月度稳定性
+#### 8.4 月度稳定性
 
 按月输出每个最终箱的样本量、成熟量、主指标风险率和相邻倒挂标记（`primary_inversion_flag`），并汇总每个月：
 
@@ -624,7 +602,7 @@ n
 主指标单调性是否 OK
 ```
 
-### 10. 构造阈值曲线
+### 9. 构造阈值曲线
 
 阈值曲线只用**最终箱右边界**作为候选阈值；最后一个箱的右边界是 `inf`，代码使用 Train 中最大实际分数替代，以保留“全量通过”点。
 
@@ -659,11 +637,11 @@ marginal_3m30p_cnt_bad_rate
 - `marginal_*_bad_rate`：本次放宽阈值新增人群的风险。
 - 如果累计风险尚可，但边际风险快速上升，说明阈值已接近风险拐点。
 
-### 11. 生成策略方案
+### 10. 生成策略方案
 
 当前版本只生成**一套默认策略**（不再是保守/平衡/增长三套），在最终箱边界阈值曲线上，选择满足风险约束且累计通过率最高的阈值。
 
-#### 11.1 当前约束配置
+#### 10.1 当前约束配置
 
 ```python
 STRATEGY_CONFIG = {
@@ -687,7 +665,7 @@ STRATEGY_CONFIG = {
 | 自动通过 | 0.90% | 5.50% | 9.00% |
 | 总接纳 | 1.30% | 7.50% | 17.00% |
 
-#### 11.2 阈值选择规则
+#### 10.2 阈值选择规则
 
 1. **自动通过阈值**：满足自动通过约束的最大阈值。
 2. **总接纳阈值**：满足接纳约束的最大阈值。
@@ -710,7 +688,7 @@ strategy_segments（Train / OOT 三段验证表）
 
 `strategy_segments` 分别计算自动通过、人工审核、拒绝三段在 Train 和 OOT 的规模及风险。
 
-### 12. 生成 Excel 报告
+### 11. 生成 Excel 报告
 
 最后使用 `openpyxl` 创建：
 
@@ -737,12 +715,12 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 | 模块 | 主要内容 |
 | --- | --- |
 | 样本 | 原始样本量、有效模型分样本量、模型分缺失量/率 |
-| 时间切分 | Train 截止月份、Validation 月份、OOT 起始月份 |
+| 时间切分 | Train 截止月份、OOT 起始月份 |
 | 分箱 | 初始箱数量、最终箱数量、合箱主指标、最终采用合箱方案、受保护初始边界 |
 | 稳定性 | 最终箱 Train/OOT PSI |
-| 候选评分 | Development/Validation 主指标倒挂数、两者 PSI、主指标 IV 保留率、候选综合得分 |
+| 候选评分 | Train 主指标与全指标倒挂数、主指标 IV 保留率、候选综合得分 |
 | 模型效果 | 各样本组 × 各标签的 bad_rate / AUC / KS |
-| 单调性 | development / validation / train / oot 最终箱是否全部单调 |
+| 单调性 | train / oot 最终箱是否全部单调 |
 | 策略 | 自动通过阈值及截止档、人工审核上限/拒绝阈值及截止档、三段占比 |
 | 策略风险 | 接纳人群 1M30+ / 3M30+ 笔数与金额逾期率、最后接纳档边际 3M30+ |
 
@@ -792,7 +770,7 @@ final_bin_order / score_mlt_final_bin / merged_from / merge_action
 merge_candidates
 ```
 
-每个候选方案一行，`selected=True` 的行即为最终方案。字段包括档位数、合箱范围、各阶段合并原因、Development/Validation 倒挂数、单箱约束违反数、Validation PSI、IV 保留率和 `candidate_score`。
+每个候选方案一行，`selected=True` 的行即为最终方案。字段包括档位数、合箱范围、各阶段合并原因、Train 主指标与全指标倒挂数、单箱约束违反数、IV 保留率和 `candidate_score`。
 
 查看方法：
 
@@ -814,10 +792,10 @@ merge_steps
 底层对象：
 
 ```text
-final_development_stats / final_validation_stats / final_train_stats / final_oot_stats
+final_train_stats / final_oot_stats
 ```
 
-四个切片的最终箱统计合并为一张表，用 `sample_group` 列区分 Development / Validation / Train / OOT。字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等），并在 1M30+ / 3M30+ 笔数逾期率及累计口径旁附带 95% Wilson 置信区间：
+Train / OOT 的最终箱统计合并为一张表，用 `sample_group` 列区分。字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等），并在 1M30+ / 3M30+ 笔数逾期率及累计口径旁附带 95% Wilson 置信区间：
 
 ```text
 1m30p_cnt_bad_rate_ci_low / 1m30p_cnt_bad_rate_ci_high
@@ -828,7 +806,7 @@ cum_1m30p_cnt_bad_rate_ci_low / cum_3m30p_cnt_bad_rate_ci_high（含 _high 上�
 查看方法：
 
 - 从 `bin_order=1` 向下看风险是否逐步升高。
-- 同一风险等级在四个切片中的风险方向是否一致。
+- 同一风险等级在 Train / OOT 中的风险方向是否一致。
 - OOT 单箱成熟量很小时，不要过度解释短期波动。
 - 尾部箱样本量小、置信区间宽，应结合 `*_cnt_bad_rate_ci_high`（保守风险上界）解读风险率，不能只看点估计。
 
@@ -954,7 +932,7 @@ psi
 monotonicity
 ```
 
-四个切片 × 四类风险率的 `is_monotonic_non_decreasing`、`violation_cnt`、`violation_bins`。
+Train / OOT × 四类风险率的 `is_monotonic_non_decreasing`、`violation_cnt`、`violation_bins`。
 
 #### 表 5：月度稳定性汇总
 
@@ -989,11 +967,10 @@ config_table
 输出便于修改和版本管理的参数表，包括：
 
 ```text
-基础配置：DATA_DIR / TRAIN_END_MONTH / OOT_START_MONTH / VALIDATION_MONTH_COUNT
-        / FALLBACK_DEVELOPMENT_SAMPLE_PCT / ACTUAL_VALIDATION_MONTHS
+基础配置：DATA_DIR / TRAIN_END_MONTH / OOT_START_MONTH
         / INITIAL_BIN_COUNT / HIGH_SCORE_HIGH_RISK
 合箱配置：MIN/MAX/TARGET_FINAL_BIN_COUNT / PRIMARY_RATE_COL / 单箱约束
-        / 单调与相邻差异控制 / Validation PSI 阈值
+        / 单调与相邻差异控制
         / PROTECTED_BOUNDARIES / SELECTED_FINAL_BIN_RANGES
 极端箱配置：PROTECT_EXTREME_INITIAL_BINS / BEST/WORST_EXTREME_INITIAL_BIN_COUNT
         / ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS / EXTREME_BOUNDARIES
@@ -1045,7 +1022,7 @@ metric_dictionary
 - 阈值敏感性全矩阵扫描（人工审核产能 × 风险上限矩阵）；当前仅输出自动通过 / 总接纳阈值收严、放松一档的敏感性表（见 Sheet 4 表 3），未做全矩阵扫描。
 - 三套策略方案（保守/平衡/增长）对比。
 
-> 说明：多档位候选的横向比较并未移除——当前通过“候选生成 + 候选评分”在同一流程内比较 8/7/6 档候选并选出最优方案（见 7.5 / 7.6），只是不再像历史版本那样把每个档位作为独立完整方案并列对比。
+> 说明：多档位候选的横向比较并未移除——当前通过“候选生成 + 候选评分”在同一流程内比较 8/7/6 档候选并选出最优方案（见 6.5 / 6.6），只是不再像历史版本那样把每个档位作为独立完整方案并列对比。
 
 当前报告本质上是对 `score_mlt` 的一套自动合箱 + 一套默认策略的完整报告。
 
@@ -1076,7 +1053,7 @@ principal 和剩余本金字段覆盖率
 ```python
 TRAIN_END_MONTH
 OOT_START_MONTH
-VALIDATION_MONTH_COUNT
+TRAIN_INVERSION_TOLERANCE
 HIGH_SCORE_HIGH_RISK
 SCORE_COL
 INITIAL_BIN_COUNT
@@ -1096,7 +1073,7 @@ python binning.py
 重点确认：
 
 - 3 张表是否成功加载，模型分缺失量是否合理。
-- Train / Development / Validation / OOT 样本量。
+- Train / OOT 样本量。
 - 实际初始箱数量（日志 `2/9`）。
 - 自动合箱结果（日志 `3/9`，档位数和方案）。
 - 是否出现“无满足约束的阈值”或报错。
@@ -1105,7 +1082,7 @@ python binning.py
 
 1. `01_总览`：看最终合箱方案、PSI、单调性、AUC/KS 和三段规则。
 2. `02_分箱详情`：理解 20 箱如何合并为最终档。
-3. `03_最终分箱统计`：确认四个切片的最终箱风险梯度。
+3. `03_最终分箱统计`：确认 Train / OOT 的最终箱风险梯度。
 4. `04_策略方案`：确认阈值选择过程和三段占比。
 5. `05_模型验证`：确认 OOT、PSI、月度稳定性。
 6. `06_附录`：核对配置参数与指标口径。
@@ -1117,7 +1094,7 @@ python binning.py
 ```text
 模型版本
 模型分方向
-Train / Validation / OOT 时间范围
+Train / OOT 时间范围
 风险标签定义
 成熟样本定义
 最终箱边界
@@ -1134,7 +1111,7 @@ Train / Validation / OOT 时间范围
 
 ### 1. 自动合箱结果随数据变化
 
-当前版本不再使用固定合箱方案，最终档位（6~8 档）和合箱范围由 Development + Validation 的数据自动决定。更换数据或时间范围后：
+当前版本不再使用固定合箱方案，最终档位（6~8 档）和合箱范围由完整 Train 自动决定。更换数据或时间范围后：
 
 - 最终方案可能变化，需要重新评审而不是直接沿用历史边界。
 - 阈值曲线的候选阈值来自最终箱右边界，因此合箱变化会直接改变策略阈值。
@@ -1192,4 +1169,4 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 
 ## 九、一句话总结
 
-> **当前脚本在 Development 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度、风险倒挂和跨期稳定性自动合箱为 6~8 个风险等级（目标 7 档），在 Validation 上验证、OOT 上确认；随后沿低风险到高风险方向计算累计与边际风险，并在风险上限约束下划分自动通过、人工审核和拒绝阈值，最终输出 6 个 sheet 的 Excel 策略报告。**
+> **当前脚本在完整 Train 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度和风险倒挂自动合箱为 6~8 个风险等级（目标 7 档），并在 OOT 上进行独立验证；随后沿低风险到高风险方向计算累计与边际风险，在风险上限约束下划分自动通过、人工审核和拒绝阈值，最终输出 6 个 sheet 的 Excel 策略报告。**

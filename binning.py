@@ -6,14 +6,12 @@
 核心流程（对应日志中 1/9 ~ 9/9）：
 1. 从 res/ 读取 sample.csv + application_info.csv + 模型分文件，融合为宽表；按时间窗口 2025-10
    / 2025-11 切分 Train（≤2025-10）与 OOT（≥2025-11）；
-2. Train 内最后 3 个月作为合箱 Validation，其余为 Development（≥3 个月）；OOT 全程不参与
-   合箱调参，仅用于最终验证；
-3. Development 上按 score_mlt 做 20 等频分箱，生成初始边界；边界复用到 Validation、完整
-   Train、OOT，得到统一的 score_mlt_bin20 分箱标签；
-4. 从 Development 初始箱出发，自动执行：小箱清理 → 同时监控 1M30+ 与 3M30+ 笔数逾期率
+2. 完整 Train 用于学习分箱边界、执行合箱和选择候选方案；OOT 全程不参与调参，仅用于最终验证；
+3. Train 上按 score_mlt 做 20 等频分箱，生成初始边界；边界复用到 OOT，得到统一的
+   score_mlt_bin20 分箱标签；
+4. 从 Train 初始箱出发，自动执行：约束修正 → 同时监控 1M30+ 与 3M30+ 笔数逾期率
    做相邻单调合并 → 策略关键边界保护 → 评分候选方案，输出 6~8 档最终方案；同时保留手工兜底；
-5. 将最终合箱映射应用到 Development / Validation / Train / OOT，生成各切片的最终箱统计
-   （样本量、主/辅风险指标、PSI 基准等）；
+5. 将最终合箱映射应用到 Train / OOT，生成统一口径的最终箱统计；
 6. OOT 上验证最终方案：单调性、PSI（训练/OOT 总体及分月）、AUC、KS 和分段对比；输出
    月度稳定性矩阵；
 7. 基于完整 Train 的最终箱统计，构建阈值曲线（累计/边际逾期率），在自动通过/人工审核/
@@ -61,11 +59,6 @@ SCORE_COL = "score_mlt"
 TRAIN_END_MONTH = "2025-10"
 OOT_START_MONTH = "2025-11"
 
-# Train 内最后若干个月作为合箱 Validation；OOT 保持完全独立。
-VALIDATION_MONTH_COUNT = 3
-MIN_DEVELOPMENT_MONTH_COUNT = 3
-FALLBACK_DEVELOPMENT_SAMPLE_PCT = 0.80
-
 INITIAL_BIN_COUNT = 20
 INITIAL_BIN_COL = "score_mlt_bin20"
 FINAL_BIN_COL = "score_mlt_final_bin"
@@ -98,14 +91,10 @@ MIN_WORST_EXTREME_BIN_BAD_COUNT = 20
 MIN_WORST_EXTREME_BIN_GOOD_COUNT = 0
 
 # 单调与相邻差异控制。
-DEVELOPMENT_INVERSION_TOLERANCE = 0.0
-VALIDATION_INVERSION_TOLERANCE = 0.003
+TRAIN_INVERSION_TOLERANCE = 0.0
+MONTHLY_INVERSION_TOLERANCE = 0.003
 ADJACENT_PVALUE_TO_MERGE = 0.10
 MIN_ADJACENT_ABS_RATE_DIFF = 0.003
-
-# Development / Validation 分布稳定性，仅用于候选方案选择；OOT 不参与选箱。
-PREFERRED_MAX_VALIDATION_PSI = 0.05
-MAX_ACCEPTABLE_VALIDATION_PSI = 0.10
 
 # 策略关键边界保护。强制处理小箱或倒挂时仍允许跨越保护边界。
 PROTECT_LARGEST_RISK_JUMPS = 1
@@ -126,11 +115,9 @@ MERGE_COST_IV_LOSS_WEIGHT = 10.0
 IV_RETENTION_SCORE_CAP = 1.5
 CANDIDATE_SCORE_WEIGHTS = {
     "hard_constraints_ok": 100.0,
-    "development_primary_inversion": -30.0,
-    "validation_primary_inversion": -12.0,
-    "validation_all_inversion": -4.0,
+    "train_primary_inversion": -30.0,
+    "train_all_inversion": -4.0,
     "constraint_violation": -15.0,
-    "validation_psi_excess": -150.0,
     "iv_retention": 12.0,
     "min_adjacent_rate_diff": 100.0,
     "target_bin_distance": -1.5,
@@ -380,57 +367,6 @@ def split_train_oot(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.
 
     print(f"样本切分完成：Train {len(train):,} 行，OOT {len(oot):,} 行")
     return result, train, oot
-
-
-def split_development_validation(
-    train: pd.DataFrame,
-) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
-    """
-    在 Train 内按月份切分 Development / Validation。
-
-    优先使用最后 VALIDATION_MONTH_COUNT 个完整月份作为 Validation；
-    如果月份数量不足，则按 application_time 的时间顺序切出最后 20%。
-    OOT 不参与任何合箱方案选择。
-    """
-    work = train.copy()
-    available_months = sorted(
-        work["application_month"].dropna().astype(str).unique().tolist()
-    )
-
-    max_validation_months = max(
-        1,
-        len(available_months) - MIN_DEVELOPMENT_MONTH_COUNT,
-    )
-    validation_month_count = min(VALIDATION_MONTH_COUNT, max_validation_months)
-
-    if len(available_months) >= MIN_DEVELOPMENT_MONTH_COUNT + 1:
-        validation_months = available_months[-validation_month_count:]
-        validation_mask = work["application_month"].astype(str).isin(validation_months)
-        development = work.loc[~validation_mask].copy()
-        validation = work.loc[validation_mask].copy()
-    else:
-        ordered = work.sort_values(["application_time", "application_id"]).copy()
-        split_at = max(1, int(len(ordered) * FALLBACK_DEVELOPMENT_SAMPLE_PCT))
-        split_at = min(split_at, len(ordered) - 1)
-        development = ordered.iloc[:split_at].copy()
-        validation = ordered.iloc[split_at:].copy()
-        validation_months = sorted(
-            validation["application_month"].dropna().astype(str).unique().tolist()
-        )
-
-    if development.empty or validation.empty:
-        raise ValueError(
-            "Development 或 Validation 为空，请检查 Train 时间范围和 VALIDATION_MONTH_COUNT"
-        )
-
-    development["merge_sample_group"] = "development"
-    validation["merge_sample_group"] = "validation"
-
-    print(
-        f"Train 内部切分完成：Development {len(development):,} 行，"
-        f"Validation {len(validation):,} 行；Validation 月份={validation_months}"
-    )
-    return development, validation, validation_months
 
 
 # ============================================================
@@ -1296,14 +1232,13 @@ def primary_inversion_pair_indices(stats: pd.DataFrame) -> List[int]:
     violation_rows: Set[int] = set()
     for rate_col in PRIMARY_RATE_COLS:
         diff = oriented_rate(ordered[rate_col]).diff()
-        rows = ordered.index[diff.lt(-DEVELOPMENT_INVERSION_TOLERANCE).fillna(False)]
+        rows = ordered.index[diff.lt(-TRAIN_INVERSION_TOLERANCE).fillna(False)]
         violation_rows.update(int(r - 1) for r in rows if r > 0)
     return sorted(violation_rows)
 
 
 def evaluate_merge_candidate(
-    development_initial_stats: pd.DataFrame,
-    validation_initial_stats: pd.DataFrame,
+    train_initial_stats: pd.DataFrame,
     ranges: Sequence[Tuple[int, int]],
     initial_iv: float,
     extreme_boundaries: Set[int],
@@ -1312,54 +1247,37 @@ def evaluate_merge_candidate(
     merge_reason: str,
 ) -> Dict[str, object]:
     """计算一个候选合箱方案的完整评分指标。"""
-    development_stats = aggregate_initial_stats_by_ranges(development_initial_stats, ranges)
-    validation_stats = aggregate_initial_stats_by_ranges(validation_initial_stats, ranges)
+    train_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
 
     rate_cols = ALL_RISK_RATE_COLS
-    development_primary_inversions = count_rate_inversions(
-        development_stats,
+    train_primary_inversions = count_rate_inversions(
+        train_stats,
         PRIMARY_RATE_COLS,
-        tolerance=DEVELOPMENT_INVERSION_TOLERANCE,
+        tolerance=TRAIN_INVERSION_TOLERANCE,
     )
-    validation_primary_inversions = count_rate_inversions(
-        validation_stats,
-        PRIMARY_RATE_COLS,
-        tolerance=VALIDATION_INVERSION_TOLERANCE,
-    )
-    validation_all_inversions = count_rate_inversions(
-        validation_stats,
+    train_all_inversions = count_rate_inversions(
+        train_stats,
         rate_cols,
-        tolerance=VALIDATION_INVERSION_TOLERANCE,
+        tolerance=TRAIN_INVERSION_TOLERANCE,
     )
 
-    constraint_details = calc_bin_constraint_details(development_stats)
+    constraint_details = calc_bin_constraint_details(train_stats)
     constraint_violation_count = int((~constraint_details["all_constraints_ok"]).sum())
 
-    validation_psi = calc_psi_from_bin_stats(development_stats, validation_stats)
-    final_iv = calc_iv_from_stats(development_stats)
+    final_iv = calc_iv_from_stats(train_stats)
     iv_retention = safe_div(final_iv, initial_iv)
 
-    adjacent_diffs = oriented_rate(development_stats[PRIMARY_RATE_COL]).diff().dropna()
+    adjacent_diffs = oriented_rate(train_stats[PRIMARY_RATE_COL]).diff().dropna()
     min_adjacent_rate_diff: float = (
         float(adjacent_diffs.min()) if not adjacent_diffs.empty else np.nan
     )
     # 双主指标：取两个指标中更小的相邻差异，确保任一指标区分度不足时都被识别。
     for rate_col in PRIMARY_RATE_COLS:
-        diffs = oriented_rate(development_stats[rate_col]).diff().dropna()
+        diffs = oriented_rate(train_stats[rate_col]).diff().dropna()
         if not diffs.empty:
             col_min = float(diffs.min())
             if pd.isna(min_adjacent_rate_diff) or col_min < min_adjacent_rate_diff:
                 min_adjacent_rate_diff = col_min
-
-    compare = development_stats[["final_bin_order", PRIMARY_RATE_COL]].merge(
-        validation_stats[["final_bin_order", PRIMARY_RATE_COL]],
-        on="final_bin_order",
-        suffixes=("_development", "_validation"),
-    ).dropna()
-    rank_correlation = calc_spearman_corr(
-        compare[f"{PRIMARY_RATE_COL}_development"],
-        compare[f"{PRIMARY_RATE_COL}_validation"],
-    )
 
     final_bin_count = len(ranges)
     eligible_bin_count = MIN_FINAL_BIN_COUNT <= final_bin_count <= MAX_FINAL_BIN_COUNT
@@ -1367,12 +1285,11 @@ def evaluate_merge_candidate(
     hard_constraints_ok = all(
         [
             eligible_bin_count,
-            development_primary_inversions == 0,
+            train_primary_inversions == 0,
             constraint_violation_count == 0,
             extreme_boundary_violation_count == 0,
         ]
     )
-    validation_psi_ok = validation_psi <= MAX_ACCEPTABLE_VALIDATION_PSI
 
     iv_value = (
         0.0
@@ -1384,11 +1301,9 @@ def evaluate_merge_candidate(
 
     candidate_score = (
         weights["hard_constraints_ok"] * int(hard_constraints_ok)
-        + weights["development_primary_inversion"] * development_primary_inversions
-        + weights["validation_primary_inversion"] * validation_primary_inversions
-        + weights["validation_all_inversion"] * validation_all_inversions
+        + weights["train_primary_inversion"] * train_primary_inversions
+        + weights["train_all_inversion"] * train_all_inversions
         + weights["constraint_violation"] * constraint_violation_count
-        + weights["validation_psi_excess"] * max(0.0, validation_psi - PREFERRED_MAX_VALIDATION_PSI)
         + weights["iv_retention"] * iv_value
         + weights["min_adjacent_rate_diff"] * min_sep_value
         + weights["target_bin_distance"] * abs(final_bin_count - TARGET_FINAL_BIN_COUNT)
@@ -1404,18 +1319,14 @@ def evaluate_merge_candidate(
         "eligible_bin_count": eligible_bin_count,
         "final_bin_count": final_bin_count,
         "ranges": format_merge_ranges(ranges),
-        "development_primary_inversion_cnt": development_primary_inversions,
-        "validation_primary_inversion_cnt": validation_primary_inversions,
-        "validation_all_inversion_cnt": validation_all_inversions,
+        "train_primary_inversion_cnt": train_primary_inversions,
+        "train_all_inversion_cnt": train_all_inversions,
         "constraint_violation_count": constraint_violation_count,
         "extreme_boundary_violation_count": extreme_boundary_violation_count,
-        "min_development_sample_pct": float(development_stats["sample_pct"].min()),
-        "min_development_mature_count": float(development_stats[PRIMARY_MATURE_COL].min()),
-        "min_development_bad_count": float(development_stats[PRIMARY_BAD_COL].min()),
-        "min_development_good_count": float(development_stats[PRIMARY_GOOD_COL].min()),
-        "validation_psi": validation_psi,
-        "preferred_validation_psi_ok": validation_psi <= PREFERRED_MAX_VALIDATION_PSI,
-        "validation_psi_acceptable_ok": validation_psi_ok,
+        "min_train_sample_pct": float(train_stats["sample_pct"].min()),
+        "min_train_mature_count": float(train_stats[PRIMARY_MATURE_COL].min()),
+        "min_train_bad_count": float(train_stats[PRIMARY_BAD_COL].min()),
+        "min_train_good_count": float(train_stats[PRIMARY_GOOD_COL].min()),
         "primary_iv": final_iv,
         "primary_iv_retention": iv_retention,
         "min_adjacent_primary_rate_diff": min_adjacent_rate_diff,
@@ -1424,8 +1335,7 @@ def evaluate_merge_candidate(
 
 
 def build_merge_candidate_score_table(
-    development_initial_stats: pd.DataFrame,
-    validation_initial_stats: pd.DataFrame,
+    train_initial_stats: pd.DataFrame,
     initial_bin_count: int,
     config: Dict,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Set[int]]:
@@ -1435,17 +1345,17 @@ def build_merge_candidate_score_table(
     阶段一：清理样本、成熟量、坏样本或好样本不足的箱；
     阶段二：使用双主指标 1M30+/3M30+ 执行 PAVA 风格单调合并；
     阶段三：按相邻风险差异、显著性、IV 损失和策略边界保护压缩到 6~8 档；
-    阶段四：继续生成 8、7、6 档候选，由 Development + Validation 评分选择。
+    阶段四：继续生成 8、7、6 档候选，并基于完整 Train 评分选择。
     """
     ranges: List[Tuple[int, int]] = [(idx, idx) for idx in range(1, initial_bin_count + 1)]
     extreme_boundaries = identify_extreme_boundaries(initial_bin_count)
-    protected_boundaries = identify_protected_boundaries(development_initial_stats, config)
+    protected_boundaries = identify_protected_boundaries(train_initial_stats, config)
     hard_blocked_boundaries = (
         set()
         if ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS
         else set(extreme_boundaries)
     )
-    initial_iv = calc_iv_from_stats(development_initial_stats)
+    initial_iv = calc_iv_from_stats(train_initial_stats)
 
     candidate_rows: List[Dict[str, object]] = []
     step_rows: List[Dict[str, object]] = []
@@ -1487,8 +1397,7 @@ def build_merge_candidate_score_table(
         )
         candidate_rows.append(
             evaluate_merge_candidate(
-                development_initial_stats,
-                validation_initial_stats,
+                train_initial_stats,
                 ranges,
                 initial_iv,
                 extreme_boundaries,
@@ -1501,8 +1410,7 @@ def build_merge_candidate_score_table(
     # 0. 初始状态仅用于过程记录。
     candidate_rows.append(
         evaluate_merge_candidate(
-            development_initial_stats,
-            validation_initial_stats,
+            train_initial_stats,
             ranges,
             initial_iv,
             extreme_boundaries,
@@ -1514,7 +1422,7 @@ def build_merge_candidate_score_table(
 
     # 1. 小箱清理。
     while len(ranges) > MIN_FINAL_BIN_COUNT:
-        current_stats = aggregate_initial_stats_by_ranges(development_initial_stats, ranges)
+        current_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
         constraints = calc_bin_constraint_details(current_stats)
         violating = constraints.loc[~constraints["all_constraints_ok"]]
         if violating.empty:
@@ -1535,7 +1443,7 @@ def build_merge_candidate_score_table(
         try:
             diagnostics = choose_best_adjacent_pair(
                 ranges,
-                development_initial_stats,
+                train_initial_stats,
                 protected_boundaries,
                 extreme_boundaries=extreme_boundaries,
                 blocked_boundaries=hard_blocked_boundaries,
@@ -1553,7 +1461,7 @@ def build_merge_candidate_score_table(
 
     # 2. PAVA 风格主指标单调合并。
     while len(ranges) > MIN_FINAL_BIN_COUNT:
-        current_stats = aggregate_initial_stats_by_ranges(development_initial_stats, ranges)
+        current_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
         inversion_pairs = primary_inversion_pair_indices(current_stats)
         if not inversion_pairs:
             break
@@ -1573,7 +1481,7 @@ def build_merge_candidate_score_table(
         try:
             diagnostics = choose_best_adjacent_pair(
                 ranges,
-                development_initial_stats,
+                train_initial_stats,
                 protected_boundaries,
                 extreme_boundaries=extreme_boundaries,
                 blocked_boundaries=hard_blocked_boundaries,
@@ -1594,7 +1502,7 @@ def build_merge_candidate_score_table(
         try:
             diagnostics = choose_best_adjacent_pair(
                 ranges,
-                development_initial_stats,
+                train_initial_stats,
                 protected_boundaries,
                 extreme_boundaries=extreme_boundaries,
                 blocked_boundaries=hard_blocked_boundaries,
@@ -1610,7 +1518,7 @@ def build_merge_candidate_score_table(
 
     # 4. 继续生成 7 档和 6 档候选。
     while len(ranges) > MIN_FINAL_BIN_COUNT:
-        current_stats = aggregate_initial_stats_by_ranges(development_initial_stats, ranges)
+        current_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
         candidate_pair_indices = filter_blocked_pair_indices(
             ranges,
             range(len(ranges) - 1),
@@ -1623,7 +1531,7 @@ def build_merge_candidate_score_table(
                 current_stats,
                 ranges,
                 pair_index,
-                development_initial_stats,
+                train_initial_stats,
                 protected_boundaries,
                 extreme_boundaries=extreme_boundaries,
             )
@@ -1664,16 +1572,14 @@ def build_merge_candidate_score_table(
     selection_pool = selection_pool.sort_values(
         [
             "hard_constraints_ok",
-            "development_primary_inversion_cnt",
+            "train_primary_inversion_cnt",
             "constraint_violation_count",
-            "validation_primary_inversion_cnt",
-            "validation_psi_acceptable_ok",
-            "preferred_validation_psi_ok",
+            "train_all_inversion_cnt",
             "candidate_score",
             "primary_iv_retention",
             "target_bin_distance",
         ],
-        ascending=[False, True, True, True, False, False, False, False, True],
+        ascending=[False, True, True, True, False, False, True],
         na_position="last",
     )
 
@@ -2476,7 +2382,7 @@ def build_monthly_bin_stability(data: pd.DataFrame) -> pd.DataFrame:
     if not HIGH_SCORE_HIGH_RISK:
         result["primary_rate_diff_prev"] = -result["primary_rate_diff_prev"]
     result["primary_inversion_flag"] = (
-        result["primary_rate_diff_prev"] < -VALIDATION_INVERSION_TOLERANCE
+        result["primary_rate_diff_prev"] < -MONTHLY_INVERSION_TOLERANCE
     )
     return result
 
@@ -2557,10 +2463,7 @@ def build_train_oot_compare(
 def build_overview(
     data: pd.DataFrame,
     train: pd.DataFrame,
-    development: pd.DataFrame,
-    validation: pd.DataFrame,
     oot: pd.DataFrame,
-    validation_months: Sequence[str],
     initial_bin_count: int,
     final_bin_count: int,
     selected_merge_ranges: Sequence[Tuple[int, int]],
@@ -2581,11 +2484,8 @@ def build_overview(
         ("样本", "模型分缺失量", score_missing_count),
         ("样本", "模型分缺失率", safe_div(score_missing_count, source_row_count)),
         ("样本", "Train 样本量", len(train)),
-        ("样本", "Development 样本量", len(development)),
-        ("样本", "Validation 样本量", len(validation)),
         ("样本", "OOT 样本量", len(oot)),
         ("时间切分", "Train 截止月份", TRAIN_END_MONTH),
-        ("时间切分", "Validation 月份", ",".join(validation_months)),
         ("时间切分", "OOT 起始月份", OOT_START_MONTH),
         ("分箱", "初始箱数量", initial_bin_count),
         ("分箱", "最终箱数量", final_bin_count),
@@ -2598,9 +2498,8 @@ def build_overview(
     if selected_candidate is not None:
         rows.extend(
             [
-                ("候选评分", "Development 主指标倒挂数", selected_candidate.get("development_primary_inversion_cnt")),
-                ("候选评分", "Validation 主指标倒挂数", selected_candidate.get("validation_primary_inversion_cnt")),
-                ("候选评分", "Development/Validation PSI", selected_candidate.get("validation_psi")),
+                ("候选评分", "Train 主指标倒挂数", selected_candidate.get("train_primary_inversion_cnt")),
+                ("候选评分", "Train 全指标倒挂数", selected_candidate.get("train_all_inversion_cnt")),
                 ("候选评分", "主指标 IV 保留率", selected_candidate.get("primary_iv_retention")),
                 ("候选评分", "候选综合得分", selected_candidate.get("candidate_score")),
             ]
@@ -2616,7 +2515,7 @@ def build_overview(
             ]
         )
 
-    for sample_group in ["development", "validation", "train", "oot"]:
+    for sample_group in ["train", "oot"]:
         sample_check = monotonicity.loc[monotonicity["sample_group"].eq(sample_group)]
         if sample_check.empty:
             continue
@@ -2657,7 +2556,6 @@ def build_overview(
 
 def build_config_table(
     selected_merge_ranges: Sequence[Tuple[int, int]],
-    validation_months: Sequence[str],
     protected_boundaries: Set[int],
 ) -> pd.DataFrame:
     """输出便于后续修改和版本管理的参数表。"""
@@ -2669,9 +2567,6 @@ def build_config_table(
         {"config_group": "基础配置", "config_name": "DATA_DIR", "config_value": str(DATA_DIR)},
         {"config_group": "基础配置", "config_name": "TRAIN_END_MONTH", "config_value": TRAIN_END_MONTH},
         {"config_group": "基础配置", "config_name": "OOT_START_MONTH", "config_value": OOT_START_MONTH},
-        {"config_group": "基础配置", "config_name": "VALIDATION_MONTH_COUNT", "config_value": VALIDATION_MONTH_COUNT},
-        {"config_group": "基础配置", "config_name": "FALLBACK_DEVELOPMENT_SAMPLE_PCT", "config_value": FALLBACK_DEVELOPMENT_SAMPLE_PCT},
-        {"config_group": "基础配置", "config_name": "ACTUAL_VALIDATION_MONTHS", "config_value": ",".join(validation_months)},
         {"config_group": "基础配置", "config_name": "INITIAL_BIN_COUNT", "config_value": INITIAL_BIN_COUNT},
         {"config_group": "基础配置", "config_name": "HIGH_SCORE_HIGH_RISK", "config_value": HIGH_SCORE_HIGH_RISK},
         {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_COUNT", "config_value": MIN_FINAL_BIN_COUNT},
@@ -2688,11 +2583,10 @@ def build_config_table(
         {"config_group": "极端箱配置", "config_name": "MIN_BEST_EXTREME_BIN_GOOD_COUNT", "config_value": MIN_BEST_EXTREME_BIN_GOOD_COUNT},
         {"config_group": "极端箱配置", "config_name": "MIN_WORST_EXTREME_BIN_BAD_COUNT", "config_value": MIN_WORST_EXTREME_BIN_BAD_COUNT},
         {"config_group": "极端箱配置", "config_name": "MIN_WORST_EXTREME_BIN_GOOD_COUNT", "config_value": MIN_WORST_EXTREME_BIN_GOOD_COUNT},
-        {"config_group": "合箱配置", "config_name": "VALIDATION_INVERSION_TOLERANCE", "config_value": VALIDATION_INVERSION_TOLERANCE},
+        {"config_group": "合箱配置", "config_name": "TRAIN_INVERSION_TOLERANCE", "config_value": TRAIN_INVERSION_TOLERANCE},
+        {"config_group": "合箱配置", "config_name": "MONTHLY_INVERSION_TOLERANCE", "config_value": MONTHLY_INVERSION_TOLERANCE},
         {"config_group": "合箱配置", "config_name": "ADJACENT_PVALUE_TO_MERGE", "config_value": ADJACENT_PVALUE_TO_MERGE},
         {"config_group": "合箱配置", "config_name": "MIN_ADJACENT_ABS_RATE_DIFF", "config_value": MIN_ADJACENT_ABS_RATE_DIFF},
-        {"config_group": "合箱配置", "config_name": "PREFERRED_MAX_VALIDATION_PSI", "config_value": PREFERRED_MAX_VALIDATION_PSI},
-        {"config_group": "合箱配置", "config_name": "MAX_ACCEPTABLE_VALIDATION_PSI", "config_value": MAX_ACCEPTABLE_VALIDATION_PSI},
         {"config_group": "合箱配置", "config_name": "PROTECTED_BOUNDARIES", "config_value": ",".join(map(str, sorted(protected_boundaries)))},
         {"config_group": "极端箱配置", "config_name": "PROTECT_EXTREME_INITIAL_BINS", "config_value": PROTECT_EXTREME_INITIAL_BINS},
         {"config_group": "极端箱配置", "config_name": "BEST_EXTREME_INITIAL_BIN_COUNT", "config_value": BEST_EXTREME_INITIAL_BIN_COUNT},
@@ -2885,8 +2779,6 @@ def format_excel_report(path: Path) -> None:
 def write_report(
     overview: pd.DataFrame,
     binning_process: pd.DataFrame,
-    final_development_stats: pd.DataFrame,
-    final_validation_stats: pd.DataFrame,
     final_train_stats: pd.DataFrame,
     final_oot_stats: pd.DataFrame,
     train_oot_compare: pd.DataFrame,
@@ -2908,11 +2800,9 @@ def write_report(
     """输出精简版策略报告（6 个 sheet）。"""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 合并 4 个最终分箱统计：同结构 + sample_group 列。
+    # 合并 Train/OOT 最终分箱统计：同结构 + sample_group 列。
     final_stats_parts = []
     for label, stats in [
-        ("Development", final_development_stats),
-        ("Validation", final_validation_stats),
         ("Train", final_train_stats),
         ("OOT", final_oot_stats),
     ]:
@@ -2974,11 +2864,10 @@ def main() -> None:
     data = load_analysis_data()
 
     all_data, train, oot = split_train_oot(data)
-    development, validation, validation_months = split_development_validation(train)
     _t = _log_step("1/9 数据加载与时间切分", _t)
 
-    # 1) Development 学习初始边界，复用到 Validation、完整 Train 和 OOT。
-    edges = learn_equal_freq_edges(development, SCORE_COL, INITIAL_BIN_COUNT)
+    # 1) 完整 Train 学习初始边界，并复用到 OOT。
+    edges = learn_equal_freq_edges(train, SCORE_COL, INITIAL_BIN_COUNT)
     actual_initial_bin_count = len(edges) - 1
     initial_edges = build_initial_edge_table(edges)
 
@@ -2991,23 +2880,16 @@ def main() -> None:
     all_binned = apply_edges(all_data, SCORE_COL, edges, INITIAL_BIN_COL)
     train_binned = all_binned.loc[all_binned["sample_group"].eq("train")].copy()
     oot_binned = all_binned.loc[all_binned["sample_group"].eq("oot")].copy()
-    development_binned = apply_edges(development, SCORE_COL, edges, INITIAL_BIN_COL)
-    validation_binned = apply_edges(validation, SCORE_COL, edges, INITIAL_BIN_COL)
 
-    development_initial_stats = calc_complete_initial_stats(
-        development_binned,
+    train_initial_stats = calc_complete_initial_stats(
+        train_binned,
         initial_edges,
     )
-    validation_initial_stats = calc_complete_initial_stats(
-        validation_binned,
-        initial_edges,
-    )
-    _t = _log_step(f"2/9 Development 等频初分：{actual_initial_bin_count} 箱", _t)
+    _t = _log_step(f"2/9 Train 等频初分：{actual_initial_bin_count} 箱", _t)
 
-    # 2) Development + Validation 自动选择合箱；OOT 不参与。
+    # 2) 基于完整 Train 自动选择合箱；OOT 不参与。
     merge_candidates, merge_steps, protected_boundaries = build_merge_candidate_score_table(
-        development_initial_stats,
-        validation_initial_stats,
+        train_initial_stats,
         actual_initial_bin_count,
         STRATEGY_CONFIG,
     )
@@ -3025,8 +2907,6 @@ def main() -> None:
     )
 
     # 3) 将最终合箱映射应用到所有样本。
-    development_final = apply_merge_map(development_binned, merge_map)
-    validation_final = apply_merge_map(validation_binned, merge_map)
     train_final = apply_merge_map(train_binned, merge_map)
     oot_final = apply_merge_map(oot_binned, merge_map)
     all_final = apply_merge_map(all_binned, merge_map)
@@ -3043,18 +2923,14 @@ def main() -> None:
             how="left",
         )
 
-    final_development_stats = final_stats(development_final)
-    final_validation_stats = final_stats(validation_final)
     final_train_stats = final_stats(train_final)
     final_oot_stats = final_stats(oot_final)
-    _t = _log_step("4/9 生成 Development/Validation/Train/OOT 最终箱统计", _t)
+    _t = _log_step("4/9 生成 Train/OOT 最终箱统计", _t)
 
     # 4) 最终验证。
     rate_cols = ALL_RISK_RATE_COLS
     monotonicity = pd.concat(
         [
-            check_monotonicity(final_development_stats, rate_cols, "development"),
-            check_monotonicity(final_validation_stats, rate_cols, "validation"),
             check_monotonicity(final_train_stats, rate_cols, "train"),
             check_monotonicity(final_oot_stats, rate_cols, "oot"),
         ],
@@ -3084,7 +2960,7 @@ def main() -> None:
         oot_final,
         strategy_plan,
     )
-    binning_process = build_binning_process_table(development_initial_stats, merge_map)
+    binning_process = build_binning_process_table(train_initial_stats, merge_map)
     threshold_selection = build_threshold_selection_table(
         threshold_curve,
         strategy_plan,
@@ -3102,10 +2978,7 @@ def main() -> None:
     overview = build_overview(
         all_data,
         train_final,
-        development_final,
-        validation_final,
         oot_final,
-        validation_months,
         actual_initial_bin_count,
         len(final_edges),
         selected_merge_ranges,
@@ -3118,7 +2991,6 @@ def main() -> None:
     )
     config_table = build_config_table(
         selected_merge_ranges,
-        validation_months,
         protected_boundaries,
     )
     online_execution_rules = build_online_execution_rules()
@@ -3127,8 +2999,6 @@ def main() -> None:
     write_report(
         overview=overview,
         binning_process=binning_process,
-        final_development_stats=final_development_stats,
-        final_validation_stats=final_validation_stats,
         final_train_stats=final_train_stats,
         final_oot_stats=final_oot_stats,
         train_oot_compare=train_oot_compare,
