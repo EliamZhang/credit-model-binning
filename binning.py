@@ -56,6 +56,9 @@ SCORE_FILE = "aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv"
 RAW_SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 SCORE_COL = "score_mlt"
 
+# 未完成申请状态：加载时整体剔除，不进入历史漏斗、分箱与策略测算。
+INCOMPLETE_STATUSES = ["0.Incomplete", "1.In Progress"]
+
 TRAIN_END_MONTH = "2025-10"
 OOT_START_MONTH = "2025-11"
 
@@ -292,7 +295,7 @@ def _actual_funnel_row(data: pd.DataFrame, sample_group: str) -> Dict[str, objec
 
     completed_mask = (
         application_status.notna()
-        & ~application_status.isin(["0.Incomplete", "1.In Progress"])
+        & ~application_status.isin(INCOMPLETE_STATUSES)
     )
     approved_mask = application_status.str.slice(0, 1).isin(["3", "4"]).fillna(False)
     auto_approved_mask = (
@@ -346,6 +349,40 @@ def build_actual_funnel_report(data: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([_actual_funnel_row(frame, label) for label, frame in groups])
 
 
+def build_bin_actual_funnel_report(data: pd.DataFrame) -> pd.DataFrame:
+    """按最终风险档输出历史实际审批漏斗，供箱级结果表下钻使用。"""
+    require_columns(
+        data,
+        [FINAL_BIN_COL, "bin_order"],
+        "箱级历史实际审批漏斗",
+    )
+    rows = []
+    grouped = data.loc[data[FINAL_BIN_COL].notna()].groupby(
+        ["bin_order", FINAL_BIN_COL],
+        observed=True,
+        sort=True,
+    )
+    for (bin_order, risk_bin), frame in grouped:
+        row = _actual_funnel_row(frame, str(risk_bin))
+        row.pop("metric_scope", None)
+        row.pop("sample_group", None)
+        row.update(
+            {
+                "bin_order": int(bin_order),
+                FINAL_BIN_COL: str(risk_bin),
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def drop_incomplete_applications(data: pd.DataFrame) -> pd.DataFrame:
+    """剔除 application_status 为未完成的申请，返回剔除后的副本。"""
+    require_columns(data, ["application_status"], "剔除未完成申请")
+    incomplete = data["application_status"].astype("string").isin(INCOMPLETE_STATUSES)
+    return data.loc[~incomplete].copy()
+
+
 def load_analysis_data() -> pd.DataFrame:
     """加载首版分箱真正需要的数据，删除未使用的其他模型表和交易特征表。"""
     print("加载数据 ...")
@@ -396,11 +433,17 @@ def load_analysis_data() -> pd.DataFrame:
     for col in RISK_NUMERIC_COLS:
         data[col] = pd.to_numeric(data[col], errors="coerce")
 
-    # 历史实际审批漏斗独立于模型分，先基于完整申请样本计算并保留。
+    # 未完成申请（0.Incomplete / 1.In Progress）整体剔除，不进入任何分析。
+    source_row_count = len(data)
+    removed_incomplete_count = int(
+        data["application_status"].astype("string").isin(INCOMPLETE_STATUSES).sum()
+    )
+    data = drop_incomplete_applications(data)
+
+    # 历史实际审批漏斗独立于模型分，先基于剔除后的完整申请样本计算并保留。
     actual_funnel_report = build_actual_funnel_report(data)
 
     # 分箱与模型策略测算只使用存在模型分的样本；缺失比例在总览中单独展示。
-    source_row_count = len(data)
     score_missing_count = int(data[SCORE_COL].isna().sum())
 
     data = data.loc[data[SCORE_COL].notna()].copy()
@@ -408,12 +451,13 @@ def load_analysis_data() -> pd.DataFrame:
         raise ValueError(f"{SCORE_COL} 全为空，无法进行分箱")
 
     data.attrs["source_row_count"] = source_row_count
+    data.attrs["removed_incomplete_count"] = removed_incomplete_count
     data.attrs["score_missing_count"] = score_missing_count
     data.attrs["actual_funnel_report"] = actual_funnel_report
 
     print(
-        f"   原始 {source_row_count:,} 行；有效模型分 {len(data):,} 行；"
-        f"模型分缺失 {score_missing_count:,} 行"
+        f"   原始 {source_row_count:,} 行；剔除未完成申请 {removed_incomplete_count:,} 行；"
+        f"有效模型分 {len(data):,} 行；模型分缺失 {score_missing_count:,} 行"
     )
     return data
 
@@ -711,6 +755,129 @@ def calc_bin_stats(
         .rename(columns={order_col: "bin_order"})
     )
     return add_bin_derived_metrics(stats, order_col="bin_order")
+
+
+def add_bin_model_diagnostics(stats: pd.DataFrame) -> pd.DataFrame:
+    """补充箱级 IV 分项与累计 KS 曲线；整体 AUC/KS 仍在模型验证表展示。"""
+    result = stats.sort_values("bin_order").reset_index(drop=True).copy()
+    bin_count = len(result)
+    if bin_count == 0:
+        return result
+
+    for prefix in ["1m30p", "3m30p"]:
+        bad = pd.to_numeric(result[f"{prefix}_cnt_bad"], errors="coerce").fillna(0.0)
+        good = pd.to_numeric(result[f"{prefix}_cnt_good"], errors="coerce").fillna(0.0)
+        bad_dist = (bad + IV_SMOOTHING_EPS) / (
+            bad.sum() + IV_SMOOTHING_EPS * bin_count
+        )
+        good_dist = (good + IV_SMOOTHING_EPS) / (
+            good.sum() + IV_SMOOTHING_EPS * bin_count
+        )
+        woe = np.log(bad_dist / good_dist)
+
+        result[f"{prefix}_bad_distribution"] = bad_dist
+        result[f"{prefix}_good_distribution"] = good_dist
+        result[f"{prefix}_woe"] = woe
+        result[f"{prefix}_iv_component"] = (bad_dist - good_dist) * woe
+
+        # 高风险端向低风险端累计，与整体 KS 的风险排序方向一致。
+        cum_bad_from_high = bad.iloc[::-1].cumsum().iloc[::-1]
+        cum_good_from_high = good.iloc[::-1].cumsum().iloc[::-1]
+        result[f"{prefix}_ks_curve"] = (
+            safe_div(cum_bad_from_high, bad.sum())
+            - safe_div(cum_good_from_high, good.sum())
+        ).abs()
+
+    return result
+
+
+def build_enriched_final_bin_report(
+    stats: pd.DataFrame,
+    data: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+    psi: pd.DataFrame,
+) -> pd.DataFrame:
+    """整合箱级风险、历史实际审批、策略流量贡献和稳定性诊断指标。"""
+    result = add_bin_model_diagnostics(stats)
+    actual_by_bin = build_bin_actual_funnel_report(data)
+    result = result.merge(
+        actual_by_bin,
+        on=["bin_order", FINAL_BIN_COL],
+        how="left",
+        validate="one_to_one",
+    )
+
+    psi_columns = [FINAL_BIN_COL, "psi_component", "psi_total"]
+    available_psi_columns = [col for col in psi_columns if col in psi.columns]
+    result = result.merge(
+        psi[available_psi_columns].rename(
+            columns={
+                "psi_component": "train_oot_psi_component",
+                "psi_total": "train_oot_psi_total",
+            }
+        ),
+        on=FINAL_BIN_COL,
+        how="left",
+        validate="many_to_one",
+    )
+
+    valid_strategy = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if valid_strategy.empty:
+        result["strategy_estimated_decision"] = "未生成"
+    else:
+        strategy = valid_strategy.iloc[0]
+        auto_bin = str(strategy["auto_pass_bin"])
+        accept_bin = str(strategy["manual_review_upper_bin"])
+        bin_order_map = result.set_index(FINAL_BIN_COL)["bin_order"].to_dict()
+        auto_order = bin_order_map.get(auto_bin)
+        accept_order = bin_order_map.get(accept_bin)
+        if auto_order is None or accept_order is None:
+            raise ValueError("策略阈值档位未匹配最终分箱")
+        result["strategy_estimated_decision"] = np.select(
+            [
+                result["bin_order"].le(auto_order),
+                result["bin_order"].le(accept_order),
+            ],
+            ["自动通过", "人工审核"],
+            default="拒绝",
+        )
+
+    result["strategy_estimated_bin_flow_rate"] = result["sample_pct"]
+    result["strategy_estimated_cumulative_flow_rate"] = result["cum_pass_rate"]
+
+    priority_columns = [
+        "bin_order",
+        FINAL_BIN_COL,
+        "score_left",
+        "score_right",
+        "n",
+        "sample_pct",
+        "cum_pass_rate",
+        "strategy_estimated_decision",
+        "strategy_estimated_bin_flow_rate",
+        "strategy_estimated_cumulative_flow_rate",
+        "actual_apply_cnt",
+        "actual_completion_rate",
+        "actual_approval_rate",
+        "actual_auto_approval_rate",
+        "actual_manual_approval_rate",
+        "actual_auto_approval_share",
+        "actual_manual_approval_share",
+        "actual_deal_rate",
+        "1m30p_cnt_bad_rate",
+        "1m30p_amt_bad_rate",
+        "3m30p_cnt_bad_rate",
+        "3m30p_amt_bad_rate",
+        "1m30p_iv_component",
+        "1m30p_ks_curve",
+        "3m30p_iv_component",
+        "3m30p_ks_curve",
+        "train_oot_psi_component",
+        "train_oot_psi_total",
+    ]
+    priority_columns = [col for col in priority_columns if col in result.columns]
+    remaining_columns = [col for col in result.columns if col not in priority_columns]
+    return result[priority_columns + remaining_columns]
 
 
 
@@ -2478,10 +2645,20 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("历史实际审批漏斗", "actual_auto_approval_share", "历史实际通过件中的自动审批占比", "auto_approved_application_cnt / approved_application_cnt"),
         ("历史实际审批漏斗", "actual_manual_approval_share", "历史实际通过件中的人工审批占比", "manual_approved_application_cnt / approved_application_cnt"),
         ("历史实际审批漏斗", "actual_deal_rate", "历史实际成交转化率", "deal_sample_cnt / approved_application_cnt"),
+        ("箱级历史实际审批漏斗", "actual_*（03_最终分箱统计）", "按 Train/OOT 与最终风险档下钻的历史实际数量和比率", "在每个 score_mlt_final_bin 内按唯一 application_id 复算"),
         ("模型策略测算", "strategy_estimated_auto_pass_rate", "模型阈值测算的自动通过样本占比", "score_mlt 满足自动通过阈值的申请数 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_manual_review_rate", "模型阈值测算的人工审核样本占比", "人工审核分数区间申请数 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_total_accept_rate", "模型阈值测算的总接纳样本占比", "自动通过数与人工审核数之和 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_reject_rate", "模型阈值测算的拒绝样本占比", "超过总接纳阈值的申请数 / 有效模型分申请数"),
+        ("箱级模型策略测算", "strategy_estimated_decision", "最终风险档对应的策略归属", "按自动通过阈值和总接纳阈值映射为自动通过/人工审核/拒绝"),
+        ("箱级模型策略测算", "strategy_estimated_bin_flow_rate", "该风险档对策略流量的贡献", "箱内申请数 / 当前样本组有效模型分申请数"),
+        ("箱级模型策略测算", "strategy_estimated_cumulative_flow_rate", "从低风险端累计至当前档的策略流量", "累计申请数 / 当前样本组有效模型分申请数"),
+        ("分箱表整体指标", "strategy_estimated_overall_*_rate", "当前 Train/OOT 样本组的整体策略测算转化率", "整体指标在分箱表中独立成列并重复展示；不作为单箱指标解释"),
+        ("分箱表整体指标", "overall_1m30p_auc / overall_3m30p_auc", "当前 Train/OOT 样本组的整体 AUC", "整体指标在分箱表中独立成列并重复展示；AUC 不定义为单箱指标"),
+        ("分箱表整体指标", "overall_1m30p_ks / overall_3m30p_ks", "当前 Train/OOT 样本组的整体 KS", "整体指标在分箱表中独立成列并重复展示；与箱级 *_ks_curve 区分"),
+        ("箱级模型诊断", "*_iv_component", "1M30+/3M30+ 的箱级 IV 分项", "(bad_dist-good_dist) * LN(bad_dist/good_dist)"),
+        ("箱级模型诊断", "*_ks_curve", "由高风险端累计至当前档的 KS 曲线值", "ABS(cum_bad_dist_from_high-cum_good_dist_from_high)"),
+        ("箱级模型诊断", "train_oot_psi_component", "当前风险档对 Train/OOT PSI 的贡献", "(OOT%-Train%) * LN(OOT%/Train%)"),
         ("验证", "PSI", "Train 与 OOT 的分箱分布稳定性", "SUM((OOT%-Train%) * LN(OOT%/Train%))"),
         ("验证", "AUC / KS", "模型风险区分能力指标", "分别衡量排序能力和好坏样本累计差异"),
     ]
@@ -2636,10 +2813,13 @@ def build_overview(
 ) -> pd.DataFrame:
     """整理报告首页的核心结论，并按模块分组展示。"""
     source_row_count = int(data.attrs.get("source_row_count", len(data)))
+    removed_incomplete_count = int(data.attrs.get("removed_incomplete_count", 0))
     score_missing_count = int(data.attrs.get("score_missing_count", 0))
 
     rows = [
         ("样本", "原始样本量", source_row_count),
+        ("样本", "剔除未完成申请量", removed_incomplete_count),
+        ("样本", "剔除未完成申请率", safe_div(removed_incomplete_count, source_row_count)),
         ("样本", "有效模型分样本量", len(data)),
         ("样本", "模型分缺失量", score_missing_count),
         ("样本", "模型分缺失率", safe_div(score_missing_count, source_row_count)),
@@ -2874,7 +3054,7 @@ def format_excel_report(path: Path) -> None:
         if not sections:
             continue
 
-        sheet.freeze_panes = "A2"
+        sheet.freeze_panes = "D2" if sheet.title.startswith("03_") else "A2"
         sheet.sheet_view.showGridLines = False
 
         first_data_end = sections[0][2]
@@ -2911,9 +3091,14 @@ def format_excel_report(path: Path) -> None:
                     if cell.value is None:
                         continue
                     header_tokens = set(header.split("_"))
-                    if header_tokens.intersection({"rate", "pct", "retention", "share"}):
+                    if header_tokens.intersection(
+                        {"rate", "pct", "retention", "share", "distribution"}
+                    ):
                         cell.number_format = "0.00%"
-                    elif any(key in header for key in ["auc", "ks", "psi", "corr", "p_value"]):
+                    elif (
+                        header_tokens.intersection({"auc", "ks", "psi", "corr", "iv"})
+                        or "p_value" in header
+                    ):
                         cell.number_format = "0.0000"
                     elif any(key in header for key in [
                         "threshold", "score_left", "score_right",
@@ -3013,6 +3198,97 @@ def write_report(
         s.insert(0, "sample_group", label)
         final_stats_parts.append(s)
     final_stats_all = pd.concat(final_stats_parts, ignore_index=True)
+
+    # 将样本组整体策略转化率与整体 AUC/KS 作为独立字段并入分箱表。
+    # 字段名明确标注 overall，避免被误解为单箱指标。
+    overall_strategy = strategy_estimated_flow.loc[
+        strategy_estimated_flow["sample_group"].isin(["Train", "OOT"]),
+        [
+            "sample_group",
+            "strategy_estimated_auto_pass_rate",
+            "strategy_estimated_manual_review_rate",
+            "strategy_estimated_total_accept_rate",
+            "strategy_estimated_reject_rate",
+        ],
+    ].rename(
+        columns={
+            "strategy_estimated_auto_pass_rate": "strategy_estimated_overall_auto_pass_rate",
+            "strategy_estimated_manual_review_rate": "strategy_estimated_overall_manual_review_rate",
+            "strategy_estimated_total_accept_rate": "strategy_estimated_overall_total_accept_rate",
+            "strategy_estimated_reject_rate": "strategy_estimated_overall_reject_rate",
+        }
+    )
+    final_stats_all = final_stats_all.merge(
+        overall_strategy,
+        on="sample_group",
+        how="left",
+        validate="many_to_one",
+    )
+
+    overall_performance = performance.copy()
+    overall_performance["sample_group"] = (
+        overall_performance["sample_group"].astype(str).str.lower().map(
+            {"train": "Train", "oot": "OOT"}
+        )
+    )
+    performance_wide = overall_performance.pivot(
+        index="sample_group",
+        columns="label",
+        values=["auc", "ks"],
+    )
+    performance_wide.columns = [
+        f"overall_{'1m30p' if label == 'duedate_1m_30' else '3m30p'}_{metric}"
+        for metric, label in performance_wide.columns
+    ]
+    final_stats_all = final_stats_all.merge(
+        performance_wide.reset_index(),
+        on="sample_group",
+        how="left",
+        validate="many_to_one",
+    )
+
+    headline_columns = [
+        "sample_group",
+        "bin_order",
+        FINAL_BIN_COL,
+        "score_left",
+        "score_right",
+        "n",
+        "sample_pct",
+        "cum_pass_rate",
+        "strategy_estimated_decision",
+        "strategy_estimated_bin_flow_rate",
+        "actual_completion_rate",
+        "actual_approval_rate",
+        "actual_auto_approval_rate",
+        "actual_manual_approval_rate",
+        "actual_auto_approval_share",
+        "actual_manual_approval_share",
+        "actual_deal_rate",
+        "1m30p_cnt_bad_rate",
+        "1m30p_amt_bad_rate",
+        "3m30p_cnt_bad_rate",
+        "3m30p_amt_bad_rate",
+        "1m30p_iv_component",
+        "3m30p_iv_component",
+        "1m30p_ks_curve",
+        "3m30p_ks_curve",
+        "train_oot_psi_component",
+        "strategy_estimated_overall_auto_pass_rate",
+        "strategy_estimated_overall_manual_review_rate",
+        "strategy_estimated_overall_total_accept_rate",
+        "strategy_estimated_overall_reject_rate",
+        "overall_1m30p_auc",
+        "overall_3m30p_auc",
+        "overall_1m30p_ks",
+        "overall_3m30p_ks",
+        "train_oot_psi_total",
+    ]
+    headline_columns = [col for col in headline_columns if col in final_stats_all.columns]
+    remaining_columns = [
+        col for col in final_stats_all.columns if col not in headline_columns
+    ]
+    final_stats_all = final_stats_all[headline_columns + remaining_columns]
 
     with pd.ExcelWriter(REPORT_PATH, engine="openpyxl") as writer:
         overview.to_excel(writer, sheet_name="01_总览", index=False)
@@ -3177,6 +3453,18 @@ def main() -> None:
         strategy_plan,
         STRATEGY_CONFIG,
     )
+    final_train_report = build_enriched_final_bin_report(
+        final_train_stats,
+        train_final,
+        strategy_plan,
+        psi,
+    )
+    final_oot_report = build_enriched_final_bin_report(
+        final_oot_stats,
+        oot_final,
+        strategy_plan,
+        psi,
+    )
     _t = _log_step("6/9 历史实际审批漏斗与模型策略测算流量", _t)
 
     selected_candidate_rows = merge_candidates.loc[
@@ -3212,8 +3500,8 @@ def main() -> None:
     write_report(
         overview=overview,
         binning_process=binning_process,
-        final_train_stats=final_train_stats,
-        final_oot_stats=final_oot_stats,
+        final_train_stats=final_train_report,
+        final_oot_stats=final_oot_report,
         train_oot_compare=train_oot_compare,
         actual_funnel_report=actual_funnel_report,
         strategy_estimated_flow=strategy_estimated_flow,

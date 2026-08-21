@@ -111,6 +111,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 - 模型分表按 `application_id` 去重（保留第一条）后左连接。
 - `application_month` 缺失时，用 `application_time` 的月份补齐；若仍缺失则该行不进入 Train / OOT，不参与任何分析。
 - **分箱分析只保留存在模型分的样本**；模型分缺失的样本会在总览中单独展示数量和比例。
+- 加载时整体剔除未完成申请（`application_status` 属于 `0.Incomplete` / `1.In Progress`），不进入历史漏斗、分箱与策略测算；原始样本量、剔除量及剔除率在总览中展示。
 
 ### 5. 当前必须存在的关键字段
 
@@ -340,14 +341,14 @@ cum_3m30p_amt_bad_rate
 
 报告严格区分两类指标：
 
-- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重。
+- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重；未完成申请已在加载时整体剔除，分析样本全部为完成进件，故完成率恒为 100%。
 - **模型策略测算流量（`strategy_estimated_*`）**：按 `score_mlt` 和 Train 确定的策略阈值测算，不代表历史真实审批结果。
 
 历史实际审批漏斗定义：
 
 | 指标 | 计算公式 | 判定条件 |
 | --- | --- | --- |
-| `actual_completion_rate` | 完成进件数 / 申请数 | `application_status` 不属于 `0.Incomplete`、`1.In Progress` |
+| `actual_completion_rate` | 完成进件数 / 申请数 | 未完成申请已整体剔除，申请数即完成进件数，完成率恒为 100% |
 | `actual_approval_rate` | 审批通过数 / 完成进件数 | `application_status` 首字符为 3 或 4 |
 | `actual_auto_approval_rate` | 自动审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Auto Approved` |
 | `actual_manual_approval_rate` | 人工审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Manual Approved` |
@@ -783,7 +784,7 @@ strategy_estimated_flow（Train / OOT / All 模型策略测算流量）
 
 代码按相同的 Train/OOT 时间切片分别输出：
 
-- 历史实际审批漏斗：完成率、审批通过率、自动/人工审批通过率、自动/人工审批占比和成交转化率；
+- 历史实际审批漏斗（未完成申请已剔除）：完成率、审批通过率、自动/人工审批通过率、自动/人工审批占比和成交转化率；
 - 模型策略测算流量：自动通过率、人工审核率、总接纳率和拒绝率；
 - 全量汇总：用于核对 Train 与 OOT 加总以及两套口径的总体差异。
 
@@ -905,7 +906,28 @@ merge_steps
 final_train_stats / final_oot_stats
 ```
 
-Train / OOT 的最终箱统计合并为一张表，用 `sample_group` 列区分。字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等），并在 1M30+ / 3M30+ 笔数逾期率及累计口径旁附带 95% Wilson 置信区间：
+Train / OOT 的最终箱统计合并为一张表，用 `sample_group` 列区分。每一行对应一个最终风险档，并将风险、历史实际审批、模型策略测算流量和箱级模型诊断放在同一行，便于直接比较：
+
+```text
+strategy_estimated_decision / strategy_estimated_bin_flow_rate
+strategy_estimated_cumulative_flow_rate
+actual_completion_rate / actual_approval_rate
+actual_auto_approval_rate / actual_manual_approval_rate
+actual_auto_approval_share / actual_manual_approval_share / actual_deal_rate
+1m30p_iv_component / 3m30p_iv_component
+1m30p_ks_curve / 3m30p_ks_curve
+train_oot_psi_component / train_oot_psi_total
+strategy_estimated_overall_auto_pass_rate
+strategy_estimated_overall_manual_review_rate
+strategy_estimated_overall_total_accept_rate
+strategy_estimated_overall_reject_rate
+overall_1m30p_auc / overall_3m30p_auc
+overall_1m30p_ks / overall_3m30p_ks
+```
+
+其中，历史实际指标在每个 `score_mlt_final_bin` 内按唯一 `application_id` 重新计算；策略测算字段表示该箱的策略归属、单箱流量贡献及累计流量。所有指标均使用独立字段，不把 1M/3M、笔数/金额、自动/人工或 AUC/KS 合并在同一列。AUC、整体 KS、整体 PSI 和整体策略转化率属于样本组指标，不定义为单箱指标，因此使用带 `overall` 或 `total` 的独立字段在分箱表中重复展示；箱级 IV、KS 曲线点和 PSI 分项另设独立字段。
+
+字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等），并在 1M30+ / 3M30+ 笔数逾期率及累计口径旁附带 95% Wilson 置信区间：
 
 ```text
 1m30p_cnt_bad_rate_ci_low / 1m30p_cnt_bad_rate_ci_high
@@ -917,6 +939,8 @@ cum_1m30p_cnt_bad_rate_ci_low / cum_3m30p_cnt_bad_rate_ci_high（含 _high 上�
 
 - 从 `bin_order=1` 向下看风险是否逐步升高。
 - 同一风险等级在 Train / OOT 中的风险方向是否一致。
+- 对照箱内历史实际审批表现与模型策略归属，识别实际流程和测算策略差异最大的风险档。
+- `*_iv_component` 可求和得到样本组整体 IV；`*_ks_curve` 的最大值与离散分档口径 KS 对应；各箱 `train_oot_psi_component` 之和等于整体 PSI。
 - OOT 单箱成熟量很小时，不要过度解释短期波动。
 - 尾部箱样本量小、置信区间宽，应结合 `*_cnt_bad_rate_ci_high`（保守风险上界）解读风险率，不能只看点估计。
 
