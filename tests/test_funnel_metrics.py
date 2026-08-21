@@ -142,6 +142,23 @@ class FunnelMetricTests(unittest.TestCase):
         self.assertAlmostEqual(result.loc["B", "actual_completion_rate"], 0.5)
         self.assertAlmostEqual(result.loc["B", "actual_manual_approval_rate"], 1.0)
 
+    def test_drop_incomplete_applications_removes_incomplete_only(self):
+        data = pd.DataFrame(
+            {
+                "application_id": [1, 2, 3, 4],
+                "application_status": [
+                    "0.Incomplete",
+                    "4.Funded",
+                    "1.In Progress",
+                    None,
+                ],
+            }
+        )
+
+        result = binning.drop_incomplete_applications(data)
+
+        self.assertEqual(result["application_id"].tolist(), [2, 4])
+
     def test_bin_model_diagnostics_reconcile_to_iv(self):
         stats = pd.DataFrame(
             {

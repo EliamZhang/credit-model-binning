@@ -56,6 +56,9 @@ SCORE_FILE = "aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv"
 RAW_SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 SCORE_COL = "score_mlt"
 
+# 未完成申请状态：加载时整体剔除，不进入历史漏斗、分箱与策略测算。
+INCOMPLETE_STATUSES = ["0.Incomplete", "1.In Progress"]
+
 TRAIN_END_MONTH = "2025-10"
 OOT_START_MONTH = "2025-11"
 
@@ -292,7 +295,7 @@ def _actual_funnel_row(data: pd.DataFrame, sample_group: str) -> Dict[str, objec
 
     completed_mask = (
         application_status.notna()
-        & ~application_status.isin(["0.Incomplete", "1.In Progress"])
+        & ~application_status.isin(INCOMPLETE_STATUSES)
     )
     approved_mask = application_status.str.slice(0, 1).isin(["3", "4"]).fillna(False)
     auto_approved_mask = (
@@ -373,6 +376,13 @@ def build_bin_actual_funnel_report(data: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def drop_incomplete_applications(data: pd.DataFrame) -> pd.DataFrame:
+    """剔除 application_status 为未完成的申请，返回剔除后的副本。"""
+    require_columns(data, ["application_status"], "剔除未完成申请")
+    incomplete = data["application_status"].astype("string").isin(INCOMPLETE_STATUSES)
+    return data.loc[~incomplete].copy()
+
+
 def load_analysis_data() -> pd.DataFrame:
     """加载首版分箱真正需要的数据，删除未使用的其他模型表和交易特征表。"""
     print("加载数据 ...")
@@ -423,11 +433,17 @@ def load_analysis_data() -> pd.DataFrame:
     for col in RISK_NUMERIC_COLS:
         data[col] = pd.to_numeric(data[col], errors="coerce")
 
-    # 历史实际审批漏斗独立于模型分，先基于完整申请样本计算并保留。
+    # 未完成申请（0.Incomplete / 1.In Progress）整体剔除，不进入任何分析。
+    source_row_count = len(data)
+    removed_incomplete_count = int(
+        data["application_status"].astype("string").isin(INCOMPLETE_STATUSES).sum()
+    )
+    data = drop_incomplete_applications(data)
+
+    # 历史实际审批漏斗独立于模型分，先基于剔除后的完整申请样本计算并保留。
     actual_funnel_report = build_actual_funnel_report(data)
 
     # 分箱与模型策略测算只使用存在模型分的样本；缺失比例在总览中单独展示。
-    source_row_count = len(data)
     score_missing_count = int(data[SCORE_COL].isna().sum())
 
     data = data.loc[data[SCORE_COL].notna()].copy()
@@ -435,12 +451,13 @@ def load_analysis_data() -> pd.DataFrame:
         raise ValueError(f"{SCORE_COL} 全为空，无法进行分箱")
 
     data.attrs["source_row_count"] = source_row_count
+    data.attrs["removed_incomplete_count"] = removed_incomplete_count
     data.attrs["score_missing_count"] = score_missing_count
     data.attrs["actual_funnel_report"] = actual_funnel_report
 
     print(
-        f"   原始 {source_row_count:,} 行；有效模型分 {len(data):,} 行；"
-        f"模型分缺失 {score_missing_count:,} 行"
+        f"   原始 {source_row_count:,} 行；剔除未完成申请 {removed_incomplete_count:,} 行；"
+        f"有效模型分 {len(data):,} 行；模型分缺失 {score_missing_count:,} 行"
     )
     return data
 
@@ -2796,10 +2813,13 @@ def build_overview(
 ) -> pd.DataFrame:
     """整理报告首页的核心结论，并按模块分组展示。"""
     source_row_count = int(data.attrs.get("source_row_count", len(data)))
+    removed_incomplete_count = int(data.attrs.get("removed_incomplete_count", 0))
     score_missing_count = int(data.attrs.get("score_missing_count", 0))
 
     rows = [
         ("样本", "原始样本量", source_row_count),
+        ("样本", "剔除未完成申请量", removed_incomplete_count),
+        ("样本", "剔除未完成申请率", safe_div(removed_incomplete_count, source_row_count)),
         ("样本", "有效模型分样本量", len(data)),
         ("样本", "模型分缺失量", score_missing_count),
         ("样本", "模型分缺失率", safe_div(score_missing_count, source_row_count)),
