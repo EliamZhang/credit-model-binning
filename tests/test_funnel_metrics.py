@@ -110,6 +110,66 @@ class FunnelMetricTests(unittest.TestCase):
             0.5,
         )
 
+    def test_actual_funnel_can_be_drilled_down_by_final_bin(self):
+        data = pd.DataFrame(
+            {
+                "application_id": [1, 2, 3, 4],
+                binning.FINAL_BIN_COL: ["A", "A", "B", "B"],
+                "bin_order": [1, 1, 2, 2],
+                "application_status": [
+                    "4.Funded",
+                    "2.3.Risk Declined",
+                    "3.1.Approved Withdrawn",
+                    "0.Incomplete",
+                ],
+                "assessment_status": [
+                    "4.Auto Approved Auto Funded",
+                    "2.3.Auto Declined",
+                    "3.1.Manual Approved Auto Withdrawn",
+                    "0.Incomplete",
+                ],
+                "status": ["Active_Account", "Declined", "Cancelled", "Trashed"],
+            }
+        )
+
+        result = binning.build_bin_actual_funnel_report(data).set_index(
+            binning.FINAL_BIN_COL
+        )
+
+        self.assertAlmostEqual(result.loc["A", "actual_completion_rate"], 1.0)
+        self.assertAlmostEqual(result.loc["A", "actual_approval_rate"], 0.5)
+        self.assertAlmostEqual(result.loc["A", "actual_auto_approval_rate"], 0.5)
+        self.assertAlmostEqual(result.loc["B", "actual_completion_rate"], 0.5)
+        self.assertAlmostEqual(result.loc["B", "actual_manual_approval_rate"], 1.0)
+
+    def test_bin_model_diagnostics_reconcile_to_iv(self):
+        stats = pd.DataFrame(
+            {
+                "bin_order": [1, 2, 3],
+                "1m30p_cnt_bad": [1, 3, 8],
+                "1m30p_cnt_good": [20, 15, 10],
+                "3m30p_cnt_bad": [2, 5, 10],
+                "3m30p_cnt_good": [18, 14, 8],
+            }
+        )
+
+        result = binning.add_bin_model_diagnostics(stats)
+
+        expected_1m_iv = binning.calc_iv_from_stats(
+            stats,
+            bad_col="1m30p_cnt_bad",
+            good_col="1m30p_cnt_good",
+        )
+        expected_3m_iv = binning.calc_iv_from_stats(
+            stats,
+            bad_col="3m30p_cnt_bad",
+            good_col="3m30p_cnt_good",
+        )
+        self.assertAlmostEqual(result["1m30p_iv_component"].sum(), expected_1m_iv)
+        self.assertAlmostEqual(result["3m30p_iv_component"].sum(), expected_3m_iv)
+        self.assertTrue(result["1m30p_ks_curve"].between(0, 1).all())
+        self.assertTrue(result["3m30p_ks_curve"].between(0, 1).all())
+
 
 if __name__ == "__main__":
     unittest.main()

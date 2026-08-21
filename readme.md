@@ -905,7 +905,28 @@ merge_steps
 final_train_stats / final_oot_stats
 ```
 
-Train / OOT 的最终箱统计合并为一张表，用 `sample_group` 列区分。字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等），并在 1M30+ / 3M30+ 笔数逾期率及累计口径旁附带 95% Wilson 置信区间：
+Train / OOT 的最终箱统计合并为一张表，用 `sample_group` 列区分。每一行对应一个最终风险档，并将风险、历史实际审批、模型策略测算流量和箱级模型诊断放在同一行，便于直接比较：
+
+```text
+strategy_estimated_decision / strategy_estimated_bin_flow_rate
+strategy_estimated_cumulative_flow_rate
+actual_completion_rate / actual_approval_rate
+actual_auto_approval_rate / actual_manual_approval_rate
+actual_auto_approval_share / actual_manual_approval_share / actual_deal_rate
+1m30p_iv_component / 3m30p_iv_component
+1m30p_ks_curve / 3m30p_ks_curve
+train_oot_psi_component / train_oot_psi_total
+strategy_estimated_overall_auto_pass_rate
+strategy_estimated_overall_manual_review_rate
+strategy_estimated_overall_total_accept_rate
+strategy_estimated_overall_reject_rate
+overall_1m30p_auc / overall_3m30p_auc
+overall_1m30p_ks / overall_3m30p_ks
+```
+
+其中，历史实际指标在每个 `score_mlt_final_bin` 内按唯一 `application_id` 重新计算；策略测算字段表示该箱的策略归属、单箱流量贡献及累计流量。所有指标均使用独立字段，不把 1M/3M、笔数/金额、自动/人工或 AUC/KS 合并在同一列。AUC、整体 KS、整体 PSI 和整体策略转化率属于样本组指标，不定义为单箱指标，因此使用带 `overall` 或 `total` 的独立字段在分箱表中重复展示；箱级 IV、KS 曲线点和 PSI 分项另设独立字段。
+
+字段与分箱过程类似（不含初始箱列，含 `merged_from`、`score_left`、`score_right`、累计指标等），并在 1M30+ / 3M30+ 笔数逾期率及累计口径旁附带 95% Wilson 置信区间：
 
 ```text
 1m30p_cnt_bad_rate_ci_low / 1m30p_cnt_bad_rate_ci_high
@@ -917,6 +938,8 @@ cum_1m30p_cnt_bad_rate_ci_low / cum_3m30p_cnt_bad_rate_ci_high（含 _high 上�
 
 - 从 `bin_order=1` 向下看风险是否逐步升高。
 - 同一风险等级在 Train / OOT 中的风险方向是否一致。
+- 对照箱内历史实际审批表现与模型策略归属，识别实际流程和测算策略差异最大的风险档。
+- `*_iv_component` 可求和得到样本组整体 IV；`*_ks_curve` 的最大值与离散分档口径 KS 对应；各箱 `train_oot_psi_component` 之和等于整体 PSI。
 - OOT 单箱成熟量很小时，不要过度解释短期波动。
 - 尾部箱样本量小、置信区间宽，应结合 `*_cnt_bad_rate_ci_high`（保守风险上界）解读风险率，不能只看点估计。
 
