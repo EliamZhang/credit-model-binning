@@ -293,11 +293,13 @@ score_min / score_max / score_mean = 箱内实际分数范围与均值
 某箱 Lift = 某箱逾期率 / 该样本组整体逾期率
 ```
 
-例如：
+笔数风险与金额风险各输出两个口径：
 
 ```text
-3m30p_cnt_lift
-= 该箱 3M30+ 笔数逾期率 / 该样本组整体 3M30+ 笔数逾期率
+1m30p_cnt_lift   = 该箱 1M30+ 笔数逾期率 / 整体 1M30+ 笔数逾期率
+3m30p_cnt_lift   = 该箱 3M30+ 笔数逾期率 / 整体 3M30+ 笔数逾期率
+1m30p_amt_lift   = 该箱 1M30+ 金额逾期率 / 整体 1M30+ 金额逾期率
+3m30p_amt_lift   = 该箱 3M30+ 金额逾期率 / 整体 3M30+ 金额逾期率
 ```
 
 解读：
@@ -914,6 +916,11 @@ strategy_estimated_cumulative_flow_rate
 actual_completion_rate / actual_approval_rate
 actual_auto_approval_rate / actual_manual_approval_rate
 actual_auto_approval_share / actual_manual_approval_share / actual_deal_rate
+1m30p_cnt_lift / 1m30p_amt_lift / 3m30p_cnt_lift / 3m30p_amt_lift
+cum_1m30p_cnt_mature / cum_1m30p_cnt_bad / cum_1m30p_cnt_bad_rate
+cum_1m30p_amt_exposure / cum_1m30p_amt_bad / cum_1m30p_amt_bad_rate
+cum_3m30p_cnt_mature / cum_3m30p_cnt_bad / cum_3m30p_cnt_bad_rate
+cum_3m30p_amt_exposure / cum_3m30p_amt_bad / cum_3m30p_amt_bad_rate
 1m30p_iv_component / 3m30p_iv_component
 1m30p_ks_curve / 3m30p_ks_curve
 train_oot_psi_component / train_oot_psi_total

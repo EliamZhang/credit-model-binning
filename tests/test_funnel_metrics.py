@@ -187,6 +187,66 @@ class FunnelMetricTests(unittest.TestCase):
         self.assertTrue(result["1m30p_ks_curve"].between(0, 1).all())
         self.assertTrue(result["3m30p_ks_curve"].between(0, 1).all())
 
+    def test_bin_lift_is_bin_rate_over_sample_group_overall(self):
+        stats = pd.DataFrame(
+            {
+                "bin_order": [1, 2],
+                "1m30p_cnt_mature": [100, 300],
+                "1m30p_cnt_bad": [1, 6],
+                "3m30p_cnt_mature": [200, 400],
+                "3m30p_cnt_bad": [4, 12],
+                "1m30p_amt_exposure": [10000, 30000],
+                "1m30p_amt_bad": [50, 450],
+                "3m30p_amt_exposure": [20000, 40000],
+                "3m30p_amt_bad": [200, 1000],
+            }
+        )
+
+        result = binning.add_bin_lift(stats)
+
+        self.assertEqual(result["bin_order"].tolist(), [1, 2])
+        overall = {
+            "1m30p_cnt": 7 / 400,
+            "3m30p_cnt": 16 / 600,
+            "1m30p_amt": 500 / 40000,
+            "3m30p_amt": 1200 / 60000,
+        }
+        rates = {
+            "1m30p_cnt": [(1 / 100), (6 / 300)],
+            "3m30p_cnt": [(4 / 200), (12 / 400)],
+            "1m30p_amt": [(50 / 10000), (450 / 30000)],
+            "3m30p_amt": [(200 / 20000), (1000 / 40000)],
+        }
+        for prefix, expected_overall in overall.items():
+            for bin_idx, bin_rate in enumerate(rates[prefix]):
+                self.assertAlmostEqual(
+                    result[f"{prefix}_lift"].iloc[bin_idx],
+                    bin_rate / expected_overall,
+                )
+
+    def test_bin_lift_overall_row_is_identity(self):
+        stats = pd.DataFrame(
+            {
+                "bin_order": [1, 2, 0],
+                "1m30p_cnt_mature": [100, 300, 400],
+                "1m30p_cnt_bad": [1, 6, 7],
+                "3m30p_cnt_mature": [200, 400, 600],
+                "3m30p_cnt_bad": [4, 12, 16],
+                "1m30p_amt_exposure": [10000, 30000, 40000],
+                "1m30p_amt_bad": [50, 450, 500],
+                "3m30p_amt_exposure": [20000, 40000, 60000],
+                "3m30p_amt_bad": [200, 1000, 1200],
+            }
+        )
+
+        result = binning.add_bin_lift(stats)
+
+        self.assertEqual(result["bin_order"].tolist(), [0, 1, 2])
+        self.assertAlmostEqual(result["1m30p_cnt_lift"].iloc[0], 1.0)
+        self.assertAlmostEqual(result["3m30p_cnt_lift"].iloc[0], 1.0)
+        self.assertAlmostEqual(result["1m30p_amt_lift"].iloc[0], 1.0)
+        self.assertAlmostEqual(result["3m30p_amt_lift"].iloc[0], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

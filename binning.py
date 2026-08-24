@@ -791,6 +791,25 @@ def add_bin_model_diagnostics(stats: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def add_bin_lift(stats: pd.DataFrame) -> pd.DataFrame:
+    """补充箱级 Lift：某箱逾期率 ÷ 该样本组整体逾期率（整体为各箱汇总）。"""
+    result = stats.sort_values("bin_order").reset_index(drop=True).copy()
+    if len(result) == 0:
+        return result
+    lift_denoms = [
+        ("1m30p_cnt", "1m30p_cnt_mature"),
+        ("1m30p_amt", "1m30p_amt_exposure"),
+        ("3m30p_cnt", "3m30p_cnt_mature"),
+        ("3m30p_amt", "3m30p_amt_exposure"),
+    ]
+    for prefix, denom_col in lift_denoms:
+        bad = pd.to_numeric(result[f"{prefix}_bad"], errors="coerce").fillna(0.0)
+        denom = pd.to_numeric(result[denom_col], errors="coerce").fillna(0.0)
+        overall_rate = bad.sum() / denom.sum()
+        result[f"{prefix}_lift"] = safe_div(bad / denom, overall_rate)
+    return result
+
+
 def build_enriched_final_bin_report(
     stats: pd.DataFrame,
     data: pd.DataFrame,
@@ -798,7 +817,7 @@ def build_enriched_final_bin_report(
     psi: pd.DataFrame,
 ) -> pd.DataFrame:
     """整合箱级风险、历史实际审批、策略流量贡献和稳定性诊断指标。"""
-    result = add_bin_model_diagnostics(stats)
+    result = add_bin_lift(add_bin_model_diagnostics(stats))
     actual_by_bin = build_bin_actual_funnel_report(data)
     result = result.merge(
         actual_by_bin,
@@ -868,6 +887,22 @@ def build_enriched_final_bin_report(
         "1m30p_amt_bad_rate",
         "3m30p_cnt_bad_rate",
         "3m30p_amt_bad_rate",
+        "1m30p_cnt_lift",
+        "1m30p_amt_lift",
+        "3m30p_cnt_lift",
+        "3m30p_amt_lift",
+        "cum_1m30p_cnt_mature",
+        "cum_1m30p_cnt_bad",
+        "cum_1m30p_cnt_bad_rate",
+        "cum_1m30p_amt_exposure",
+        "cum_1m30p_amt_bad",
+        "cum_1m30p_amt_bad_rate",
+        "cum_3m30p_cnt_mature",
+        "cum_3m30p_cnt_bad",
+        "cum_3m30p_cnt_bad_rate",
+        "cum_3m30p_amt_exposure",
+        "cum_3m30p_amt_bad",
+        "cum_3m30p_amt_bad_rate",
         "1m30p_iv_component",
         "1m30p_ks_curve",
         "3m30p_iv_component",
@@ -2620,18 +2655,30 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("笔数风险", "1m30p_cnt_mature", "1M30+ 已成熟样本量", "duedate_1m_30 IN (0, 1)"),
         ("笔数风险", "1m30p_cnt_bad", "1M30+ 逾期样本量", "duedate_1m_30 = 1"),
         ("笔数风险", "1m30p_cnt_bad_rate", "1M30+ 笔数逾期率", "1m30p_cnt_bad / 1m30p_cnt_mature"),
+        ("笔数风险", "1m30p_cnt_lift", "1M30+ 笔数 Lift", "1m30p_cnt_bad_rate ÷ 整体 1M30+ 笔数逾期率"),
         ("笔数风险", "3m30p_cnt_mature", "3M30+ 已成熟样本量", "duedate_3m_30 IN (0, 1)"),
         ("笔数风险", "3m30p_cnt_bad", "3M30+ 逾期样本量", "duedate_3m_30 = 1"),
         ("笔数风险", "3m30p_cnt_bad_rate", "3M30+ 笔数逾期率", "3m30p_cnt_bad / 3m30p_cnt_mature"),
+        ("笔数风险", "3m30p_cnt_lift", "3M30+ 笔数 Lift", "3m30p_cnt_bad_rate ÷ 整体 3M30+ 笔数逾期率"),
         ("笔数风险", "1m30p_cnt_bad_rate_ci_low / ci_high", "1M30+ 笔数逾期率 95% Wilson 置信区间下/上界", "Wilson 区间（z=1.96）；成熟量为 0 时为空"),
         ("笔数风险", "3m30p_cnt_bad_rate_ci_low / ci_high", "3M30+ 笔数逾期率 95% Wilson 置信区间下/上界", "Wilson 区间（z=1.96）；成熟量为 0 时为空"),
+        ("笔数风险", "cum_1m30p_cnt_mature / cum_1m30p_cnt_bad", "累计 1M30+ 已成熟样本量 / 逾期样本量", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("笔数风险", "cum_1m30p_cnt_bad_rate", "累计 1M30+ 笔数逾期率", "cum_1m30p_cnt_bad / cum_1m30p_cnt_mature"),
+        ("笔数风险", "cum_3m30p_cnt_mature / cum_3m30p_cnt_bad", "累计 3M30+ 已成熟样本量 / 逾期样本量", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("笔数风险", "cum_3m30p_cnt_bad_rate", "累计 3M30+ 笔数逾期率", "cum_3m30p_cnt_bad / cum_3m30p_cnt_mature"),
         ("笔数风险", "cum_*_cnt_bad_rate_ci_low / ci_high", "累计笔数逾期率的 95% Wilson 置信区间下/上界", "按累计成熟量与逾期量计算"),
         ("金额风险", "1m30p_amt_exposure", "1M30+ 已成熟样本的本金敞口", "SUM(principal) WHERE MOB1 已成熟"),
         ("金额风险", "1m30p_amt_bad", "MOB1 30+ 样本的剩余本金", "SUM(estimate_principal_remaining_mob1)"),
         ("金额风险", "1m30p_amt_bad_rate", "1M30+ 金额逾期率", "1m30p_amt_bad / 1m30p_amt_exposure"),
+        ("金额风险", "1m30p_amt_lift", "1M30+ 金额 Lift", "1m30p_amt_bad_rate ÷ 整体 1M30+ 金额逾期率"),
         ("金额风险", "3m30p_amt_exposure", "3M30+ 已成熟样本的本金敞口", "SUM(principal) WHERE MOB3 已成熟"),
         ("金额风险", "3m30p_amt_bad", "MOB3 30+ 样本的剩余本金", "SUM(estimate_principal_remaining_mob3)"),
         ("金额风险", "3m30p_amt_bad_rate", "3M30+ 金额逾期率", "3m30p_amt_bad / 3m30p_amt_exposure"),
+        ("金额风险", "3m30p_amt_lift", "3M30+ 金额 Lift", "3m30p_amt_bad_rate ÷ 整体 3M30+ 金额逾期率"),
+        ("金额风险", "cum_1m30p_amt_exposure / cum_1m30p_amt_bad", "累计 1M30+ 本金敞口 / 逾期剩余本金", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("金额风险", "cum_1m30p_amt_bad_rate", "累计 1M30+ 金额逾期率", "cum_1m30p_amt_bad / cum_1m30p_amt_exposure"),
+        ("金额风险", "cum_3m30p_amt_exposure / cum_3m30p_amt_bad", "累计 3M30+ 本金敞口 / 逾期剩余本金", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("金额风险", "cum_3m30p_amt_bad_rate", "累计 3M30+ 金额逾期率", "cum_3m30p_amt_bad / cum_3m30p_amt_exposure"),
         ("模型策略测算", "cum_pass_rate", "从低风险端累计到当前阈值的模型策略测算通过率", "cum_n / total_n"),
         ("阈值", "marginal_sample_pct", "当前档位新增样本占比", "marginal_n / total_n"),
         ("阈值", "marginal_3m30p_cnt_bad_rate", "当前新增档位自身的 3M30+ 风险", "marginal_bad / marginal_mature"),
@@ -3096,7 +3143,7 @@ def format_excel_report(path: Path) -> None:
                     ):
                         cell.number_format = "0.00%"
                     elif (
-                        header_tokens.intersection({"auc", "ks", "psi", "corr", "iv"})
+                        header_tokens.intersection({"auc", "ks", "psi", "corr", "iv", "lift"})
                         or "p_value" in header
                     ):
                         cell.number_format = "0.0000"
@@ -3269,6 +3316,22 @@ def write_report(
         "1m30p_amt_bad_rate",
         "3m30p_cnt_bad_rate",
         "3m30p_amt_bad_rate",
+        "1m30p_cnt_lift",
+        "1m30p_amt_lift",
+        "3m30p_cnt_lift",
+        "3m30p_amt_lift",
+        "cum_1m30p_cnt_mature",
+        "cum_1m30p_cnt_bad",
+        "cum_1m30p_cnt_bad_rate",
+        "cum_1m30p_amt_exposure",
+        "cum_1m30p_amt_bad",
+        "cum_1m30p_amt_bad_rate",
+        "cum_3m30p_cnt_mature",
+        "cum_3m30p_cnt_bad",
+        "cum_3m30p_cnt_bad_rate",
+        "cum_3m30p_amt_exposure",
+        "cum_3m30p_amt_bad",
+        "cum_3m30p_amt_bad_rate",
         "1m30p_iv_component",
         "3m30p_iv_component",
         "1m30p_ks_curve",
