@@ -99,7 +99,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 
 | 输入文件 | 连接字段 | 当前用途 |
 | --- | --- | --- |
-| `sample.csv` | `application_id`、`user_id` | 分析底表，决定最终保留哪些样本 |
+| `sample.csv` | `application_id`、`user_id` | 分析底表（数据准备阶段已剔除未完成申请，仅保留完成申请；文件仅含 `application_id` / `user_id` / `sample_datetime` 三列），决定最终保留哪些样本 |
 | `application_info.csv` | `application_id`、`user_id` | 补充申请时间、表现标签、本金、审批状态等信息 |
 | `aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv` | `application_id` | 提供主模型分，重命名为 `score_mlt` |
 
@@ -111,7 +111,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 - 模型分表按 `application_id` 去重（保留第一条）后左连接。
 - `application_month` 缺失时，用 `application_time` 的月份补齐；若仍缺失则该行不进入 Train / OOT，不参与任何分析。
 - **分箱分析只保留存在模型分的样本**；模型分缺失的样本会在总览中单独展示数量和比例。
-- 加载时整体剔除未完成申请（`application_status` 属于 `0.Incomplete` / `1.In Progress`），不进入历史漏斗、分箱与策略测算；原始样本量、剔除量及剔除率在总览中展示。
+- 数据源 `sample.csv` 已在数据准备阶段剔除未完成申请（`application_status` 属于 `0.Incomplete` / `1.In Progress`），分析样本全部为完成进件；代码加载时保留同口径剔除作为防御性检查（正常为 0 笔），原始样本量、剔除量及剔除率在总览中展示。
 
 ### 5. 当前必须存在的关键字段
 
@@ -345,14 +345,14 @@ cum_3m30p_amt_bad_rate
 
 报告严格区分两类指标：
 
-- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重；未完成申请已在加载时整体剔除，分析样本全部为完成进件，故完成率恒为 100%。
+- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重；未完成申请已在数据源剔除，分析样本全部为完成进件，故完成率恒为 100%。
 - **模型策略测算流量（`strategy_estimated_*`）**：按 `score_mlt` 和 Train 确定的策略阈值测算，不代表历史真实审批结果。
 
 历史实际审批漏斗定义：
 
 | 指标 | 计算公式 | 判定条件 |
 | --- | --- | --- |
-| `actual_completion_rate` | 完成进件数 / 申请数 | 未完成申请已整体剔除，申请数即完成进件数，完成率恒为 100% |
+| `actual_completion_rate` | 完成进件数 / 申请数 | 数据源已剔除未完成申请，申请数即完成进件数，完成率恒为 100% |
 | `actual_approval_rate` | 审批通过数 / 完成进件数 | `application_status` 首字符为 3 或 4 |
 | `actual_auto_approval_rate` | 自动审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Auto Approved` |
 | `actual_manual_approval_rate` | 人工审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Manual Approved` |
@@ -789,7 +789,7 @@ strategy_estimated_flow（Train / OOT / All 模型策略测算流量）
 
 代码按相同的 Train/OOT 时间切片分别输出：
 
-- 历史实际审批漏斗（未完成申请已剔除）：完成率、审批通过率、自动/人工审批通过率、自动/人工审批占比和成交转化率；
+- 历史实际审批漏斗（数据源已剔除未完成申请）：完成率、审批通过率、自动/人工审批通过率、自动/人工审批占比和成交转化率；
 - 模型策略测算流量：自动通过率、人工审核率、总接纳率和拒绝率；
 - 全量汇总：用于核对 Train 与 OOT 加总以及两套口径的总体差异。
 
