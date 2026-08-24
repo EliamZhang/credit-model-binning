@@ -248,5 +248,86 @@ class FunnelMetricTests(unittest.TestCase):
         self.assertAlmostEqual(result["3m30p_amt_lift"].iloc[0], 1.0)
 
 
+    def test_refine_ranges_under_share_cap_splits_overlarge_bin_and_remerges(self):
+        stats = self._share_cap_stats()
+        # (2,4)=45% 与 (5,6)=45% 均超 35% 上限：低风险侧优先拆分为 5 箱，
+        # 再合并代价最低的可行相邻对（仅 (1,1)+(2,2) 合并后仍不超过上限）回到 4 档。
+        result = binning.refine_ranges_under_share_cap(
+            [(1, 1), (2, 4), (5, 6)],
+            stats,
+            protected_boundaries=set(),
+            extreme_boundaries=set(),
+            max_share=0.35,
+            target_bin_count=4,
+        )
+
+        self.assertEqual(result, [(1, 2), (3, 4), (5, 5), (6, 6)])
+
+    def test_refine_ranges_under_share_cap_keeps_compliant_ranges_unchanged(self):
+        stats = self._share_cap_stats()
+        # 各箱占比均不超过上限时原样返回。
+        result = binning.refine_ranges_under_share_cap(
+            [(1, 2), (3, 3), (4, 4)],
+            stats,
+            protected_boundaries=set(),
+            extreme_boundaries=set(),
+            max_share=0.5,
+            target_bin_count=3,
+        )
+
+        self.assertEqual(result, [(1, 2), (3, 3), (4, 4)])
+
+    def test_refine_ranges_under_share_cap_returns_none_when_single_bin_unsplittable(self):
+        stats = self._share_cap_stats()
+        # (2,5)=70% 超 10% 上限，但任一可行拆点的左子箱都 ≥20%，拆不出合规子箱。
+        result = binning.refine_ranges_under_share_cap(
+            [(1, 1), (2, 5), (6, 6)],
+            stats,
+            protected_boundaries=set(),
+            extreme_boundaries=set(),
+            max_share=0.1,
+            target_bin_count=3,
+        )
+
+        self.assertIsNone(result)
+
+    def test_refine_ranges_under_share_cap_returns_none_when_all_merges_blocked(self):
+        stats = self._share_cap_stats()
+        # 拆分后唯一可行的合并对 (1,1)+(2,2) 跨 extreme 边界 1，被拦截后无法回到目标档数。
+        result = binning.refine_ranges_under_share_cap(
+            [(1, 1), (2, 4), (5, 6)],
+            stats,
+            protected_boundaries=set(),
+            extreme_boundaries={1},
+            max_share=0.35,
+            target_bin_count=4,
+        )
+
+        self.assertIsNone(result)
+
+    @staticmethod
+    def _share_cap_stats():
+        return pd.DataFrame(
+            {
+                "bin_order": list(range(1, 7)),
+                "n": [10, 20, 15, 10, 25, 20],
+                "principal_amt": [1000, 2000, 1500, 1000, 2500, 2000],
+                "score_left": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+                "score_right": [0.1, 0.2, 0.3, 0.4, 0.5, 1.0],
+                "score_min": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+                "score_max": [0.1, 0.2, 0.3, 0.4, 0.5, 1.0],
+                "score_mean": [0.05, 0.15, 0.25, 0.35, 0.45, 0.75],
+                "1m30p_cnt_mature": [90, 180, 140, 90, 220, 180],
+                "1m30p_cnt_bad": [1, 4, 4, 4, 11, 11],
+                "1m30p_amt_exposure": [9000, 18000, 14000, 9000, 22000, 18000],
+                "1m30p_amt_bad": [100, 400, 400, 400, 1100, 1100],
+                "3m30p_cnt_mature": [90, 180, 140, 90, 220, 180],
+                "3m30p_cnt_bad": [1, 4, 4, 4, 11, 11],
+                "3m30p_amt_exposure": [9000, 18000, 14000, 9000, 22000, 18000],
+                "3m30p_amt_bad": [100, 400, 400, 400, 1100, 1100],
+            }
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
