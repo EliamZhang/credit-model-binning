@@ -16,7 +16,7 @@
 → 检查关键字段，按月份切分 Train / OOT
 → 在完整 Train 上对 score_mlt 做 20 等频初分，边界复用到 OOT
 → 计算每箱规模、1M30+、3M30+、金额风险、Lift 和累计指标
-→ 自动合箱：小箱清理 → 单调合并 → 档位压缩 → 生成 6~8 档候选方案并评分
+→ 自动合箱：小箱清理 → 单调合并 → 档位压缩 → 生成 6~8 档候选，超限箱按占比上限整形后统一评分
 → 将最终合箱映射应用到 Train / OOT
 → 验证单调性、PSI、AUC、KS 和月度稳定性
 → 在完整 Train 上生成最终箱边界阈值曲线
@@ -99,7 +99,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 
 | 输入文件 | 连接字段 | 当前用途 |
 | --- | --- | --- |
-| `sample.csv` | `application_id`、`user_id` | 分析底表，决定最终保留哪些样本 |
+| `sample.csv` | `application_id`、`user_id` | 分析底表（数据准备阶段已剔除未完成申请，仅保留完成申请；文件仅含 `application_id` / `user_id` / `sample_datetime` 三列），决定最终保留哪些样本 |
 | `application_info.csv` | `application_id`、`user_id` | 补充申请时间、表现标签、本金、审批状态等信息 |
 | `aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv` | `application_id` | 提供主模型分，重命名为 `score_mlt` |
 
@@ -111,7 +111,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 - 模型分表按 `application_id` 去重（保留第一条）后左连接。
 - `application_month` 缺失时，用 `application_time` 的月份补齐；若仍缺失则该行不进入 Train / OOT，不参与任何分析。
 - **分箱分析只保留存在模型分的样本**；模型分缺失的样本会在总览中单独展示数量和比例。
-- 加载时整体剔除未完成申请（`application_status` 属于 `0.Incomplete` / `1.In Progress`），不进入历史漏斗、分箱与策略测算；原始样本量、剔除量及剔除率在总览中展示。
+- 数据源 `sample.csv` 已在数据准备阶段剔除未完成申请（`application_status` 属于 `0.Incomplete` / `1.In Progress`），分析样本全部为完成进件；代码加载时保留同口径剔除作为防御性检查（正常为 0 笔），原始样本量、剔除量及剔除率在总览中展示。
 
 ### 5. 当前必须存在的关键字段
 
@@ -147,6 +147,7 @@ INITIAL_BIN_COUNT = 20
 MIN_FINAL_BIN_COUNT = 6
 MAX_FINAL_BIN_COUNT = 8
 TARGET_FINAL_BIN_COUNT = 7
+MAX_FINAL_BIN_SHARE = 0.21
 ```
 
 含义：
@@ -156,6 +157,7 @@ TARGET_FINAL_BIN_COUNT = 7
 - 时间不在上述范围的样本不进入 Train / OOT，不参与任何分析。
 - 完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 完全独立，不参与调参。
 - 初始等频分 20 箱，自动合箱到 6~8 档（目标 7 档）。
+- 单箱样本占比上限 21%：超限候选会被“均衡拆分 + 相邻再合并”整形，把人群分布整形为两端低、中间高的钟形（见 6.5 第 5 步）。
 - `application_month` 必须使用可按字符串正确比较的 `YYYY-MM` 格式。
 
 ---
@@ -293,11 +295,13 @@ score_min / score_max / score_mean = 箱内实际分数范围与均值
 某箱 Lift = 某箱逾期率 / 该样本组整体逾期率
 ```
 
-例如：
+笔数风险与金额风险各输出两个口径：
 
 ```text
-3m30p_cnt_lift
-= 该箱 3M30+ 笔数逾期率 / 该样本组整体 3M30+ 笔数逾期率
+1m30p_cnt_lift   = 该箱 1M30+ 笔数逾期率 / 整体 1M30+ 笔数逾期率
+3m30p_cnt_lift   = 该箱 3M30+ 笔数逾期率 / 整体 3M30+ 笔数逾期率
+1m30p_amt_lift   = 该箱 1M30+ 金额逾期率 / 整体 1M30+ 金额逾期率
+3m30p_amt_lift   = 该箱 3M30+ 金额逾期率 / 整体 3M30+ 金额逾期率
 ```
 
 解读：
@@ -341,14 +345,14 @@ cum_3m30p_amt_bad_rate
 
 报告严格区分两类指标：
 
-- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重；未完成申请已在加载时整体剔除，分析样本全部为完成进件，故完成率恒为 100%。
+- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重；未完成申请已在数据源剔除，分析样本全部为完成进件，故完成率恒为 100%。
 - **模型策略测算流量（`strategy_estimated_*`）**：按 `score_mlt` 和 Train 确定的策略阈值测算，不代表历史真实审批结果。
 
 历史实际审批漏斗定义：
 
 | 指标 | 计算公式 | 判定条件 |
 | --- | --- | --- |
-| `actual_completion_rate` | 完成进件数 / 申请数 | 未完成申请已整体剔除，申请数即完成进件数，完成率恒为 100% |
+| `actual_completion_rate` | 完成进件数 / 申请数 | 数据源已剔除未完成申请，申请数即完成进件数，完成率恒为 100% |
 | `actual_approval_rate` | 审批通过数 / 完成进件数 | `application_status` 首字符为 3 或 4 |
 | `actual_auto_approval_rate` | 自动审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Auto Approved` |
 | `actual_manual_approval_rate` | 人工审批通过数 / 完成进件数 | 已审批通过且 `assessment_status` 含 `Manual Approved` |
@@ -550,16 +554,17 @@ merge_cost = 风险率差距 × MERGE_COST_RATE_GAP_WEIGHT（默认 100）
 第 2 步 单调合并：主指标出现相邻倒挂时，从倒挂最严重的一对开始合并（PAVA 风格）
 第 3 步 档位压缩：若仍超过 8 档，强制合并到 <= 8 档
 第 4 步 候选生成：继续按“统计不显著或风险率接近”合并出 8 档、7 档、6 档候选
+第 5 步 分布整形：单箱样本占比超过 MAX_FINAL_BIN_SHARE（默认 21%）的候选，沿低风险侧优先的可行拆点拆成两档，再合并代价最低的相邻对回到原档数，整形方案加入候选池重新评分
 ```
 
 每一步产生一个候选方案并记录合并原因；初始 20 箱也作为一个候选。
 
-四个阶段的执行口径为：
-
+五个阶段的执行口径为：
 1. **小箱清理**：定位违反严重度最高的箱，只比较其左右相邻合并方案，选择代价较低者，直至约束满足或达到最少档位数。
 2. **单调合并**：1M30+、3M30+ 任一主指标倒挂即纳入处理，从跌幅最严重的相邻对开始合并，直至无倒挂或达到最少档位数。
 3. **档位压缩**：档位数超过 8 时，从全部允许的相邻对中反复选择合并代价最低者。
 4. **候选生成**：继续生成 8、7、6 档候选；优先合并两比例检验 `p >= 0.10` 或主指标差距 `<= 0.3%` 的相邻对，否则选择全部允许相邻对中代价最低者。
+5. **分布整形**：对已生成的候选逐个检查单箱样本占比，超限时调用 `refine_ranges_under_share_cap` 整形——先从低风险侧找可行拆点拆开超限箱（拆不开则放弃该候选），再按合并代价合并相邻对回到原档数（合并后仍超限或跨极端边界的对会被过滤，合不回去也放弃）；整形不是顺序合箱阶段，而是候选生成后的叠加步骤，生成的新方案与原方案并列评分（合并原因标记为 `share_balancing`）。
 
 初始状态和每次合并后的状态均进入候选集合，并按合箱范围去重，因此最终选择覆盖整个合箱路径，而不是只比较各阶段的终态。
 
@@ -593,7 +598,7 @@ candidate_score
 按上述排序取第一名的合箱范围作为最终方案。若没有任何候选通过全部硬约束，则退而求其次：忽略硬约束筛选，直接从全部候选中按同样排序取第一名（此时 `hard_constraints_ok` 为 False，需在候选评分表中确认原因）。运行日志会打印实际档位数和方案，例如：
 
 ```text
-3/9 自动合箱完成：7 档，方案=[(1,2), (3,5), (6,8), (9,11), (12,14), (15,18), (19,20)]
+3/9 自动合箱完成：7 档，方案=[(1,1), (2,4), (5,8), (9,11), (12,15), (16,19), (20,20)]
 ```
 
 主要结果：
@@ -784,7 +789,7 @@ strategy_estimated_flow（Train / OOT / All 模型策略测算流量）
 
 代码按相同的 Train/OOT 时间切片分别输出：
 
-- 历史实际审批漏斗（未完成申请已剔除）：完成率、审批通过率、自动/人工审批通过率、自动/人工审批占比和成交转化率；
+- 历史实际审批漏斗（数据源已剔除未完成申请）：完成率、审批通过率、自动/人工审批通过率、自动/人工审批占比和成交转化率；
 - 模型策略测算流量：自动通过率、人工审核率、总接纳率和拒绝率；
 - 全量汇总：用于核对 Train 与 OOT 加总以及两套口径的总体差异。
 
@@ -896,7 +901,7 @@ merge_candidates
 merge_steps
 ```
 
-按顺序记录每次合箱的前后范围、档位数、合并阶段（small_bin_cleanup / pava_monotonic_merge / granularity_reduction / candidate_reduction）和合并原因。
+按顺序记录每次合箱的前后范围、档位数、合并阶段（small_bin_cleanup / pava_monotonic_merge / granularity_reduction / candidate_reduction / share_balancing）和合并原因。
 
 ### Sheet 3：`03_最终分箱统计`
 
@@ -914,6 +919,11 @@ strategy_estimated_cumulative_flow_rate
 actual_completion_rate / actual_approval_rate
 actual_auto_approval_rate / actual_manual_approval_rate
 actual_auto_approval_share / actual_manual_approval_share / actual_deal_rate
+1m30p_cnt_lift / 1m30p_amt_lift / 3m30p_cnt_lift / 3m30p_amt_lift
+cum_1m30p_cnt_mature / cum_1m30p_cnt_bad / cum_1m30p_cnt_bad_rate
+cum_1m30p_amt_exposure / cum_1m30p_amt_bad / cum_1m30p_amt_bad_rate
+cum_3m30p_cnt_mature / cum_3m30p_cnt_bad / cum_3m30p_cnt_bad_rate
+cum_3m30p_amt_exposure / cum_3m30p_amt_bad / cum_3m30p_amt_bad_rate
 1m30p_iv_component / 3m30p_iv_component
 1m30p_ks_curve / 3m30p_ks_curve
 train_oot_psi_component / train_oot_psi_total
@@ -1128,7 +1138,7 @@ config_table
         / INITIAL_BIN_COUNT / HIGH_SCORE_HIGH_RISK
 合箱配置：MIN/MAX/TARGET_FINAL_BIN_COUNT / PRIMARY_RATE_COL / 单箱约束
         / 单调与相邻差异控制
-        / PROTECTED_BOUNDARIES / SELECTED_FINAL_BIN_RANGES
+        / MAX_FINAL_BIN_SHARE / PROTECTED_BOUNDARIES / SELECTED_FINAL_BIN_RANGES
 极端箱配置：PROTECT_EXTREME_INITIAL_BINS / BEST/WORST_EXTREME_INITIAL_BIN_COUNT
         / ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS / EXTREME_BOUNDARIES
         / EXTREME_BOUNDARY_PENALTY / EXTREME_BOUNDARY_VIOLATION_PENALTY
@@ -1320,6 +1330,10 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 - 如果极端箱本身样本量很小，硬保护可能让该档位区间异常窄。
 - 数据或时间范围变化后，极端箱边界会随初始等频分箱移动，最终方案可能随之变化。
 - 若最终没有任何候选满足全部硬约束（含极端边界跨越数 = 0），脚本会退化为忽略硬约束、直接按综合得分取第一名，需在 `02_分箱详情` 的合箱候选评分表中确认该方案的可解释性。
+
+### 9. 分布整形会改变最终方案与阈值
+
+`MAX_FINAL_BIN_SHARE`（默认 21%）用于把单箱占比过大的档“均衡拆分 + 相邻再合并”，形成两端低、中间高的人群分布。它不改变 AUC/KS（两者基于分数排序，与分箱边界无关），但会移动最终箱边界，从而改变阈值曲线的候选点；PSI 和 IV 保留率会随方案变化。调整该参数或更换数据后，应重新评审 `SELECTED_FINAL_BIN_RANGES` 与策略阈值，不要直接沿用历史边界。
 
 ---
 
