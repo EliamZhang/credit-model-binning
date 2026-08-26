@@ -1,0 +1,3700 @@
+# -*- coding: utf-8 -*-
+"""
+价值模型分数分箱与策略阈值分析（worthiness 口径）
+
+以价值模型（aus_new_worthiness_bid_3rdmodel）替换 binning.py 中的主风险模型（mlt），
+其余管线（数据拼接、样本切分、笔数违约合箱、阈值测算、报告输出）与 binning.py 完全一致。
+价值模型分经数据验证为高分高风险：十分位 3M30+ 笔数逾期率随分数单调上升
+（最低分位 4.53% → 最高分位 24.11%），因此保持 HIGH_SCORE_HIGH_RISK = True。
+
+核心流程（对应日志中 1/9 ~ 9/9）：
+1. 从 res/ 读取 sample.csv + application_info.csv + 价值模型分文件，融合为宽表；按时间窗口 2025-10
+   / 2025-11 切分 Train（≤2025-10）与 OOT（≥2025-11）；
+2. 完整 Train 用于学习分箱边界、执行合箱和选择候选方案；OOT 全程不参与调参，仅用于最终验证；
+3. Train 上按 score_worthiness 做 20 等频分箱，生成初始边界；边界复用到 OOT，得到统一的
+   score_worthiness_bin20 分箱标签；
+4. 从 Train 初始箱出发，自动执行：约束修正 → 同时监控 1M30+ 与 3M30+ 笔数逾期率
+   做相邻单调合并 → 策略关键边界保护 → 评分候选方案，输出 6~8 档最终方案；同时保留手工兜底；
+5. 将最终合箱映射应用到 Train / OOT，生成统一口径的最终箱统计；
+6. OOT 上验证最终方案：单调性、PSI（训练/OOT 总体及分月）、AUC、KS 和分段对比；输出
+   月度稳定性矩阵；
+7. 基于完整 Train 的最终箱统计，构建阈值曲线（累计/边际逾期率），在自动通过/人工审核/
+   拒绝策略约束下生成 risk_level 分段与通过率方案；
+8. 汇总为 6 个 sheet：01_总览、02_分箱详情（过程+候选+步骤）、03_最终分箱统计
+   （Train/OOT 合一）、04_策略方案（历史实际审批漏斗+模型策略测算流量+阈值选择+分段验证）、
+   05_模型验证（Train/OOT 对比+AUC/KS+PSI+单调性+月度稳定性）、06_附录（配置+上线执行规则+指标说明）；
+9. 写入 out/binning_worthiness_strategy_report_YYYYMMDD.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
+
+
+运行方式：
+    python binning_worthiness.py
+
+输入目录：res/
+输出文件：out/binning_worthiness_strategy_report_YYYYMMDD.xlsx
+"""
+
+import ast
+import math
+import time
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+import numpy as np
+import pandas as pd
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+
+# ============================================================
+# 0. 配置
+# ============================================================
+
+DATA_DIR = Path("res")
+OUT_DIR = Path("out")
+REPORT_PATH = OUT_DIR / f"binning_worthiness_strategy_report_{time.strftime('%Y%m%d')}.xlsx"
+
+SAMPLE_FILE = "sample.csv"
+APPLICATION_FILE = "application_info.csv"
+SCORE_FILE = "aus_new_worthiness_bid_3rdmodel_v1_0_20260429.csv"
+
+RAW_SCORE_COL = "aus_new_worthiness_bid_3rdmodel_v1_0_20260429"
+SCORE_COL = "score_worthiness"
+
+# 未完成申请状态：加载时整体剔除，不进入历史漏斗、分箱与策略测算。
+INCOMPLETE_STATUSES = ["0.Incomplete", "1.In Progress"]
+
+TRAIN_END_MONTH = "2025-10"
+OOT_START_MONTH = "2025-11"
+
+INITIAL_BIN_COUNT = 20
+INITIAL_BIN_COL = "score_worthiness_bin20"
+FINAL_BIN_COL = "score_worthiness_final_bin"
+
+# 当前模型按“高分高风险”处理。价值模型分经数据验证（十分位 3M30+ 笔数逾期率
+# 随分数单调上升：最低分位 4.53% → 最高分位 24.11%），与 mlt 方向一致。
+HIGH_SCORE_HIGH_RISK = True
+
+# 最终风险档位数量。
+MIN_FINAL_BIN_COUNT = 6
+MAX_FINAL_BIN_COUNT = 8
+TARGET_FINAL_BIN_COUNT = 7
+
+# 合箱主指标：同时监控 1M30+ 和 3M30+ 笔数逾期率。
+PRIMARY_RATE_COLS = ["1m30p_cnt_bad_rate", "3m30p_cnt_bad_rate"]
+PRIMARY_RATE_COL = "3m30p_cnt_bad_rate"  # 保留单列引用，用于 p-value 等需要主锚定指标的场景
+PRIMARY_MATURE_COL = "3m30p_cnt_mature"
+PRIMARY_BAD_COL = "3m30p_cnt_bad"
+PRIMARY_GOOD_COL = "3m30p_cnt_good"
+
+# 最终箱约束。尾部箱允许更小，但仍需满足成熟量和好坏样本量。
+MIN_MIDDLE_BIN_SAMPLE_PCT = 0.05
+MIN_TAIL_BIN_SAMPLE_PCT = 0.025
+MIN_FINAL_BIN_MATURE_COUNT = 1000
+MIN_FINAL_BIN_BAD_COUNT = 20
+MIN_FINAL_BIN_GOOD_COUNT = 200
+MIN_EXTREME_BIN_MATURE_COUNT = 500
+MIN_BEST_EXTREME_BIN_BAD_COUNT = 0
+MIN_BEST_EXTREME_BIN_GOOD_COUNT = 200
+MIN_WORST_EXTREME_BIN_BAD_COUNT = 20
+MIN_WORST_EXTREME_BIN_GOOD_COUNT = 0
+
+# 单调与相邻差异控制。
+TRAIN_INVERSION_TOLERANCE = 0.0
+MONTHLY_INVERSION_TOLERANCE = 0.003
+ADJACENT_PVALUE_TO_MERGE = 0.10
+MIN_ADJACENT_ABS_RATE_DIFF = 0.003
+
+# 单箱样本占比上限（人数分布控制）：最终任意一档的 Train 样本占比不得超过该值，
+# 超限的候选方案会被自动做"均衡拆分 + 相邻再合并"整形后重新参与评分。
+# 设 0 或 None 表示不启用（保持纯风险相似合箱）。
+MAX_FINAL_BIN_SHARE = 0.21
+
+# 策略关键边界保护。强制处理小箱或倒挂时仍允许跨越保护边界。
+PROTECT_LARGEST_RISK_JUMPS = 1
+PROTECTED_BOUNDARY_PENALTY = 100.0
+
+# 极端人群圈选：默认保留最好和最坏各 1 个初始等频箱，不让常规合箱跨越。
+# 如果样本太少或单调性必须修复，可将 ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS 改为 True。
+PROTECT_EXTREME_INITIAL_BINS = True
+BEST_EXTREME_INITIAL_BIN_COUNT = 1
+WORST_EXTREME_INITIAL_BIN_COUNT = 1
+ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS = False
+EXTREME_BOUNDARY_PENALTY = 10000.0
+EXTREME_BOUNDARY_VIOLATION_PENALTY = 50.0
+
+# 候选合箱评分权重。
+MERGE_COST_RATE_GAP_WEIGHT = 100.0
+MERGE_COST_IV_LOSS_WEIGHT = 10.0
+IV_RETENTION_SCORE_CAP = 1.5
+CANDIDATE_SCORE_WEIGHTS = {
+    "hard_constraints_ok": 100.0,
+    "train_primary_inversion": -30.0,
+    "train_all_inversion": -4.0,
+    "constraint_violation": -15.0,
+    "iv_retention": 12.0,
+    "min_adjacent_rate_diff": 100.0,
+    "target_bin_distance": -1.5,
+    "extreme_boundary_violation": -EXTREME_BOUNDARY_VIOLATION_PENALTY,
+}
+
+# 指标计算平滑项。
+PSI_EPS = 1e-6
+IV_SMOOTHING_EPS = 0.5
+
+# 默认策略的风险约束。
+STRATEGY_CONFIG = {
+    "strategy_name": "默认策略",
+    "objective": "平衡通过率、整体风险和边际风险",
+    "auto_constraints": {
+        "max_cum_1m30p_cnt_bad_rate": 0.0090,
+        "max_cum_3m30p_cnt_bad_rate": 0.0550,
+        "max_marginal_3m30p_cnt_bad_rate": 0.0900,
+    },
+    "accept_constraints": {
+        "max_cum_1m30p_cnt_bad_rate": 0.0130,
+        "max_cum_3m30p_cnt_bad_rate": 0.0750,
+        "max_marginal_3m30p_cnt_bad_rate": 0.1700,
+    },
+}
+
+RISK_NUMERIC_COLS = [
+    SCORE_COL,
+    "duedate_1m_30",
+    "duedate_3m_30",
+    "principal",
+    "estimate_principal_remaining_mob1",
+    "estimate_principal_remaining_mob3",
+    "dpd_days_ever_mob1",
+    "dpd_days_ever_mob3",
+]
+
+REQUIRED_ANALYSIS_COLS = [
+    "application_id",
+    "user_id",
+    "application_time",
+    "application_month",
+    SCORE_COL,
+    "duedate_1m_30",
+    "duedate_3m_30",
+    "principal",
+    "estimate_principal_remaining_mob1",
+    "estimate_principal_remaining_mob3",
+    "dpd_days_ever_mob1",
+    "dpd_days_ever_mob3",
+    # 历史实际审批漏斗字段，均来自 application_info.csv。
+    "status",
+    "application_status",
+    "assessment_status",
+]
+
+# 风险指标统一配置：避免 1M30+ / 3M30+ 在多个函数中重复写同一套逻辑。
+RISK_PREFIXES = ("1m30p", "3m30p")
+ALL_RISK_RATE_COLS = [
+    "1m30p_cnt_bad_rate",
+    "3m30p_cnt_bad_rate",
+    "1m30p_amt_bad_rate",
+    "3m30p_amt_bad_rate",
+]
+RISK_HELPER_CONFIG = {
+    "1m30p": {
+        "due_col": "duedate_1m_30",
+        "dpd_col": "dpd_days_ever_mob1",
+        "remaining_col": "estimate_principal_remaining_mob1",
+        "helper_prefix": "_m1",
+    },
+    "3m30p": {
+        "due_col": "duedate_3m_30",
+        "dpd_col": "dpd_days_ever_mob3",
+        "remaining_col": "estimate_principal_remaining_mob3",
+        "helper_prefix": "_m3",
+    },
+}
+
+
+# ============================================================
+# 1. 通用工具
+# ============================================================
+
+def clean_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """清理 UTF-8 BOM 和少数 CSV 表头乱码。"""
+    result = frame.copy()
+    result.columns = [str(col).lstrip("\ufeff").lstrip("ï»¿") for col in result.columns]
+    return result
+
+
+def read_csv_clean(path: Path) -> pd.DataFrame:
+    """读取 CSV，并统一清理字段名。"""
+    if not path.exists():
+        raise FileNotFoundError(f"输入文件不存在: {path}")
+    return clean_columns(pd.read_csv(path, low_memory=False))
+
+
+def require_columns(frame: pd.DataFrame, columns: Iterable[str], context: str) -> None:
+    """校验 DataFrame 是否包含必要字段。"""
+    missing = [col for col in columns if col not in frame.columns]
+    if missing:
+        raise ValueError(f"{context} 缺少必要字段: {missing}")
+
+
+def safe_div(numerator, denominator):
+    """安全除法；分母为 0 时返回 NaN。"""
+    num = np.asarray(numerator, dtype="float64")
+    den = np.asarray(denominator, dtype="float64")
+    result = np.full(np.broadcast(num, den).shape, np.nan, dtype="float64")
+    np.divide(num, den, out=result, where=den != 0)
+
+    if np.ndim(result) == 0:
+        return float(result)
+    if isinstance(numerator, pd.Series):
+        return pd.Series(result, index=numerator.index)
+    if isinstance(denominator, pd.Series):
+        return pd.Series(result, index=denominator.index)
+    return result
+
+
+def wilson_ci(
+    bad: np.ndarray,
+    mature: np.ndarray,
+    z: float = 1.96,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    笔数比例的 95% Wilson 置信区间（下界, 上界）。
+
+    成熟量为 0 时返回 NaN；上界可用于尾部小样本箱的保守风险估计。
+    """
+    bad_arr = np.asarray(bad, dtype="float64")
+    mature_arr = np.asarray(mature, dtype="float64")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p = safe_div(bad_arr, mature_arr)
+        denom = 1.0 + z**2 / mature_arr
+        center = (p + z**2 / (2.0 * mature_arr)) / denom
+        half = z * np.sqrt(
+            np.maximum(p * (1.0 - p) / mature_arr + z**2 / (4.0 * mature_arr**2), 0.0)
+        ) / denom
+    low = np.maximum(center - half, 0.0)
+    high = np.minimum(center + half, 1.0)
+    return low, high
+
+
+def flatten_dict(prefix: str, values: Dict[str, float]) -> Dict[str, float]:
+    """将策略约束字典展开为平面字段。"""
+    return {f"{prefix}_{key}": value for key, value in values.items()}
+
+
+def remove_prefix(text: str, prefix: str) -> str:
+    """兼容 Python 3.7 的字符串前缀移除。"""
+    return text[len(prefix):] if text.startswith(prefix) else text
+
+
+# ============================================================
+# 2. 数据加载与样本切分
+# ============================================================
+
+
+def _actual_funnel_row(data: pd.DataFrame, sample_group: str) -> Dict[str, object]:
+    """按 application_id 去重计算 application_info 历史实际审批漏斗。"""
+    require_columns(
+        data,
+        ["application_id", "application_status", "assessment_status", "status"],
+        "历史实际审批漏斗",
+    )
+
+    application_status = data["application_status"].astype("string")
+    assessment_status = data["assessment_status"].astype("string")
+    account_status = data["status"].astype("string")
+
+    completed_mask = (
+        application_status.notna()
+        & ~application_status.isin(INCOMPLETE_STATUSES)
+    )
+    approved_mask = application_status.str.slice(0, 1).isin(["3", "4"]).fillna(False)
+    auto_approved_mask = (
+        approved_mask
+        & assessment_status.str.contains("Auto Approved", na=False, regex=False)
+    )
+    manual_approved_mask = (
+        approved_mask
+        & assessment_status.str.contains("Manual Approved", na=False, regex=False)
+    )
+    deal_mask = account_status.isin(["Active_Account", "Closed", "Blocked"]).fillna(False)
+
+    def unique_count(mask: Optional[pd.Series] = None) -> int:
+        selected = data if mask is None else data.loc[mask]
+        return int(selected["application_id"].nunique(dropna=True))
+
+    apply_cnt = unique_count()
+    completed_cnt = unique_count(completed_mask)
+    approved_cnt = unique_count(approved_mask)
+    auto_approved_cnt = unique_count(auto_approved_mask)
+    manual_approved_cnt = unique_count(manual_approved_mask)
+    deal_cnt = unique_count(deal_mask)
+
+    return {
+        "metric_scope": "历史实际审批漏斗（application_info）",
+        "sample_group": sample_group,
+        "actual_apply_cnt": apply_cnt,
+        "actual_completed_application_cnt": completed_cnt,
+        "actual_approved_application_cnt": approved_cnt,
+        "actual_auto_approved_application_cnt": auto_approved_cnt,
+        "actual_manual_approved_application_cnt": manual_approved_cnt,
+        "actual_deal_sample_cnt": deal_cnt,
+        "actual_completion_rate": safe_div(completed_cnt, apply_cnt),
+        "actual_approval_rate": safe_div(approved_cnt, completed_cnt),
+        "actual_auto_approval_rate": safe_div(auto_approved_cnt, completed_cnt),
+        "actual_manual_approval_rate": safe_div(manual_approved_cnt, completed_cnt),
+        "actual_auto_approval_share": safe_div(auto_approved_cnt, approved_cnt),
+        "actual_manual_approval_share": safe_div(manual_approved_cnt, approved_cnt),
+        "actual_deal_rate": safe_div(deal_cnt, approved_cnt),
+    }
+
+
+def build_actual_funnel_report(data: pd.DataFrame) -> pd.DataFrame:
+    """分别输出 Train、OOT 与全量的历史实际审批漏斗。"""
+    month = data["application_month"].astype("string")
+    groups = [
+        ("Train", data.loc[month.notna() & month.le(TRAIN_END_MONTH)]),
+        ("OOT", data.loc[month.notna() & month.ge(OOT_START_MONTH)]),
+        ("All", data),
+    ]
+    return pd.DataFrame([_actual_funnel_row(frame, label) for label, frame in groups])
+
+
+def build_bin_actual_funnel_report(data: pd.DataFrame) -> pd.DataFrame:
+    """按最终风险档输出历史实际审批漏斗，供箱级结果表下钻使用。"""
+    require_columns(
+        data,
+        [FINAL_BIN_COL, "bin_order"],
+        "箱级历史实际审批漏斗",
+    )
+    rows = []
+    grouped = data.loc[data[FINAL_BIN_COL].notna()].groupby(
+        ["bin_order", FINAL_BIN_COL],
+        observed=True,
+        sort=True,
+    )
+    for (bin_order, risk_bin), frame in grouped:
+        row = _actual_funnel_row(frame, str(risk_bin))
+        row.pop("metric_scope", None)
+        row.pop("sample_group", None)
+        row.update(
+            {
+                "bin_order": int(bin_order),
+                FINAL_BIN_COL: str(risk_bin),
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def drop_incomplete_applications(data: pd.DataFrame) -> pd.DataFrame:
+    """剔除 application_status 为未完成的申请，返回剔除后的副本。"""
+    require_columns(data, ["application_status"], "剔除未完成申请")
+    incomplete = data["application_status"].astype("string").isin(INCOMPLETE_STATUSES)
+    return data.loc[~incomplete].copy()
+
+
+def load_analysis_data() -> pd.DataFrame:
+    """加载首版分箱真正需要的数据，删除未使用的其他模型表和交易特征表。"""
+    print("加载数据 ...")
+
+    sample = read_csv_clean(DATA_DIR / SAMPLE_FILE)
+    application = read_csv_clean(DATA_DIR / APPLICATION_FILE)
+    score = read_csv_clean(DATA_DIR / SCORE_FILE)
+
+    require_columns(sample, ["application_id", "user_id"], "sample")
+    require_columns(application, ["application_id", "user_id"], "application_info")
+    require_columns(score, ["application_id", RAW_SCORE_COL], "score")
+
+    # application_info 只补充 sample 中不存在的字段，避免出现 _x / _y。
+    join_keys = ["application_id", "user_id"]
+    application_extra_cols = [
+        col for col in application.columns
+        if col in join_keys or col not in sample.columns
+    ]
+    application_dedup = application[application_extra_cols].drop_duplicates(
+        subset=join_keys,
+        keep="first",
+    )
+
+    data = sample.merge(application_dedup, on=join_keys, how="left")
+
+    score_dedup = (
+        score[["application_id", RAW_SCORE_COL]]
+        .drop_duplicates(subset="application_id", keep="first")
+        .rename(columns={RAW_SCORE_COL: SCORE_COL})
+    )
+    data = data.merge(score_dedup, on="application_id", how="left")
+
+    # application_month 缺失时，根据 application_time 补充。
+    if "application_time" in data.columns:
+        data["application_time"] = pd.to_datetime(data["application_time"], errors="coerce")
+
+    if "application_month" not in data.columns:
+        data["application_month"] = pd.Series(pd.NA, index=data.index, dtype="string")
+    else:
+        data["application_month"] = data["application_month"].astype("string").str.slice(0, 7)
+
+    if "application_time" in data.columns:
+        month_from_time = data["application_time"].dt.to_period("M").astype("string")
+        data["application_month"] = data["application_month"].fillna(month_from_time)
+
+    require_columns(data, REQUIRED_ANALYSIS_COLS, "拼接后的分析数据")
+
+    for col in RISK_NUMERIC_COLS:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    # 未完成申请（0.Incomplete / 1.In Progress）整体剔除，不进入任何分析。
+    source_row_count = len(data)
+    removed_incomplete_count = int(
+        data["application_status"].astype("string").isin(INCOMPLETE_STATUSES).sum()
+    )
+    data = drop_incomplete_applications(data)
+
+    # 历史实际审批漏斗独立于模型分，先基于剔除后的完整申请样本计算并保留。
+    actual_funnel_report = build_actual_funnel_report(data)
+
+    # 分箱与模型策略测算只使用存在模型分的样本；缺失比例在总览中单独展示。
+    score_missing_count = int(data[SCORE_COL].isna().sum())
+
+    data = data.loc[data[SCORE_COL].notna()].copy()
+    if data.empty:
+        raise ValueError(f"{SCORE_COL} 全为空，无法进行分箱")
+
+    data.attrs["source_row_count"] = source_row_count
+    data.attrs["removed_incomplete_count"] = removed_incomplete_count
+    data.attrs["score_missing_count"] = score_missing_count
+    data.attrs["actual_funnel_report"] = actual_funnel_report
+
+    print(
+        f"   原始 {source_row_count:,} 行；剔除未完成申请 {removed_incomplete_count:,} 行；"
+        f"有效模型分 {len(data):,} 行；模型分缺失 {score_missing_count:,} 行"
+    )
+    return data
+
+
+def split_train_oot(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """按申请月份切分 Train 和 OOT。"""
+    result = data.copy()
+    month = result["application_month"].astype("string")
+
+    train_mask = month.notna() & month.le(TRAIN_END_MONTH)
+    oot_mask = month.notna() & month.ge(OOT_START_MONTH)
+
+    result["sample_group"] = np.select(
+        [
+            train_mask.to_numpy(dtype=bool, na_value=False),
+            oot_mask.to_numpy(dtype=bool, na_value=False),
+        ],
+        ["train", "oot"],
+        default="",
+    )
+
+    train = result.loc[result["sample_group"].eq("train")].copy()
+    oot = result.loc[result["sample_group"].eq("oot")].copy()
+
+    if train.empty:
+        raise ValueError("Train 样本为空，请检查 TRAIN_END_MONTH 和 application_month")
+    if oot.empty:
+        raise ValueError("OOT 样本为空，请检查 OOT_START_MONTH 和 application_month")
+
+    print(f"样本切分完成：Train {len(train):,} 行，OOT {len(oot):,} 行")
+    return result, train, oot
+
+
+# ============================================================
+# 3. 等频初分与相邻箱合并
+# ============================================================
+
+def learn_equal_freq_edges(
+    data: pd.DataFrame,
+    score_col: str,
+    n_bins: int,
+) -> np.ndarray:
+    """仅在 Train 上学习等频边界，并将首尾扩展为无穷。"""
+    score = pd.to_numeric(data[score_col], errors="coerce").dropna()
+    if score.empty:
+        raise ValueError(f"{score_col} 全为空，无法分箱")
+
+    _, raw_edges = pd.qcut(score, q=n_bins, retbins=True, duplicates="drop")
+    edges = np.unique(np.asarray(raw_edges, dtype="float64"))
+    if len(edges) < 2:
+        raise ValueError(f"{score_col} 唯一值不足，无法形成有效分箱")
+
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+    return edges
+
+
+def build_initial_edge_table(edges: np.ndarray) -> pd.DataFrame:
+    """生成初始分箱边界配置表。"""
+    rows = []
+    for idx in range(len(edges) - 1):
+        order = idx + 1
+        rows.append(
+            {
+                "bin_order": order,
+                INITIAL_BIN_COL: f"B{order:02d}",
+                "score_left": edges[idx],
+                "score_right": edges[idx + 1],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def apply_edges(
+    data: pd.DataFrame,
+    score_col: str,
+    edges: np.ndarray,
+    bin_col: str,
+) -> pd.DataFrame:
+    """将 Train 学到的边界复用到任意样本。"""
+    result = data.copy()
+    labels = list(range(1, len(edges)))
+    cut_result = pd.cut(
+        pd.to_numeric(result[score_col], errors="coerce"),
+        bins=edges,
+        labels=labels,
+        include_lowest=True,
+        right=True,
+    )
+    result["initial_bin_order"] = cut_result.astype("Int64")
+    result[bin_col] = result["initial_bin_order"].map(
+        {order: f"B{order:02d}" for order in labels}
+    )
+    return result
+
+
+def build_merge_map(
+    ranges: Sequence[Tuple[int, int]],
+    initial_bin_count: int,
+) -> pd.DataFrame:
+    """生成初始箱到最终风险等级的映射。"""
+    rows = []
+    for final_order, (start, end) in enumerate(ranges, start=1):
+        final_label = chr(ord("A") + final_order - 1)
+        merged_from = f"B{start:02d}-B{end:02d}" if start != end else f"B{start:02d}"
+        for initial_order in range(start, end + 1):
+            rows.append(
+                {
+                    "initial_bin_order": initial_order,
+                    INITIAL_BIN_COL: f"B{initial_order:02d}",
+                    "final_bin_order": final_order,
+                    FINAL_BIN_COL: final_label,
+                    "merged_from": merged_from,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def apply_merge_map(data: pd.DataFrame, merge_map: pd.DataFrame) -> pd.DataFrame:
+    """将初始箱映射到最终风险等级。"""
+    result = data.merge(
+        merge_map[[INITIAL_BIN_COL, "final_bin_order", FINAL_BIN_COL]],
+        on=INITIAL_BIN_COL,
+        how="left",
+    )
+    result["bin_order"] = result["final_bin_order"].astype("Int64")
+    return result
+
+
+def build_final_edge_table(
+    initial_edges: pd.DataFrame,
+    merge_map: pd.DataFrame,
+    initial_bin_count: int,
+) -> pd.DataFrame:
+    """生成最终风险等级的上线边界表。"""
+    merged = initial_edges.merge(
+        merge_map[[INITIAL_BIN_COL, "final_bin_order", FINAL_BIN_COL, "merged_from"]],
+        on=INITIAL_BIN_COL,
+        how="left",
+    ).sort_values("bin_order")
+
+    final_edges = (
+        merged.groupby(
+            ["final_bin_order", FINAL_BIN_COL, "merged_from"],
+            observed=True,
+        )
+        .agg(
+            score_left=("score_left", "first"),
+            score_right=("score_right", "last"),
+            source_bin_start=("bin_order", "min"),
+            source_bin_end=("bin_order", "max"),
+        )
+        .reset_index()
+        .sort_values("final_bin_order")
+        .reset_index(drop=True)
+    )
+    final_edges["extreme_bin_role"] = final_edges.apply(
+        lambda row: classify_extreme_role(
+            row["source_bin_start"],
+            row["source_bin_end"],
+            initial_bin_count,
+        ),
+        axis=1,
+    )
+    return final_edges
+
+
+# ============================================================
+# 4. 风险指标计算
+# ============================================================
+
+def add_risk_helper_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """生成分箱统计所需的成熟、逾期、敞口和逾期金额字段。"""
+    work = data.copy()
+    work["_principal"] = work["principal"].fillna(0)
+
+    for config in RISK_HELPER_CONFIG.values():
+        due_col = config["due_col"]
+        dpd_col = config["dpd_col"]
+        helper = config["helper_prefix"]
+
+        mature = work[dpd_col].notna()
+        work[f"{helper}_mature_cnt"] = work[due_col].isin([0, 1])
+        work[f"{helper}_bad_cnt"] = work[due_col].eq(1)
+        work[f"{helper}_amt_exposure"] = np.where(mature, work["_principal"], 0)
+        work[f"{helper}_amt_bad"] = np.where(
+            mature & work[dpd_col].ge(30),
+            work[config["remaining_col"]].fillna(0),
+            0,
+        )
+
+    return work
+
+
+def add_bin_derived_metrics(
+    stats: pd.DataFrame,
+    order_col: str,
+    include_total_n: bool = True,
+) -> pd.DataFrame:
+    """
+    统一补充分箱派生指标。
+
+    业务口径保持不变：
+    - 笔数逾期率 = 逾期样本量 / 成熟样本量；
+    - 金额逾期率 = 逾期剩余本金 / 成熟本金敞口；
+    - 累计指标始终按低风险到高风险的箱顺序计算。
+    """
+    result = stats.sort_values(order_col).reset_index(drop=True).copy()
+    total_n = result["n"].sum()
+    if include_total_n:
+        result["total_n"] = total_n
+    result["sample_pct"] = safe_div(result["n"], total_n)
+
+    for prefix in RISK_PREFIXES:
+        result[f"{prefix}_cnt_good"] = (
+            result[f"{prefix}_cnt_mature"] - result[f"{prefix}_cnt_bad"]
+        )
+        result[f"{prefix}_cnt_bad_rate"] = safe_div(
+            result[f"{prefix}_cnt_bad"], result[f"{prefix}_cnt_mature"]
+        )
+        ci_low, ci_high = wilson_ci(
+            result[f"{prefix}_cnt_bad"], result[f"{prefix}_cnt_mature"]
+        )
+        result[f"{prefix}_cnt_bad_rate_ci_low"] = ci_low
+        result[f"{prefix}_cnt_bad_rate_ci_high"] = ci_high
+        result[f"{prefix}_amt_bad_rate"] = safe_div(
+            result[f"{prefix}_amt_bad"], result[f"{prefix}_amt_exposure"]
+        )
+
+    result["cum_n"] = result["n"].cumsum()
+    result["cum_pass_rate"] = safe_div(result["cum_n"], total_n)
+
+    for prefix in RISK_PREFIXES:
+        result[f"cum_{prefix}_cnt_mature"] = result[f"{prefix}_cnt_mature"].cumsum()
+        result[f"cum_{prefix}_cnt_bad"] = result[f"{prefix}_cnt_bad"].cumsum()
+        result[f"cum_{prefix}_cnt_bad_rate"] = safe_div(
+            result[f"cum_{prefix}_cnt_bad"],
+            result[f"cum_{prefix}_cnt_mature"],
+        )
+        cum_ci_low, cum_ci_high = wilson_ci(
+            result[f"cum_{prefix}_cnt_bad"],
+            result[f"cum_{prefix}_cnt_mature"],
+        )
+        result[f"cum_{prefix}_cnt_bad_rate_ci_low"] = cum_ci_low
+        result[f"cum_{prefix}_cnt_bad_rate_ci_high"] = cum_ci_high
+        result[f"cum_{prefix}_amt_exposure"] = result[f"{prefix}_amt_exposure"].cumsum()
+        result[f"cum_{prefix}_amt_bad"] = result[f"{prefix}_amt_bad"].cumsum()
+        result[f"cum_{prefix}_amt_bad_rate"] = safe_div(
+            result[f"cum_{prefix}_amt_bad"],
+            result[f"cum_{prefix}_amt_exposure"],
+        )
+
+    return result
+
+
+def calc_bin_stats(
+    data: pd.DataFrame,
+    bin_col: str,
+    order_col: str,
+    score_col: str = SCORE_COL,
+) -> pd.DataFrame:
+    """
+    按分箱计算核心指标，并保留 Excel 可复算的分子和分母。
+    """
+    required = [
+        "application_id",
+        bin_col,
+        order_col,
+        score_col,
+        *RISK_NUMERIC_COLS[1:],
+    ]
+    require_columns(data, required, "calc_bin_stats")
+
+    work = add_risk_helper_columns(data)
+    aggregations = {
+        "n": ("application_id", "count"),
+        "principal_amt": ("_principal", "sum"),
+        "score_min": (score_col, "min"),
+        "score_max": (score_col, "max"),
+        "score_mean": (score_col, "mean"),
+    }
+    for prefix, config in RISK_HELPER_CONFIG.items():
+        helper = config["helper_prefix"]
+        aggregations[f"{prefix}_cnt_mature"] = (f"{helper}_mature_cnt", "sum")
+        aggregations[f"{prefix}_cnt_bad"] = (f"{helper}_bad_cnt", "sum")
+    for prefix, config in RISK_HELPER_CONFIG.items():
+        helper = config["helper_prefix"]
+        aggregations[f"{prefix}_amt_exposure"] = (f"{helper}_amt_exposure", "sum")
+        aggregations[f"{prefix}_amt_bad"] = (f"{helper}_amt_bad", "sum")
+
+    stats = (
+        work.groupby([bin_col, order_col], dropna=False, observed=True)
+        .agg(**aggregations)
+        .reset_index()
+        .rename(columns={order_col: "bin_order"})
+    )
+    return add_bin_derived_metrics(stats, order_col="bin_order")
+
+
+def add_bin_model_diagnostics(stats: pd.DataFrame) -> pd.DataFrame:
+    """补充箱级 IV 分项与累计 KS 曲线；整体 AUC/KS 仍在模型验证表展示。"""
+    result = stats.sort_values("bin_order").reset_index(drop=True).copy()
+    bin_count = len(result)
+    if bin_count == 0:
+        return result
+
+    for prefix in ["1m30p", "3m30p"]:
+        bad = pd.to_numeric(result[f"{prefix}_cnt_bad"], errors="coerce").fillna(0.0)
+        good = pd.to_numeric(result[f"{prefix}_cnt_good"], errors="coerce").fillna(0.0)
+        bad_dist = (bad + IV_SMOOTHING_EPS) / (
+            bad.sum() + IV_SMOOTHING_EPS * bin_count
+        )
+        good_dist = (good + IV_SMOOTHING_EPS) / (
+            good.sum() + IV_SMOOTHING_EPS * bin_count
+        )
+        woe = np.log(bad_dist / good_dist)
+
+        result[f"{prefix}_bad_distribution"] = bad_dist
+        result[f"{prefix}_good_distribution"] = good_dist
+        result[f"{prefix}_woe"] = woe
+        result[f"{prefix}_iv_component"] = (bad_dist - good_dist) * woe
+
+        # 高风险端向低风险端累计，与整体 KS 的风险排序方向一致。
+        cum_bad_from_high = bad.iloc[::-1].cumsum().iloc[::-1]
+        cum_good_from_high = good.iloc[::-1].cumsum().iloc[::-1]
+        result[f"{prefix}_ks_curve"] = (
+            safe_div(cum_bad_from_high, bad.sum())
+            - safe_div(cum_good_from_high, good.sum())
+        ).abs()
+
+    return result
+
+
+def add_bin_lift(stats: pd.DataFrame) -> pd.DataFrame:
+    """补充箱级 Lift：某箱逾期率 ÷ 该样本组整体逾期率（整体为各箱汇总）。"""
+    result = stats.sort_values("bin_order").reset_index(drop=True).copy()
+    if len(result) == 0:
+        return result
+    lift_denoms = [
+        ("1m30p_cnt", "1m30p_cnt_mature"),
+        ("1m30p_amt", "1m30p_amt_exposure"),
+        ("3m30p_cnt", "3m30p_cnt_mature"),
+        ("3m30p_amt", "3m30p_amt_exposure"),
+    ]
+    for prefix, denom_col in lift_denoms:
+        bad = pd.to_numeric(result[f"{prefix}_bad"], errors="coerce").fillna(0.0)
+        denom = pd.to_numeric(result[denom_col], errors="coerce").fillna(0.0)
+        overall_rate = bad.sum() / denom.sum()
+        result[f"{prefix}_lift"] = safe_div(bad / denom, overall_rate)
+    return result
+
+
+def build_enriched_final_bin_report(
+    stats: pd.DataFrame,
+    data: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+    psi: pd.DataFrame,
+) -> pd.DataFrame:
+    """整合箱级风险、历史实际审批、策略流量贡献和稳定性诊断指标。"""
+    result = add_bin_lift(add_bin_model_diagnostics(stats))
+    actual_by_bin = build_bin_actual_funnel_report(data)
+    result = result.merge(
+        actual_by_bin,
+        on=["bin_order", FINAL_BIN_COL],
+        how="left",
+        validate="one_to_one",
+    )
+
+    psi_columns = [FINAL_BIN_COL, "psi_component", "psi_total"]
+    available_psi_columns = [col for col in psi_columns if col in psi.columns]
+    result = result.merge(
+        psi[available_psi_columns].rename(
+            columns={
+                "psi_component": "train_oot_psi_component",
+                "psi_total": "train_oot_psi_total",
+            }
+        ),
+        on=FINAL_BIN_COL,
+        how="left",
+        validate="many_to_one",
+    )
+
+    valid_strategy = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if valid_strategy.empty:
+        result["strategy_estimated_decision"] = "未生成"
+    else:
+        strategy = valid_strategy.iloc[0]
+        auto_bin = str(strategy["auto_pass_bin"])
+        accept_bin = str(strategy["manual_review_upper_bin"])
+        bin_order_map = result.set_index(FINAL_BIN_COL)["bin_order"].to_dict()
+        auto_order = bin_order_map.get(auto_bin)
+        accept_order = bin_order_map.get(accept_bin)
+        if auto_order is None or accept_order is None:
+            raise ValueError("策略阈值档位未匹配最终分箱")
+        result["strategy_estimated_decision"] = np.select(
+            [
+                result["bin_order"].le(auto_order),
+                result["bin_order"].le(accept_order),
+            ],
+            ["自动通过", "人工审核"],
+            default="拒绝",
+        )
+
+    result["strategy_estimated_bin_flow_rate"] = result["sample_pct"]
+    result["strategy_estimated_cumulative_flow_rate"] = result["cum_pass_rate"]
+
+    priority_columns = [
+        "bin_order",
+        FINAL_BIN_COL,
+        "score_left",
+        "score_right",
+        "n",
+        "sample_pct",
+        "cum_pass_rate",
+        "strategy_estimated_decision",
+        "strategy_estimated_bin_flow_rate",
+        "strategy_estimated_cumulative_flow_rate",
+        "actual_apply_cnt",
+        "actual_completion_rate",
+        "actual_approval_rate",
+        "actual_auto_approval_rate",
+        "actual_manual_approval_rate",
+        "actual_auto_approval_share",
+        "actual_manual_approval_share",
+        "actual_deal_rate",
+        "1m30p_cnt_bad_rate",
+        "1m30p_amt_bad_rate",
+        "3m30p_cnt_bad_rate",
+        "3m30p_amt_bad_rate",
+        "1m30p_cnt_lift",
+        "1m30p_amt_lift",
+        "3m30p_cnt_lift",
+        "3m30p_amt_lift",
+        "cum_1m30p_cnt_mature",
+        "cum_1m30p_cnt_bad",
+        "cum_1m30p_cnt_bad_rate",
+        "cum_1m30p_amt_exposure",
+        "cum_1m30p_amt_bad",
+        "cum_1m30p_amt_bad_rate",
+        "cum_3m30p_cnt_mature",
+        "cum_3m30p_cnt_bad",
+        "cum_3m30p_cnt_bad_rate",
+        "cum_3m30p_amt_exposure",
+        "cum_3m30p_amt_bad",
+        "cum_3m30p_amt_bad_rate",
+        "1m30p_iv_component",
+        "1m30p_ks_curve",
+        "3m30p_iv_component",
+        "3m30p_ks_curve",
+        "train_oot_psi_component",
+        "train_oot_psi_total",
+    ]
+    priority_columns = [col for col in priority_columns if col in result.columns]
+    remaining_columns = [col for col in result.columns if col not in priority_columns]
+    return result[priority_columns + remaining_columns]
+
+
+
+def check_monotonicity(
+    stats: pd.DataFrame,
+    rate_cols: Sequence[str],
+    sample_group: str,
+) -> pd.DataFrame:
+    """检查风险率是否随风险等级非递减。"""
+    ordered = stats.sort_values("bin_order").reset_index(drop=True)
+    rows = []
+
+    for rate_col in rate_cols:
+        diff = ordered[rate_col].diff()
+        violation = diff.lt(0).fillna(False)
+        rows.append(
+            {
+                "sample_group": sample_group,
+                "metric": rate_col,
+                "is_monotonic_non_decreasing": not bool(violation.any()),
+                "violation_cnt": int(violation.sum()),
+                "violation_bins": ",".join(
+                    ordered.loc[violation, "bin_order"].astype(str).tolist()
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def format_merge_ranges(ranges: Sequence[Tuple[int, int]]) -> str:
+    """将合箱范围格式化为便于报告阅读和复用的字符串。"""
+    return "[" + ", ".join(f"({start},{end})" for start, end in ranges) + "]"
+
+
+def parse_merge_ranges(text: str) -> List[Tuple[int, int]]:
+    """将候选表中的范围字符串还原为整数区间。"""
+    parsed = ast.literal_eval(str(text))
+    return [(int(start), int(end)) for start, end in parsed]
+
+
+def calc_complete_initial_stats(
+    data: pd.DataFrame,
+    initial_edges: pd.DataFrame,
+) -> pd.DataFrame:
+    """计算完整初始箱统计；无样本的箱也保留，防止候选范围错位。"""
+    stats = calc_bin_stats(
+        data,
+        bin_col=INITIAL_BIN_COL,
+        order_col="initial_bin_order",
+    )
+    stats = stats.loc[stats[INITIAL_BIN_COL].notna()].copy()
+
+    edge_cols = [
+        "bin_order",
+        INITIAL_BIN_COL,
+        "score_left",
+        "score_right",
+    ]
+    result = initial_edges[edge_cols].merge(
+        stats.drop(columns=["score_left", "score_right"], errors="ignore"),
+        on=["bin_order", INITIAL_BIN_COL],
+        how="left",
+    )
+
+    additive_cols = ["n", "principal_amt"]
+    for prefix in RISK_PREFIXES:
+        additive_cols.extend(
+            [
+                f"{prefix}_cnt_mature",
+                f"{prefix}_cnt_bad",
+                f"{prefix}_cnt_good",
+                f"{prefix}_amt_exposure",
+                f"{prefix}_amt_bad",
+            ]
+        )
+
+    for col in additive_cols:
+        if col not in result.columns:
+            result[col] = 0.0
+        result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
+
+    return add_bin_derived_metrics(result, order_col="bin_order")
+
+
+
+def aggregate_initial_stats_by_ranges(
+    initial_stats: pd.DataFrame,
+    ranges: Sequence[Tuple[int, int]],
+) -> pd.DataFrame:
+    """将连续初始箱按候选范围聚合为最终风险档。"""
+    stats = initial_stats.sort_values("bin_order").reset_index(drop=True)
+    total_n = float(stats["n"].sum())
+    rows = []
+
+    for final_order, (start, end) in enumerate(ranges, start=1):
+        part = stats.loc[stats["bin_order"].between(start, end, inclusive="both")]
+        if part.empty:
+            raise ValueError(f"候选合箱范围 ({start}, {end}) 未匹配任何初始箱")
+
+        n = float(part["n"].sum())
+        row = {
+            "final_bin_order": final_order,
+            FINAL_BIN_COL: chr(ord("A") + final_order - 1),
+            "merged_from": (
+                f"B{start:02d}-B{end:02d}" if start != end else f"B{start:02d}"
+            ),
+            "source_bin_start": start,
+            "source_bin_end": end,
+            "n": n,
+            "principal_amt": float(part["principal_amt"].sum()),
+            "score_left": part["score_left"].iloc[0],
+            "score_right": part["score_right"].iloc[-1],
+            "score_min": part["score_min"].min(),
+            "score_max": part["score_max"].max(),
+            "score_mean": safe_div((part["score_mean"] * part["n"]).sum(), n),
+        }
+
+        for prefix in RISK_PREFIXES:
+            mature = float(part[f"{prefix}_cnt_mature"].sum())
+            bad = float(part[f"{prefix}_cnt_bad"].sum())
+            exposure = float(part[f"{prefix}_amt_exposure"].sum())
+            bad_amount = float(part[f"{prefix}_amt_bad"].sum())
+            row.update(
+                {
+                    f"{prefix}_cnt_mature": mature,
+                    f"{prefix}_cnt_bad": bad,
+                    f"{prefix}_cnt_good": mature - bad,
+                    f"{prefix}_amt_exposure": exposure,
+                    f"{prefix}_amt_bad": bad_amount,
+                    f"{prefix}_cnt_bad_rate": safe_div(bad, mature),
+                    f"{prefix}_amt_bad_rate": safe_div(bad_amount, exposure),
+                }
+            )
+
+        row["sample_pct"] = safe_div(n, total_n)
+        rows.append(row)
+
+    return add_bin_derived_metrics(
+        pd.DataFrame(rows),
+        order_col="final_bin_order",
+        include_total_n=False,
+    )
+
+
+def oriented_rate(values: pd.Series) -> pd.Series:
+    """统一转换为随风险等级应非递减的方向。"""
+    numeric = pd.to_numeric(values, errors="coerce")
+    return numeric if HIGH_SCORE_HIGH_RISK else -numeric
+
+
+def count_rate_inversions(
+    stats: pd.DataFrame,
+    rate_cols: Sequence[str],
+    tolerance: float = 0.0,
+) -> int:
+    """统计风险率相邻显著倒挂次数。"""
+    total = 0
+    ordered = stats.sort_values("final_bin_order")
+    for rate_col in rate_cols:
+        diff = oriented_rate(ordered[rate_col]).diff()
+        total += int(diff.lt(-tolerance).fillna(False).sum())
+    return total
+
+
+def calc_iv_from_stats(
+    stats: pd.DataFrame,
+    bad_col: str = PRIMARY_BAD_COL,
+    good_col: str = PRIMARY_GOOD_COL,
+    eps: float = IV_SMOOTHING_EPS,
+) -> float:
+    """使用箱级好坏样本量计算 IV。"""
+    bad = pd.to_numeric(stats[bad_col], errors="coerce").fillna(0).to_numpy(float)
+    good = pd.to_numeric(stats[good_col], errors="coerce").fillna(0).to_numpy(float)
+    if bad.sum() <= 0 or good.sum() <= 0:
+        return np.nan
+
+    bad_dist = (bad + eps) / (bad.sum() + eps * len(bad))
+    good_dist = (good + eps) / (good.sum() + eps * len(good))
+    return float(np.sum((bad_dist - good_dist) * np.log(bad_dist / good_dist)))
+
+
+def two_proportion_pvalue(
+    bad_1: float,
+    mature_1: float,
+    bad_2: float,
+    mature_2: float,
+) -> float:
+    """不依赖 scipy 的双侧两比例 Z 检验 p 值。"""
+    if mature_1 <= 0 or mature_2 <= 0:
+        return np.nan
+
+    p1 = bad_1 / mature_1
+    p2 = bad_2 / mature_2
+    pooled = (bad_1 + bad_2) / (mature_1 + mature_2)
+    variance = pooled * (1 - pooled) * (1 / mature_1 + 1 / mature_2)
+    if variance <= 0:
+        return 1.0 if math.isclose(p1, p2) else 0.0
+
+    z_value = abs(p1 - p2) / math.sqrt(variance)
+    normal_cdf = 0.5 * (1 + math.erf(z_value / math.sqrt(2)))
+    return float(2 * (1 - normal_cdf))
+
+
+def required_sample_pct(position: int, bin_count: int) -> float:
+    """头尾风险箱使用较低样本占比要求，中间箱使用标准要求。"""
+    if position in {0, bin_count - 1}:
+        return MIN_TAIL_BIN_SAMPLE_PCT
+    return MIN_MIDDLE_BIN_SAMPLE_PCT
+
+
+def _extreme_ranges(initial_bin_count: int) -> Dict[str, Tuple[int, int]]:
+    """按模型风险方向返回最好/最坏极端初始箱范围。"""
+    best_count = max(0, min(BEST_EXTREME_INITIAL_BIN_COUNT, initial_bin_count))
+    worst_count = max(0, min(WORST_EXTREME_INITIAL_BIN_COUNT, initial_bin_count))
+    empty = (0, -1)
+
+    if HIGH_SCORE_HIGH_RISK:
+        best_range = (1, best_count) if best_count > 0 else empty
+        worst_range = (
+            initial_bin_count - worst_count + 1,
+            initial_bin_count,
+        ) if worst_count > 0 else empty
+    else:
+        best_range = (
+            initial_bin_count - best_count + 1,
+            initial_bin_count,
+        ) if best_count > 0 else empty
+        worst_range = (1, worst_count) if worst_count > 0 else empty
+
+    return {
+        "best_extreme": best_range,
+        "worst_extreme": worst_range,
+    }
+
+
+def identify_extreme_boundaries(initial_bin_count: int) -> Set[int]:
+    """
+    返回用于圈出最好/最坏极端人群的边界。
+
+    边界编号 k 代表 Bk 与 B(k+1) 之间的切点。
+    """
+    if not PROTECT_EXTREME_INITIAL_BINS:
+        return set()
+
+    max_boundary = initial_bin_count - 1
+    boundaries: Set[int] = set()
+    for start, end in _extreme_ranges(initial_bin_count).values():
+        if start <= 0 or end < start:
+            continue
+        boundary = end if start == 1 else start - 1
+        if 1 <= boundary <= max_boundary:
+            boundaries.add(int(boundary))
+    return boundaries
+
+
+def _range_overlaps(left: Tuple[int, int], right: Tuple[int, int]) -> bool:
+    """判断两个初始箱范围是否有交集。"""
+    return left[0] <= right[1] and right[0] <= left[1]
+
+
+def classify_extreme_role(
+    source_start: int,
+    source_end: int,
+    initial_bin_count: int,
+) -> str:
+    """标记最终箱是否为最好/最坏极端箱，或是否已经吞并了极端箱。"""
+    if not PROTECT_EXTREME_INITIAL_BINS:
+        return ""
+
+    current = (int(source_start), int(source_end))
+    roles = []
+    for role, expected in _extreme_ranges(initial_bin_count).items():
+        if expected[0] <= 0 or expected[1] < expected[0]:
+            continue
+        if current == expected:
+            roles.append(role)
+        elif _range_overlaps(current, expected):
+            roles.append(f"contains_{role}")
+
+    return ",".join(roles)
+
+
+def count_crossed_boundaries(
+    ranges: Sequence[Tuple[int, int]],
+    boundaries: Set[int],
+) -> int:
+    """统计被当前合箱方案跨越的保护边界数量。"""
+    if not boundaries:
+        return 0
+    preserved = {int(end) for _, end in ranges[:-1]}
+    return len(set(boundaries) - preserved)
+
+
+def bin_constraint_minimums(
+    row: pd.Series,
+    position: int,
+    bin_count: int,
+    initial_bin_count: int,
+) -> Dict[str, float]:
+    """根据普通箱/极端箱返回该最终箱的约束下限。"""
+    role = classify_extreme_role(
+        row["source_bin_start"],
+        row["source_bin_end"],
+        initial_bin_count,
+    )
+    minimums = {
+        "sample_pct": required_sample_pct(position, bin_count),
+        "mature_count": MIN_FINAL_BIN_MATURE_COUNT,
+        "bad_count": MIN_FINAL_BIN_BAD_COUNT,
+        "good_count": MIN_FINAL_BIN_GOOD_COUNT,
+    }
+
+    if role == "best_extreme":
+        minimums.update(
+            {
+                "mature_count": MIN_EXTREME_BIN_MATURE_COUNT,
+                "bad_count": MIN_BEST_EXTREME_BIN_BAD_COUNT,
+                "good_count": MIN_BEST_EXTREME_BIN_GOOD_COUNT,
+            }
+        )
+    elif role == "worst_extreme":
+        minimums.update(
+            {
+                "mature_count": MIN_EXTREME_BIN_MATURE_COUNT,
+                "bad_count": MIN_WORST_EXTREME_BIN_BAD_COUNT,
+                "good_count": MIN_WORST_EXTREME_BIN_GOOD_COUNT,
+            }
+        )
+
+    return minimums
+
+
+def filter_blocked_pair_indices(
+    ranges: Sequence[Tuple[int, int]],
+    pair_indices: Sequence[int],
+    blocked_boundaries: Optional[Set[int]],
+) -> List[int]:
+    """剔除会跨越硬保护边界的相邻合箱位置。"""
+    if not blocked_boundaries:
+        return list(pair_indices)
+    return [
+        pair_index
+        for pair_index in pair_indices
+        if int(ranges[pair_index][1]) not in blocked_boundaries
+    ]
+
+
+def calc_bin_constraint_details(stats: pd.DataFrame) -> pd.DataFrame:
+    """计算每个最终箱的样本、成熟量和好坏样本约束。"""
+    rows = []
+    ordered = stats.sort_values("final_bin_order").reset_index(drop=True)
+    initial_bin_count = (
+        int(ordered["source_bin_end"].max())
+        if "source_bin_end" in ordered.columns and not ordered.empty
+        else len(ordered)
+    )
+    for position, row in ordered.iterrows():
+        minimums = bin_constraint_minimums(
+            row,
+            position,
+            len(ordered),
+            initial_bin_count,
+        )
+        min_sample_pct = minimums["sample_pct"]
+        min_mature_count = minimums["mature_count"]
+        min_bad_count = minimums["bad_count"]
+        min_good_count = minimums["good_count"]
+        checks = {
+            "sample_ok": row["sample_pct"] >= min_sample_pct,
+            "mature_ok": row[PRIMARY_MATURE_COL] >= min_mature_count,
+            "bad_ok": row[PRIMARY_BAD_COL] >= min_bad_count,
+            "good_ok": row[PRIMARY_GOOD_COL] >= min_good_count,
+        }
+
+        def shortage(value: float, minimum: float) -> float:
+            if minimum <= 0:
+                return 0.0
+            return max(0.0, 1 - safe_div(value, minimum))
+
+        severity = 0.0
+        severity += shortage(row["sample_pct"], min_sample_pct)
+        severity += shortage(row[PRIMARY_MATURE_COL], min_mature_count)
+        severity += shortage(row[PRIMARY_BAD_COL], min_bad_count)
+        severity += shortage(row[PRIMARY_GOOD_COL], min_good_count)
+
+        rows.append(
+            {
+                "final_bin_order": int(row["final_bin_order"]),
+                FINAL_BIN_COL: row[FINAL_BIN_COL],
+                "required_sample_pct": min_sample_pct,
+                "required_mature_count": min_mature_count,
+                "required_bad_count": min_bad_count,
+                "required_good_count": min_good_count,
+                **checks,
+                "all_constraints_ok": all(checks.values()),
+                "violation_severity": severity,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def identify_protected_boundaries(
+    initial_stats: pd.DataFrame,
+    config: Dict,
+) -> Set[int]:
+    """
+    找出应尽量保留的初始箱边界。
+
+    边界编号 k 代表 Bk 与 B(k+1) 之间的切点。
+    """
+    ordered = initial_stats.sort_values("bin_order").reset_index(drop=True)
+    boundaries: Set[int] = identify_extreme_boundaries(len(ordered))
+    max_boundary = len(ordered) - 1
+
+    for constraint_group in ["auto_constraints", "accept_constraints"]:
+        constraints = config[constraint_group]
+
+        cum_limit = constraints.get("max_cum_3m30p_cnt_bad_rate")
+        if cum_limit is not None:
+            eligible = ordered.loc[ordered["cum_3m30p_cnt_bad_rate"].le(cum_limit)]
+            if not eligible.empty:
+                boundary = int(eligible["bin_order"].max())
+                if 1 <= boundary <= max_boundary:
+                    boundaries.add(boundary)
+
+        marginal_limit = constraints.get("max_marginal_3m30p_cnt_bad_rate")
+        if marginal_limit is not None:
+            above = ordered.loc[ordered[PRIMARY_RATE_COL].gt(marginal_limit)]
+            if not above.empty:
+                boundary = int(above["bin_order"].min()) - 1
+                if 1 <= boundary <= max_boundary:
+                    boundaries.add(boundary)
+
+    if PROTECT_LARGEST_RISK_JUMPS > 0:
+        oriented = oriented_rate(ordered[PRIMARY_RATE_COL])
+        jumps = oriented.diff().dropna().sort_values(ascending=False)
+        for idx in jumps.head(PROTECT_LARGEST_RISK_JUMPS).index:
+            boundary = int(ordered.loc[idx, "bin_order"]) - 1
+            if 1 <= boundary <= max_boundary:
+                boundaries.add(boundary)
+
+    return boundaries
+
+
+def merge_ranges_at(
+    ranges: Sequence[Tuple[int, int]],
+    pair_index: int,
+) -> List[Tuple[int, int]]:
+    """合并 ranges[pair_index] 与其右侧相邻范围。"""
+    if pair_index < 0 or pair_index >= len(ranges) - 1:
+        raise IndexError(f"无效相邻合箱位置: {pair_index}")
+    result = list(ranges)
+    left = result[pair_index]
+    right = result[pair_index + 1]
+    result[pair_index:pair_index + 2] = [(left[0], right[1])]
+    return result
+
+
+def pair_merge_diagnostics(
+    current_stats: pd.DataFrame,
+    ranges: Sequence[Tuple[int, int]],
+    pair_index: int,
+    initial_stats: pd.DataFrame,
+    protected_boundaries: Set[int],
+    extreme_boundaries: Optional[Set[int]] = None,
+    ignore_protection: bool = False,
+) -> Dict[str, float]:
+    """计算合并某对相邻箱的风险差异、显著性、IV 损失和综合代价。"""
+    left = current_stats.iloc[pair_index]
+    right = current_stats.iloc[pair_index + 1]
+
+    left_rate = left[PRIMARY_RATE_COL]
+    right_rate = right[PRIMARY_RATE_COL]
+    if pd.isna(left_rate) or pd.isna(right_rate):
+        rate_gap = 0.0
+    else:
+        rate_gap = abs(float(left_rate) - float(right_rate))
+    # 双主指标下取最大差异，确保任一指标差异显著时不会被轻易合并。
+    for rate_col in PRIMARY_RATE_COLS:
+        lr = left.get(rate_col)
+        rr = right.get(rate_col)
+        if pd.notna(lr) and pd.notna(rr):
+            rate_gap = max(rate_gap, abs(float(lr) - float(rr)))
+
+    p_value = two_proportion_pvalue(
+        left[PRIMARY_BAD_COL],
+        left[PRIMARY_MATURE_COL],
+        right[PRIMARY_BAD_COL],
+        right[PRIMARY_MATURE_COL],
+    )
+    p_for_cost = 0.0 if pd.isna(p_value) else p_value
+
+    current_iv = calc_iv_from_stats(current_stats)
+    merged_ranges = merge_ranges_at(ranges, pair_index)
+    merged_stats = aggregate_initial_stats_by_ranges(initial_stats, merged_ranges)
+    merged_iv = calc_iv_from_stats(merged_stats)
+    iv_loss = 0.0
+    if pd.notna(current_iv) and pd.notna(merged_iv):
+        iv_loss = max(0.0, float(current_iv - merged_iv))
+
+    boundary = int(ranges[pair_index][1])
+    is_protected = boundary in protected_boundaries
+    is_extreme_boundary = boundary in (extreme_boundaries or set())
+    protection_penalty = (
+        0.0
+        if ignore_protection or not is_protected
+        else PROTECTED_BOUNDARY_PENALTY
+    )
+    if is_extreme_boundary and not ignore_protection:
+        protection_penalty += EXTREME_BOUNDARY_PENALTY
+
+    # 风险越接近、差异越不显著、IV 损失越小，越优先合并。
+    cost = (
+        rate_gap * MERGE_COST_RATE_GAP_WEIGHT
+        + (1 - p_for_cost)
+        + iv_loss * MERGE_COST_IV_LOSS_WEIGHT
+        + protection_penalty
+    )
+    return {
+        "pair_index": pair_index,
+        "boundary": boundary,
+        "left_rate": left_rate,
+        "right_rate": right_rate,
+        "abs_rate_diff": rate_gap,
+        "p_value": p_value,
+        "iv_loss": iv_loss,
+        "is_protected_boundary": is_protected,
+        "is_extreme_boundary": is_extreme_boundary,
+        "merge_cost": cost,
+    }
+
+
+def choose_best_adjacent_pair(
+    ranges: Sequence[Tuple[int, int]],
+    initial_stats: pd.DataFrame,
+    protected_boundaries: Set[int],
+    extreme_boundaries: Optional[Set[int]] = None,
+    blocked_boundaries: Optional[Set[int]] = None,
+    allowed_pair_indices: Optional[Sequence[int]] = None,
+    ignore_protection: bool = False,
+) -> Dict[str, float]:
+    """从允许的相邻箱中选择综合代价最低的一对。"""
+    current_stats = aggregate_initial_stats_by_ranges(initial_stats, ranges)
+    pair_indices = (
+        list(allowed_pair_indices)
+        if allowed_pair_indices is not None
+        else list(range(len(ranges) - 1))
+    )
+    pair_indices = filter_blocked_pair_indices(
+        ranges,
+        pair_indices,
+        blocked_boundaries,
+    )
+    if not pair_indices:
+        raise ValueError("没有可合并的相邻箱")
+
+    diagnostics = [
+        pair_merge_diagnostics(
+            current_stats,
+            ranges,
+            pair_index,
+            initial_stats,
+            protected_boundaries,
+            extreme_boundaries=extreme_boundaries,
+            ignore_protection=ignore_protection,
+        )
+        for pair_index in pair_indices
+    ]
+    return min(diagnostics, key=lambda item: item["merge_cost"])
+
+
+def primary_inversion_pair_indices(stats: pd.DataFrame) -> List[int]:
+    """返回任一主风险指标发生倒挂的相邻箱左侧位置（去重）。"""
+    ordered = stats.sort_values("final_bin_order").reset_index(drop=True)
+    violation_rows: Set[int] = set()
+    for rate_col in PRIMARY_RATE_COLS:
+        diff = oriented_rate(ordered[rate_col]).diff()
+        rows = ordered.index[diff.lt(-TRAIN_INVERSION_TOLERANCE).fillna(False)]
+        violation_rows.update(int(r - 1) for r in rows if r > 0)
+    return sorted(violation_rows)
+
+
+def evaluate_merge_candidate(
+    train_initial_stats: pd.DataFrame,
+    ranges: Sequence[Tuple[int, int]],
+    initial_iv: float,
+    extreme_boundaries: Set[int],
+    step_no: int,
+    stage: str,
+    merge_reason: str,
+) -> Dict[str, object]:
+    """计算一个候选合箱方案的完整评分指标。"""
+    train_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
+
+    rate_cols = ALL_RISK_RATE_COLS
+    train_primary_inversions = count_rate_inversions(
+        train_stats,
+        PRIMARY_RATE_COLS,
+        tolerance=TRAIN_INVERSION_TOLERANCE,
+    )
+    train_all_inversions = count_rate_inversions(
+        train_stats,
+        rate_cols,
+        tolerance=TRAIN_INVERSION_TOLERANCE,
+    )
+
+    constraint_details = calc_bin_constraint_details(train_stats)
+    constraint_violation_count = int((~constraint_details["all_constraints_ok"]).sum())
+
+    final_iv = calc_iv_from_stats(train_stats)
+    iv_retention = safe_div(final_iv, initial_iv)
+
+    adjacent_diffs = oriented_rate(train_stats[PRIMARY_RATE_COL]).diff().dropna()
+    min_adjacent_rate_diff: float = (
+        float(adjacent_diffs.min()) if not adjacent_diffs.empty else np.nan
+    )
+    # 双主指标：取两个指标中更小的相邻差异，确保任一指标区分度不足时都被识别。
+    for rate_col in PRIMARY_RATE_COLS:
+        diffs = oriented_rate(train_stats[rate_col]).diff().dropna()
+        if not diffs.empty:
+            col_min = float(diffs.min())
+            if pd.isna(min_adjacent_rate_diff) or col_min < min_adjacent_rate_diff:
+                min_adjacent_rate_diff = col_min
+
+    final_bin_count = len(ranges)
+    eligible_bin_count = MIN_FINAL_BIN_COUNT <= final_bin_count <= MAX_FINAL_BIN_COUNT
+    extreme_boundary_violation_count = count_crossed_boundaries(ranges, extreme_boundaries)
+    hard_constraints_ok = all(
+        [
+            eligible_bin_count,
+            train_primary_inversions == 0,
+            constraint_violation_count == 0,
+            extreme_boundary_violation_count == 0,
+        ]
+    )
+
+    iv_value = (
+        0.0
+        if pd.isna(iv_retention)
+        else float(np.clip(iv_retention, 0, IV_RETENTION_SCORE_CAP))
+    )
+    min_sep_value = 0.0 if pd.isna(min_adjacent_rate_diff) else max(0.0, min_adjacent_rate_diff)
+    weights = CANDIDATE_SCORE_WEIGHTS
+
+    candidate_score = (
+        weights["hard_constraints_ok"] * int(hard_constraints_ok)
+        + weights["train_primary_inversion"] * train_primary_inversions
+        + weights["train_all_inversion"] * train_all_inversions
+        + weights["constraint_violation"] * constraint_violation_count
+        + weights["iv_retention"] * iv_value
+        + weights["min_adjacent_rate_diff"] * min_sep_value
+        + weights["target_bin_distance"] * abs(final_bin_count - TARGET_FINAL_BIN_COUNT)
+        + weights["extreme_boundary_violation"] * extreme_boundary_violation_count
+    )
+
+    return {
+        "selected": False,
+        "step_no": step_no,
+        "stage": stage,
+        "merge_reason": merge_reason,
+        "hard_constraints_ok": hard_constraints_ok,
+        "eligible_bin_count": eligible_bin_count,
+        "final_bin_count": final_bin_count,
+        "ranges": format_merge_ranges(ranges),
+        "train_primary_inversion_cnt": train_primary_inversions,
+        "train_all_inversion_cnt": train_all_inversions,
+        "constraint_violation_count": constraint_violation_count,
+        "extreme_boundary_violation_count": extreme_boundary_violation_count,
+        "min_train_sample_pct": float(train_stats["sample_pct"].min()),
+        "min_train_mature_count": float(train_stats[PRIMARY_MATURE_COL].min()),
+        "min_train_bad_count": float(train_stats[PRIMARY_BAD_COL].min()),
+        "min_train_good_count": float(train_stats[PRIMARY_GOOD_COL].min()),
+        "primary_iv": final_iv,
+        "primary_iv_retention": iv_retention,
+        "min_adjacent_primary_rate_diff": min_adjacent_rate_diff,
+        "candidate_score": candidate_score,
+    }
+
+
+def build_merge_candidate_score_table(
+    train_initial_stats: pd.DataFrame,
+    initial_bin_count: int,
+    config: Dict,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Set[int]]:
+    """
+    按可解释的分阶段流程生成候选合箱方案。
+
+    阶段一：清理样本、成熟量、坏样本或好样本不足的箱；
+    阶段二：使用双主指标 1M30+/3M30+ 执行 PAVA 风格单调合并；
+    阶段三：按相邻风险差异、显著性、IV 损失和策略边界保护压缩到 6~8 档；
+    阶段四：继续生成 8、7、6 档候选，并基于完整 Train 评分选择。
+    """
+    ranges: List[Tuple[int, int]] = [(idx, idx) for idx in range(1, initial_bin_count + 1)]
+    extreme_boundaries = identify_extreme_boundaries(initial_bin_count)
+    protected_boundaries = identify_protected_boundaries(train_initial_stats, config)
+    hard_blocked_boundaries = (
+        set()
+        if ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS
+        else set(extreme_boundaries)
+    )
+    initial_iv = calc_iv_from_stats(train_initial_stats)
+
+    candidate_rows: List[Dict[str, object]] = []
+    step_rows: List[Dict[str, object]] = []
+    step_no = 0
+
+    def perform_merge(
+        pair_index: int,
+        stage: str,
+        reason: str,
+        diagnostics: Dict[str, float],
+    ) -> None:
+        nonlocal ranges, step_no
+        before_ranges = list(ranges)
+        left_range = ranges[pair_index]
+        right_range = ranges[pair_index + 1]
+        ranges = merge_ranges_at(ranges, pair_index)
+        step_no += 1
+
+        step_rows.append(
+            {
+                "step_no": step_no,
+                "stage": stage,
+                "merge_reason": reason,
+                "left_range": str(left_range),
+                "right_range": str(right_range),
+                "merged_range": str(ranges[pair_index]),
+                "boundary": diagnostics.get("boundary"),
+                "is_protected_boundary": diagnostics.get("is_protected_boundary"),
+                "is_extreme_boundary": diagnostics.get("is_extreme_boundary"),
+                "left_primary_rate": diagnostics.get("left_rate"),
+                "right_primary_rate": diagnostics.get("right_rate"),
+                "abs_primary_rate_diff": diagnostics.get("abs_rate_diff"),
+                "two_proportion_p_value": diagnostics.get("p_value"),
+                "primary_iv_loss": diagnostics.get("iv_loss"),
+                "before_ranges": format_merge_ranges(before_ranges),
+                "after_ranges": format_merge_ranges(ranges),
+                "after_bin_count": len(ranges),
+            }
+        )
+        candidate_rows.append(
+            evaluate_merge_candidate(
+                train_initial_stats,
+                ranges,
+                initial_iv,
+                extreme_boundaries,
+                step_no,
+                stage,
+                reason,
+            )
+        )
+
+    # 0. 初始状态仅用于过程记录。
+    candidate_rows.append(
+        evaluate_merge_candidate(
+            train_initial_stats,
+            ranges,
+            initial_iv,
+            extreme_boundaries,
+            step_no,
+            "initial",
+            "20 等频初始箱",
+        )
+    )
+
+    # 1. 小箱清理。
+    while len(ranges) > MIN_FINAL_BIN_COUNT:
+        current_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
+        constraints = calc_bin_constraint_details(current_stats)
+        violating = constraints.loc[~constraints["all_constraints_ok"]]
+        if violating.empty:
+            break
+
+        target_order = int(
+            violating.sort_values("violation_severity", ascending=False).iloc[0][
+                "final_bin_order"
+            ]
+        )
+        target_index = target_order - 1
+        allowed_pairs = []
+        if target_index > 0:
+            allowed_pairs.append(target_index - 1)
+        if target_index < len(ranges) - 1:
+            allowed_pairs.append(target_index)
+
+        try:
+            diagnostics = choose_best_adjacent_pair(
+                ranges,
+                train_initial_stats,
+                protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
+                blocked_boundaries=hard_blocked_boundaries,
+                allowed_pair_indices=allowed_pairs,
+                ignore_protection=True,
+            )
+        except ValueError:
+            break
+        perform_merge(
+            int(diagnostics["pair_index"]),
+            "small_bin_cleanup",
+            "样本占比、成熟量或好坏样本量不足",
+            diagnostics,
+        )
+
+    # 2. PAVA 风格主指标单调合并。
+    while len(ranges) > MIN_FINAL_BIN_COUNT:
+        current_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
+        inversion_pairs = primary_inversion_pair_indices(current_stats)
+        if not inversion_pairs:
+            break
+
+        # 从倒挂最严重的一对开始处理（双主指标取跌幅最大者）。
+        oriented = {
+            col: oriented_rate(current_stats[col])
+            for col in PRIMARY_RATE_COLS
+        }
+        pair_index = min(
+            inversion_pairs,
+            key=lambda idx: min(
+                oriented[col].iloc[idx + 1] - oriented[col].iloc[idx]
+                for col in PRIMARY_RATE_COLS
+            ),
+        )
+        try:
+            diagnostics = choose_best_adjacent_pair(
+                ranges,
+                train_initial_stats,
+                protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
+                blocked_boundaries=hard_blocked_boundaries,
+                allowed_pair_indices=[pair_index],
+                ignore_protection=True,
+            )
+        except ValueError:
+            break
+        perform_merge(
+            pair_index,
+            "pava_monotonic_merge",
+            "主指标 1M30+/3M30+ 出现相邻倒挂",
+            diagnostics,
+        )
+
+    # 3. 如果档位仍多于上限，强制压缩到 MAX_FINAL_BIN_COUNT。
+    while len(ranges) > MAX_FINAL_BIN_COUNT:
+        try:
+            diagnostics = choose_best_adjacent_pair(
+                ranges,
+                train_initial_stats,
+                protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
+                blocked_boundaries=hard_blocked_boundaries,
+            )
+        except ValueError:
+            break
+        perform_merge(
+            int(diagnostics["pair_index"]),
+            "granularity_reduction",
+            "档位数量超过上限，选择信息损失最小的相邻箱",
+            diagnostics,
+        )
+
+    # 4. 继续生成 7 档和 6 档候选。
+    while len(ranges) > MIN_FINAL_BIN_COUNT:
+        current_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
+        candidate_pair_indices = filter_blocked_pair_indices(
+            ranges,
+            range(len(ranges) - 1),
+            hard_blocked_boundaries,
+        )
+        if not candidate_pair_indices:
+            break
+        all_diagnostics = [
+            pair_merge_diagnostics(
+                current_stats,
+                ranges,
+                pair_index,
+                train_initial_stats,
+                protected_boundaries,
+                extreme_boundaries=extreme_boundaries,
+            )
+            for pair_index in candidate_pair_indices
+        ]
+
+        statistically_similar = [
+            item
+            for item in all_diagnostics
+            if (
+                (pd.notna(item["p_value"]) and item["p_value"] >= ADJACENT_PVALUE_TO_MERGE)
+                or item["abs_rate_diff"] <= MIN_ADJACENT_ABS_RATE_DIFF
+            )
+        ]
+        diagnostics = min(
+            statistically_similar or all_diagnostics,
+            key=lambda item: item["merge_cost"],
+        )
+        reason = (
+            "相邻风险差异不显著或风险率接近"
+            if statistically_similar
+            else "生成更精简候选档位，选择信息损失最小的相邻箱"
+        )
+        perform_merge(
+            int(diagnostics["pair_index"]),
+            "candidate_reduction",
+            reason,
+            diagnostics,
+        )
+
+    candidates = pd.DataFrame(candidate_rows).drop_duplicates(subset=["ranges"], keep="last")
+
+    # 分布整形：若启用单箱样本占比上限，为超限候选生成"均衡拆分 + 相邻再合并"的整形方案。
+    if MAX_FINAL_BIN_SHARE and MAX_FINAL_BIN_SHARE > 0:
+        extra_rows: List[Dict[str, object]] = []
+        for _, cand in candidates.iterrows():
+            cand_ranges = parse_merge_ranges(str(cand["ranges"]))
+            refined = refine_ranges_under_share_cap(
+                cand_ranges,
+                train_initial_stats,
+                protected_boundaries,
+                extreme_boundaries,
+                MAX_FINAL_BIN_SHARE,
+                int(cand["final_bin_count"]),
+            )
+            if refined is None or refined == cand_ranges:
+                continue
+            extra_rows.append(
+                evaluate_merge_candidate(
+                    train_initial_stats,
+                    refined,
+                    initial_iv,
+                    extreme_boundaries,
+                    step_no + 1,
+                    "share_balancing",
+                    "单箱样本占比超过上限，均衡拆分并合并相邻箱",
+                )
+            )
+        if extra_rows:
+            candidates = pd.concat(
+                [candidates, pd.DataFrame(extra_rows)],
+                ignore_index=True,
+            ).drop_duplicates(subset=["ranges"], keep="last")
+
+    candidates["target_bin_distance"] = (
+        candidates["final_bin_count"] - TARGET_FINAL_BIN_COUNT
+    ).abs()
+
+    eligible = candidates.loc[candidates["eligible_bin_count"]].copy()
+    selection_pool = eligible if not eligible.empty else candidates.copy()
+    selection_pool = selection_pool.sort_values(
+        [
+            "hard_constraints_ok",
+            "train_primary_inversion_cnt",
+            "constraint_violation_count",
+            "train_all_inversion_cnt",
+            "candidate_score",
+            "primary_iv_retention",
+            "target_bin_distance",
+        ],
+        ascending=[False, True, True, True, False, False, True],
+        na_position="last",
+    )
+
+    if selection_pool.empty:
+        raise ValueError("未生成任何可用合箱候选方案")
+
+    selected_ranges_text = selection_pool.iloc[0]["ranges"]
+    candidates.loc[candidates["ranges"].eq(selected_ranges_text), "selected"] = True
+    candidates = candidates.sort_values(
+        ["selected", "hard_constraints_ok", "candidate_score", "final_bin_count"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+
+    steps = pd.DataFrame(step_rows)
+    return candidates, steps, protected_boundaries
+
+
+def refine_ranges_under_share_cap(
+    ranges: Sequence[Tuple[int, int]],
+    train_initial_stats: pd.DataFrame,
+    protected_boundaries: Set[int],
+    extreme_boundaries: Set[int],
+    max_share: float,
+    target_bin_count: int,
+) -> Optional[List[Tuple[int, int]]]:
+    """
+    单箱样本占比上限整形：把样本占比超过上限的箱沿低风险侧优先的可行拆点拆成两个，
+    若档数超出目标则合并代价最小的相邻对回到目标档数。
+
+    返回整形后的范围列表；无法整形（拆不出合规子箱或合不回去）时返回 None。
+    """
+    stats = train_initial_stats.sort_values("bin_order").reset_index(drop=True)
+    total_n = float(stats["n"].sum())
+
+    def range_share(start: int, end: int) -> float:
+        part = stats.loc[stats["bin_order"].between(start, end, inclusive="both")]
+        return float(part["n"].sum()) / total_n
+
+    def max_share_of(current: Sequence[Tuple[int, int]]) -> float:
+        return max(range_share(start, end) for start, end in current)
+
+    refined = list(ranges)
+    for _ in range(16):
+        overlarge = [
+            (start, end)
+            for start, end in refined
+            if range_share(start, end) > max_share
+        ]
+        if not overlarge:
+            break
+        start, end = max(overlarge, key=lambda r: range_share(*r))
+        # 从低风险侧取第一个可行拆点：低风险端样本密集，优先拆小。
+        best_split = None
+        for mid in range(start, end):
+            if range_share(start, mid) <= max_share and range_share(mid + 1, end) <= max_share:
+                best_split = mid
+                break
+        if best_split is None:
+            return None
+        idx = refined.index((start, end))
+        refined = (
+            refined[:idx] + [(start, best_split), (best_split + 1, end)] + refined[idx + 1 :]
+        )
+
+    while len(refined) > target_bin_count:
+        current_stats = aggregate_initial_stats_by_ranges(train_initial_stats, refined)
+        pair_indices = filter_blocked_pair_indices(
+            refined,
+            list(range(len(refined) - 1)),
+            extreme_boundaries,
+        )
+        feasible = []
+        for pair_index in pair_indices:
+            merged = merge_ranges_at(refined, pair_index)
+            if max_share_of(merged) <= max_share:
+                feasible.append((pair_index, merged))
+        if not feasible:
+            return None
+        diagnostics, merged = min(
+            (
+                (
+                    pair_merge_diagnostics(
+                        current_stats,
+                        refined,
+                        pair_index,
+                        train_initial_stats,
+                        protected_boundaries,
+                        extreme_boundaries=extreme_boundaries,
+                    ),
+                    merged_ranges,
+                )
+                for pair_index, merged_ranges in feasible
+            ),
+            key=lambda item: item[0]["merge_cost"],
+        )
+        del diagnostics
+        refined = merged
+
+    return refined
+
+
+def selected_ranges_from_candidate_table(
+    candidates: pd.DataFrame,
+) -> List[Tuple[int, int]]:
+    """从候选评分表读取最终方案。"""
+    selected = candidates.loc[candidates["selected"].eq(True)]
+    if selected.empty:
+        raise ValueError("未生成任何可用的合箱候选方案")
+    return parse_merge_ranges(str(selected.iloc[0]["ranges"]))
+
+
+# ============================================================
+# 5. OOT 基础验证
+# ============================================================
+
+def calc_population_psi(
+    train: pd.DataFrame,
+    oot: pd.DataFrame,
+    bin_col: str,
+    final_edges: pd.DataFrame,
+    eps: float = PSI_EPS,
+) -> pd.DataFrame:
+    """计算 Train 与 OOT 的最终箱分布 PSI。"""
+    base = final_edges[["final_bin_order", bin_col]].drop_duplicates()
+    train_count = train[bin_col].value_counts().rename("train_n")
+    oot_count = oot[bin_col].value_counts().rename("oot_n")
+
+    psi = (
+        base.merge(train_count, left_on=bin_col, right_index=True, how="left")
+        .merge(oot_count, left_on=bin_col, right_index=True, how="left")
+        .fillna({"train_n": 0, "oot_n": 0})
+        .sort_values("final_bin_order")
+        .reset_index(drop=True)
+    )
+
+    psi["train_pct"] = safe_div(psi["train_n"], psi["train_n"].sum())
+    psi["oot_pct"] = safe_div(psi["oot_n"], psi["oot_n"].sum())
+
+    train_pct = psi["train_pct"].clip(lower=eps)
+    oot_pct = psi["oot_pct"].clip(lower=eps)
+    psi["psi_component"] = (oot_pct - train_pct) * np.log(oot_pct / train_pct)
+    psi["psi_total"] = psi["psi_component"].sum()
+    return psi
+
+
+def calc_auc_ks(
+    data: pd.DataFrame,
+    score_col: str,
+    label_col: str,
+) -> pd.Series:
+    """直接计算二分类 AUC 和 KS，不依赖 sklearn。"""
+    work = data[[score_col, label_col]].copy()
+    work[score_col] = pd.to_numeric(work[score_col], errors="coerce")
+    work[label_col] = pd.to_numeric(work[label_col], errors="coerce")
+    work = work.loc[
+        work[score_col].notna() & work[label_col].isin([0, 1])
+    ].copy()
+
+    n = len(work)
+    bad_count = int(work[label_col].eq(1).sum())
+    good_count = int(work[label_col].eq(0).sum())
+    bad_rate = safe_div(bad_count, n)
+
+    if n == 0 or bad_count == 0 or good_count == 0:
+        return pd.Series(
+            {
+                "n": n,
+                "bad_cnt": bad_count,
+                "good_cnt": good_count,
+                "bad_rate": bad_rate,
+                "auc": np.nan,
+                "ks": np.nan,
+            }
+        )
+
+    risk_score = work[score_col] if HIGH_SCORE_HIGH_RISK else -work[score_col]
+    ranks = risk_score.rank(method="average")
+    bad_rank_sum = ranks.loc[work[label_col].eq(1)].sum()
+    auc = (
+        bad_rank_sum - bad_count * (bad_count + 1) / 2
+    ) / (bad_count * good_count)
+
+    ordered = work.assign(_risk_score=risk_score).sort_values(
+        "_risk_score",
+        ascending=False,
+    )
+    cum_bad = ordered[label_col].eq(1).cumsum() / bad_count
+    cum_good = ordered[label_col].eq(0).cumsum() / good_count
+    ks = (cum_bad - cum_good).abs().max()
+
+    return pd.Series(
+        {
+            "n": n,
+            "bad_cnt": bad_count,
+            "good_cnt": good_count,
+            "bad_rate": bad_rate,
+            "auc": auc,
+            "ks": ks,
+        }
+    )
+
+
+def calc_performance_table(data: pd.DataFrame) -> pd.DataFrame:
+    """按 Train / OOT 计算 1M30+ 和 3M30+ 的 AUC、KS。"""
+    rows = []
+    for sample_group, group_data in data.groupby("sample_group", observed=True):
+        if sample_group not in {"train", "oot"}:
+            continue
+        for label_col in ["duedate_1m_30", "duedate_3m_30"]:
+            metrics = calc_auc_ks(group_data, SCORE_COL, label_col).to_dict()
+            metrics.update(
+                {
+                    "sample_group": sample_group,
+                    "label": label_col,
+                }
+            )
+            rows.append(metrics)
+
+    return pd.DataFrame(rows)[
+        ["sample_group", "label", "n", "bad_cnt", "good_cnt", "bad_rate", "auc", "ks"]
+    ]
+
+
+# ============================================================
+# 6. 阈值曲线与策略结果
+# ============================================================
+
+def calc_portfolio_metrics(data: pd.DataFrame) -> Dict[str, float]:
+    """计算一组样本的核心风险指标。"""
+    work = add_risk_helper_columns(data)
+
+    result: Dict[str, float] = {
+        "n": len(work),
+        "principal": float(work["_principal"].sum()),
+    }
+
+    for prefix, config in RISK_HELPER_CONFIG.items():
+        helper = config["helper_prefix"]
+        mature = int(work[f"{helper}_mature_cnt"].sum())
+        bad = int(work[f"{helper}_bad_cnt"].sum())
+        exposure = float(work[f"{helper}_amt_exposure"].sum())
+        bad_amount = float(work[f"{helper}_amt_bad"].sum())
+
+        result[f"{prefix}_cnt_mature"] = mature
+        result[f"{prefix}_cnt_bad"] = bad
+        result[f"{prefix}_cnt_bad_rate"] = safe_div(bad, mature)
+        result[f"{prefix}_amt_exposure"] = exposure
+        result[f"{prefix}_amt_bad"] = bad_amount
+        result[f"{prefix}_amt_bad_rate"] = safe_div(bad_amount, exposure)
+
+    return result
+
+
+def prefix_metrics(metrics: Dict[str, float], prefix: str) -> Dict[str, float]:
+    """给指标字典统一增加前缀。"""
+    return {f"{prefix}_{key}": value for key, value in metrics.items()}
+
+
+def compute_auto_accept_rows(
+    curve: pd.DataFrame,
+    config: Dict,
+) -> Tuple[Optional[pd.Series], Optional[pd.Series]]:
+    """按自动通过 / 整体接纳约束选择阈值行；接纳阈值不能比自动通过更严格。"""
+    auto_row = select_threshold_under_constraints(curve, config["auto_constraints"])
+    accept_row = select_threshold_under_constraints(curve, config["accept_constraints"])
+    if auto_row is None or accept_row is None:
+        return auto_row, accept_row
+    if accept_row["threshold_order"] < auto_row["threshold_order"]:
+        accept_row = auto_row
+    return auto_row, accept_row
+
+
+def build_threshold_curve(
+    train: pd.DataFrame,
+    final_edges: pd.DataFrame,
+) -> pd.DataFrame:
+    """使用最终箱右边界生成可上线的候选阈值曲线。"""
+    max_score = train[SCORE_COL].max()
+    threshold_table = final_edges[
+        [
+            "final_bin_order",
+            FINAL_BIN_COL,
+            "score_right",
+            "merged_from",
+            "extreme_bin_role",
+        ]
+    ].copy()
+    threshold_table["threshold"] = threshold_table["score_right"].replace(np.inf, max_score)
+    threshold_table = threshold_table.loc[threshold_table["threshold"].notna()].copy()
+    threshold_table = threshold_table.sort_values("final_bin_order").reset_index(drop=True)
+
+    total_n = len(train)
+    total_principal = train["principal"].fillna(0).sum()
+    score = train[SCORE_COL]
+
+    rows = []
+    previous_threshold: Optional[float] = None
+
+    for threshold_order, threshold_row in threshold_table.iterrows():
+        threshold = float(threshold_row["threshold"])
+
+        if HIGH_SCORE_HIGH_RISK:
+            cumulative_mask = score.le(threshold)
+            marginal_mask = (
+                cumulative_mask
+                if previous_threshold is None
+                else score.gt(previous_threshold) & score.le(threshold)
+            )
+        else:
+            cumulative_mask = score.ge(threshold)
+            marginal_mask = (
+                cumulative_mask
+                if previous_threshold is None
+                else score.lt(previous_threshold) & score.ge(threshold)
+            )
+
+        cumulative_metrics = calc_portfolio_metrics(train.loc[cumulative_mask])
+        marginal_metrics = calc_portfolio_metrics(train.loc[marginal_mask])
+
+        row = {
+            "threshold_order": threshold_order + 1,
+            "threshold": threshold,
+            "prev_threshold": previous_threshold,
+            "final_bin_order": threshold_row["final_bin_order"],
+            FINAL_BIN_COL: threshold_row[FINAL_BIN_COL],
+            "merged_from": threshold_row["merged_from"],
+            "extreme_bin_role": threshold_row["extreme_bin_role"],
+        }
+        row.update(prefix_metrics(cumulative_metrics, "cum"))
+        row.update(prefix_metrics(marginal_metrics, "marginal"))
+        for prefix in RISK_PREFIXES:
+            cum_ci_low, cum_ci_high = wilson_ci(
+                cumulative_metrics[f"{prefix}_cnt_bad"],
+                cumulative_metrics[f"{prefix}_cnt_mature"],
+            )
+            row[f"cum_{prefix}_cnt_bad_rate_ci_low"] = cum_ci_low
+            row[f"cum_{prefix}_cnt_bad_rate_ci_high"] = cum_ci_high
+            marginal_ci_low, marginal_ci_high = wilson_ci(
+                marginal_metrics[f"{prefix}_cnt_bad"],
+                marginal_metrics[f"{prefix}_cnt_mature"],
+            )
+            row[f"marginal_{prefix}_cnt_bad_rate_ci_low"] = marginal_ci_low
+            row[f"marginal_{prefix}_cnt_bad_rate_ci_high"] = marginal_ci_high
+        row["cum_pass_rate"] = safe_div(cumulative_metrics["n"], total_n)
+        row["cum_principal_pct"] = safe_div(
+            cumulative_metrics["principal"],
+            total_principal,
+        )
+        row["marginal_sample_pct"] = safe_div(marginal_metrics["n"], total_n)
+        row["marginal_principal_pct"] = safe_div(
+            marginal_metrics["principal"],
+            total_principal,
+        )
+        rows.append(row)
+        previous_threshold = threshold
+
+    return pd.DataFrame(rows)
+
+
+def select_threshold_under_constraints(
+    curve: pd.DataFrame,
+    constraints: Dict[str, float],
+) -> Optional[pd.Series]:
+    """选择满足风险约束且累计通过率最高的阈值。"""
+    eligible = curve.copy()
+    for constraint_name, maximum in constraints.items():
+        metric = remove_prefix(constraint_name, "max_")
+        require_columns(eligible, [metric], "策略阈值曲线")
+        eligible = eligible.loc[eligible[metric].le(maximum)]
+
+    if eligible.empty:
+        return None
+
+    return eligible.sort_values(
+        ["cum_pass_rate", "threshold_order"],
+        ascending=[False, False],
+    ).iloc[0]
+
+
+def build_strategy_plan(
+    curve: pd.DataFrame,
+    config: Dict,
+) -> pd.DataFrame:
+    """根据唯一一套配置生成自动通过、人工审核和拒绝阈值。"""
+    auto_row, accept_row = compute_auto_accept_rows(curve, config)
+
+    base = {
+        "strategy_name": config["strategy_name"],
+        "objective": config["objective"],
+    }
+
+    if auto_row is None or accept_row is None:
+        return pd.DataFrame([{**base, "status": "无满足约束的阈值"}])
+
+    result = {
+        **base,
+        "status": "OK",
+        "auto_pass_threshold": auto_row["threshold"],
+        "auto_pass_bin": auto_row[FINAL_BIN_COL],
+        "reject_threshold": accept_row["threshold"],
+        "manual_review_upper_bin": accept_row[FINAL_BIN_COL],
+        "strategy_estimated_auto_pass_rate": auto_row["cum_pass_rate"],
+        "strategy_estimated_total_accept_rate": accept_row["cum_pass_rate"],
+        "strategy_estimated_manual_review_rate": (
+            accept_row["cum_pass_rate"] - auto_row["cum_pass_rate"]
+        ),
+        "strategy_estimated_reject_rate": 1 - accept_row["cum_pass_rate"],
+        "accepted_1m30p_cnt_bad_rate": accept_row["cum_1m30p_cnt_bad_rate"],
+        "accepted_3m30p_cnt_bad_rate": accept_row["cum_3m30p_cnt_bad_rate"],
+        "accepted_1m30p_amt_bad_rate": accept_row["cum_1m30p_amt_bad_rate"],
+        "accepted_3m30p_amt_bad_rate": accept_row["cum_3m30p_amt_bad_rate"],
+        "last_accepted_marginal_3m30p_cnt_bad_rate": accept_row[
+            "marginal_3m30p_cnt_bad_rate"
+        ],
+    }
+    return pd.DataFrame([result])
+
+
+def build_threshold_sensitivity(
+    curve: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    生成阈值敏感性表：对自动通过 / 总接纳阈值各展示当前、收严一档、放松一档
+    对通过率、风险率和人工审核量的边际影响，供风险与业务确认风险上限取值时参考。
+    """
+    valid = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if valid.empty or curve.empty:
+        return pd.DataFrame()
+
+    strategy = valid.iloc[0]
+    auto_threshold = float(strategy["auto_pass_threshold"])
+    accept_threshold = float(strategy["reject_threshold"])
+
+    curve = curve.reset_index(drop=True)
+    threshold_values = curve["threshold"].astype(float).to_numpy()
+
+    def row_position(value: float) -> int:
+        return int(np.flatnonzero(np.isclose(threshold_values, value))[0])
+
+    auto_pos = row_position(auto_threshold)
+    accept_pos = row_position(accept_threshold)
+
+    def collect(
+        threshold_type: str,
+        base_pos: int,
+        other_pos: int,
+    ) -> List[Dict]:
+        rows: List[Dict] = []
+        for scenario, variant_pos, note in [
+            ("当前", base_pos, ""),
+            ("收严一档", base_pos - 1, ""),
+            ("放松一档", base_pos + 1, ""),
+        ]:
+            variant = curve.iloc[variant_pos] if 0 <= variant_pos < len(curve) else None
+            if variant is None:
+                edge_note = (
+                    "已是曲线最严档位，无更严候选"
+                    if scenario == "收严一档"
+                    else "已是曲线最松档位，无更松候选"
+                )
+                rows.append({
+                    "threshold_type": threshold_type,
+                    "scenario": scenario,
+                    "threshold": np.nan,
+                    FINAL_BIN_COL: "",
+                    "note": edge_note,
+                })
+                continue
+
+            if threshold_type == "自动通过阈值":
+                auto_row, accept_row = variant, curve.iloc[other_pos]
+                if accept_row["threshold_order"] < variant["threshold_order"]:
+                    auto_row = accept_row
+                    note = "放松后越过总接纳阈值，按规则对齐（人工审核量为 0）"
+            else:
+                auto_row, accept_row = curve.iloc[other_pos], variant
+                if variant["threshold_order"] < auto_row["threshold_order"]:
+                    accept_row = auto_row
+                    note = "收严后严于自动通过阈值，按规则对齐"
+
+            row = {
+                "threshold_type": threshold_type,
+                "scenario": scenario,
+                "threshold": (
+                    auto_row["threshold"] if threshold_type == "自动通过阈值"
+                    else accept_row["threshold"]
+                ),
+                FINAL_BIN_COL: (
+                    auto_row[FINAL_BIN_COL] if threshold_type == "自动通过阈值"
+                    else accept_row[FINAL_BIN_COL]
+                ),
+                "strategy_estimated_auto_pass_rate": float(auto_row["cum_pass_rate"]),
+                "strategy_estimated_manual_review_rate": max(
+                    0.0, float(accept_row["cum_pass_rate"] - auto_row["cum_pass_rate"])
+                ),
+                "strategy_estimated_total_accept_rate": float(accept_row["cum_pass_rate"]),
+                "strategy_estimated_reject_rate": 1.0 - float(accept_row["cum_pass_rate"]),
+                "auto_1m30p_cnt_bad_rate": float(auto_row["cum_1m30p_cnt_bad_rate"]),
+                "auto_3m30p_cnt_bad_rate": float(auto_row["cum_3m30p_cnt_bad_rate"]),
+                "accept_3m30p_cnt_bad_rate": float(accept_row["cum_3m30p_cnt_bad_rate"]),
+                "accept_marginal_3m30p_cnt_bad_rate": float(
+                    accept_row["marginal_3m30p_cnt_bad_rate"]
+                ),
+                "accept_marginal_3m30p_cnt_bad_rate_ci_high": float(
+                    accept_row["marginal_3m30p_cnt_bad_rate_ci_high"]
+                ),
+                "note": note,
+            }
+            rows.append(row)
+        return rows
+
+    rows = [
+        *collect("自动通过阈值", auto_pos, accept_pos),
+        *collect("总接纳阈值", accept_pos, auto_pos),
+    ]
+    result = pd.DataFrame(rows)
+
+    for threshold_type in result["threshold_type"].unique():
+        mask = result["threshold_type"].eq(threshold_type)
+        base = result.loc[mask & result["scenario"].eq("当前")]
+        if base.empty:
+            continue
+        for metric in [
+            "strategy_estimated_auto_pass_rate",
+            "strategy_estimated_manual_review_rate",
+            "strategy_estimated_total_accept_rate",
+            "strategy_estimated_reject_rate",
+        ]:
+            result.loc[mask, f"{metric}_delta"] = (
+                result.loc[mask, metric] - base.iloc[0][metric]
+            )
+
+    first_columns = [
+        "threshold_type",
+        "scenario",
+        "threshold",
+        FINAL_BIN_COL,
+        "strategy_estimated_auto_pass_rate",
+        "strategy_estimated_manual_review_rate",
+        "strategy_estimated_total_accept_rate",
+        "strategy_estimated_reject_rate",
+        "auto_1m30p_cnt_bad_rate",
+        "auto_3m30p_cnt_bad_rate",
+        "accept_3m30p_cnt_bad_rate",
+        "accept_marginal_3m30p_cnt_bad_rate",
+        "accept_marginal_3m30p_cnt_bad_rate_ci_high",
+        "strategy_estimated_auto_pass_rate_delta",
+        "strategy_estimated_manual_review_rate_delta",
+        "strategy_estimated_total_accept_rate_delta",
+        "strategy_estimated_reject_rate_delta",
+        "note",
+    ]
+    remaining_columns = [col for col in result.columns if col not in first_columns]
+    return result[[col for col in first_columns if col in result.columns] + remaining_columns]
+
+
+def calc_segment_metrics(
+    data: pd.DataFrame,
+    lower_threshold: Optional[float],
+    upper_threshold: Optional[float],
+) -> Dict[str, float]:
+    """计算一个策略分数区间的样本和风险指标。"""
+    score = data[SCORE_COL]
+    mask = score.notna()
+
+    if HIGH_SCORE_HIGH_RISK:
+        if lower_threshold is not None:
+            mask &= score.gt(lower_threshold)
+        if upper_threshold is not None:
+            mask &= score.le(upper_threshold)
+    else:
+        if lower_threshold is not None:
+            mask &= score.lt(lower_threshold)
+        if upper_threshold is not None:
+            mask &= score.ge(upper_threshold)
+
+    segment = data.loc[mask]
+    metrics = calc_portfolio_metrics(segment)
+    metrics["sample_pct"] = safe_div(len(segment), len(data))
+    metrics["principal_pct"] = safe_div(
+        metrics["principal"],
+        data["principal"].fillna(0).sum(),
+    )
+    return metrics
+
+
+def build_strategy_segment_report(
+    train: pd.DataFrame,
+    oot: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+) -> pd.DataFrame:
+    """验证唯一策略在 Train 和 OOT 中的三段表现。"""
+    valid = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if valid.empty:
+        return pd.DataFrame()
+
+    strategy = valid.iloc[0]
+    auto_threshold = float(strategy["auto_pass_threshold"])
+    reject_threshold = float(strategy["reject_threshold"])
+    segments = [
+        ("自动通过", None, auto_threshold),
+        ("人工审核", auto_threshold, reject_threshold),
+        ("拒绝", reject_threshold, None),
+    ]
+
+    rows = []
+    for sample_group, data in [("train", train), ("oot", oot)]:
+        for decision, lower, upper in segments:
+            metrics = calc_segment_metrics(data, lower, upper)
+            segment_rate = metrics.pop("sample_pct")
+            segment_principal_rate = metrics.pop("principal_pct")
+            rows.append(
+                {
+                    "sample_group": sample_group,
+                    "strategy_name": strategy["strategy_name"],
+                    "decision": decision,
+                    "lower_threshold_exclusive": lower,
+                    "upper_threshold_inclusive": upper,
+                    "strategy_estimated_segment_rate": segment_rate,
+                    "strategy_estimated_segment_principal_rate": segment_principal_rate,
+                    **metrics,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def build_strategy_estimated_flow_report(
+    train: pd.DataFrame,
+    oot: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+) -> pd.DataFrame:
+    """按模型分阈值输出 Train、OOT 与全量的模型策略测算流量。"""
+    valid = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if valid.empty:
+        return pd.DataFrame()
+
+    strategy = valid.iloc[0]
+    auto_threshold = float(strategy["auto_pass_threshold"])
+    accept_threshold = float(strategy["reject_threshold"])
+    all_data = pd.concat([train, oot], ignore_index=True)
+    rows = []
+
+    for sample_group, data in [("Train", train), ("OOT", oot), ("All", all_data)]:
+        score = data[SCORE_COL]
+        valid_score = score.notna()
+        if HIGH_SCORE_HIGH_RISK:
+            auto_mask = valid_score & score.le(auto_threshold)
+            manual_mask = valid_score & score.gt(auto_threshold) & score.le(accept_threshold)
+            reject_mask = valid_score & score.gt(accept_threshold)
+        else:
+            auto_mask = valid_score & score.ge(auto_threshold)
+            manual_mask = valid_score & score.lt(auto_threshold) & score.ge(accept_threshold)
+            reject_mask = valid_score & score.lt(accept_threshold)
+
+        def unique_count(mask: pd.Series) -> int:
+            return int(data.loc[mask, "application_id"].nunique(dropna=True))
+
+        total_cnt = unique_count(valid_score)
+        auto_cnt = unique_count(auto_mask)
+        manual_cnt = unique_count(manual_mask)
+        reject_cnt = unique_count(reject_mask)
+        accepted_cnt = auto_cnt + manual_cnt
+        rows.append(
+            {
+                "metric_scope": "模型策略测算流量（score_worthiness阈值）",
+                "sample_group": sample_group,
+                "strategy_estimated_total_application_cnt": total_cnt,
+                "strategy_estimated_auto_pass_cnt": auto_cnt,
+                "strategy_estimated_manual_review_cnt": manual_cnt,
+                "strategy_estimated_total_accept_cnt": accepted_cnt,
+                "strategy_estimated_reject_cnt": reject_cnt,
+                "strategy_estimated_auto_pass_rate": safe_div(auto_cnt, total_cnt),
+                "strategy_estimated_manual_review_rate": safe_div(manual_cnt, total_cnt),
+                "strategy_estimated_total_accept_rate": safe_div(accepted_cnt, total_cnt),
+                "strategy_estimated_reject_rate": safe_div(reject_cnt, total_cnt),
+                "auto_pass_threshold": auto_threshold,
+                "total_accept_threshold": accept_threshold,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+
+
+def build_binning_process_table(
+    initial_stats: pd.DataFrame,
+    merge_map: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    汇总初始分箱、风险表现和最终合箱映射。
+
+    这张表用于回答三个问题：
+    1. 每个初始箱的样本量和风险表现如何；
+    2. 相邻箱之间是否出现风险倒挂；
+    3. 每个初始箱最终被合并到哪个风险等级。
+    """
+    process = initial_stats.copy().rename(columns={"bin_order": "initial_bin_order"})
+    process = process.merge(
+        merge_map[
+            [
+                "initial_bin_order",
+                INITIAL_BIN_COL,
+                "final_bin_order",
+                FINAL_BIN_COL,
+                "merged_from",
+            ]
+        ],
+        on=["initial_bin_order", INITIAL_BIN_COL],
+        how="left",
+    )
+    process = process.sort_values("initial_bin_order").reset_index(drop=True)
+    initial_bin_count = int(process["initial_bin_order"].max())
+    process["extreme_bin_role"] = process["initial_bin_order"].apply(
+        lambda order: classify_extreme_role(order, order, initial_bin_count)
+    )
+
+    for prefix in ["1m30p", "3m30p"]:
+        rate_col = f"{prefix}_cnt_bad_rate"
+        diff_col = f"{prefix}_rate_diff_prev"
+        inversion_col = f"{prefix}_inversion_flag"
+        process[diff_col] = process[rate_col].diff()
+        process[inversion_col] = process[diff_col].lt(0).fillna(False)
+
+    process["merge_action"] = np.where(
+        process["merged_from"].astype(str).str.contains("-", regex=False),
+        "相邻箱合并",
+        "单箱保留",
+    )
+
+    key_columns = [
+        "initial_bin_order",
+        INITIAL_BIN_COL,
+        "score_left",
+        "score_right",
+        "score_min",
+        "score_max",
+        "score_mean",
+        "n",
+        "sample_pct",
+        "1m30p_cnt_mature",
+        "1m30p_cnt_bad",
+        "1m30p_cnt_bad_rate",
+        "1m30p_rate_diff_prev",
+        "1m30p_inversion_flag",
+        "3m30p_cnt_mature",
+        "3m30p_cnt_bad",
+        "3m30p_cnt_bad_rate",
+        "3m30p_rate_diff_prev",
+        "3m30p_inversion_flag",
+        "1m30p_amt_exposure",
+        "1m30p_amt_bad",
+        "1m30p_amt_bad_rate",
+        "3m30p_amt_exposure",
+        "3m30p_amt_bad",
+        "3m30p_amt_bad_rate",
+        "cum_pass_rate",
+        "cum_1m30p_cnt_bad_rate",
+        "cum_3m30p_cnt_bad_rate",
+        "final_bin_order",
+        FINAL_BIN_COL,
+        "merged_from",
+        "extreme_bin_role",
+        "merge_action",
+    ]
+    return process[[col for col in key_columns if col in process.columns]]
+
+
+def build_threshold_selection_table(
+    threshold_curve: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+    config: Dict,
+) -> pd.DataFrame:
+    """
+    在阈值曲线上补充约束检查结果和最终阈值标记。
+
+    Excel 中可以直接看到：
+    - 每个候选阈值的累计通过率、累计风险和边际风险；
+    - 是否满足自动通过约束；
+    - 是否满足整体接纳约束；
+    - 哪一行最终被选为自动通过阈值或人工审核上限。
+    """
+    result = threshold_curve.copy()
+
+    for group_name, constraints in [
+        ("auto", config["auto_constraints"]),
+        ("accept", config["accept_constraints"]),
+    ]:
+        check_columns = []
+        for constraint_name, limit in constraints.items():
+            metric = remove_prefix(constraint_name, "max_")
+            check_col = f"{group_name}_check_{metric}"
+            limit_col = f"{group_name}_limit_{metric}"
+            result[limit_col] = limit
+            result[check_col] = result[metric].le(limit).fillna(False)
+            check_columns.append(check_col)
+        result[f"{group_name}_all_constraints_ok"] = result[check_columns].all(axis=1)
+
+    result["selected_role"] = ""
+    result["selection_reason"] = ""
+
+    valid = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if not valid.empty:
+        strategy = valid.iloc[0]
+        auto_threshold = float(strategy["auto_pass_threshold"])
+        reject_threshold = float(strategy["reject_threshold"])
+
+        auto_mask = np.isclose(result["threshold"].astype(float), auto_threshold)
+        reject_mask = np.isclose(result["threshold"].astype(float), reject_threshold)
+
+        result.loc[auto_mask, "selected_role"] = "自动通过阈值"
+        result.loc[auto_mask, "selection_reason"] = (
+            "满足自动通过全部风险约束，且累计通过率最高"
+        )
+
+        same_threshold = auto_mask & reject_mask
+        result.loc[reject_mask & ~same_threshold, "selected_role"] = "人工审核上限/拒绝阈值"
+        result.loc[reject_mask & ~same_threshold, "selection_reason"] = (
+            "满足整体接纳全部风险约束，且累计接纳率最高"
+        )
+        result.loc[same_threshold, "selected_role"] = "自动通过阈值及拒绝阈值"
+        result.loc[same_threshold, "selection_reason"] = (
+            "自动通过与整体接纳最终选择了同一阈值"
+        )
+
+    first_columns = [
+        "selected_role",
+        "selection_reason",
+        "threshold_order",
+        "threshold",
+        "prev_threshold",
+        "final_bin_order",
+        FINAL_BIN_COL,
+        "merged_from",
+        "extreme_bin_role",
+        "cum_pass_rate",
+        "cum_n",
+        "cum_principal_pct",
+        "cum_1m30p_cnt_mature",
+        "cum_1m30p_cnt_bad",
+        "cum_1m30p_cnt_bad_rate",
+        "cum_3m30p_cnt_mature",
+        "cum_3m30p_cnt_bad",
+        "cum_3m30p_cnt_bad_rate",
+        "cum_3m30p_cnt_bad_rate_ci_high",
+        "cum_1m30p_amt_exposure",
+        "cum_1m30p_amt_bad",
+        "cum_1m30p_amt_bad_rate",
+        "cum_3m30p_amt_exposure",
+        "cum_3m30p_amt_bad",
+        "cum_3m30p_amt_bad_rate",
+        "marginal_sample_pct",
+        "marginal_n",
+        "marginal_3m30p_cnt_mature",
+        "marginal_3m30p_cnt_bad",
+        "marginal_3m30p_cnt_bad_rate",
+        "marginal_3m30p_cnt_bad_rate_ci_high",
+        "auto_all_constraints_ok",
+        "accept_all_constraints_ok",
+    ]
+    remaining_columns = [col for col in result.columns if col not in first_columns]
+    return result[[col for col in first_columns if col in result.columns] + remaining_columns]
+
+
+def build_metric_dictionary() -> pd.DataFrame:
+    """输出 Excel 核心字段和计算口径说明。"""
+    rows = [
+        ("通用", "n", "箱内或区间内的申请样本量", "COUNT(application_id)"),
+        ("通用", "sample_pct", "箱内样本占全部样本的比例", "n / total_n"),
+        ("通用", "principal_amt", "箱内样本本金合计", "SUM(principal)"),
+        ("分箱", "score_left / score_right", "分箱的模型分左右边界", "(score_left, score_right]"),
+        ("分箱", "merged_from", "最终风险档位由哪些初始箱合并而来", "例如 B06-B08"),
+        ("分箱", "extreme_bin_role", "最好/最坏极端箱标识", "由 PROTECT_EXTREME_INITIAL_BINS 相关配置生成"),
+        ("分箱", "extreme_boundary_violation_count", "候选方案跨越极端保护边界的数量", "0 表示最好/最坏极端边界被保留"),
+        ("笔数风险", "1m30p_cnt_mature", "1M30+ 已成熟样本量", "duedate_1m_30 IN (0, 1)"),
+        ("笔数风险", "1m30p_cnt_bad", "1M30+ 逾期样本量", "duedate_1m_30 = 1"),
+        ("笔数风险", "1m30p_cnt_bad_rate", "1M30+ 笔数逾期率", "1m30p_cnt_bad / 1m30p_cnt_mature"),
+        ("笔数风险", "1m30p_cnt_lift", "1M30+ 笔数 Lift", "1m30p_cnt_bad_rate ÷ 整体 1M30+ 笔数逾期率"),
+        ("笔数风险", "3m30p_cnt_mature", "3M30+ 已成熟样本量", "duedate_3m_30 IN (0, 1)"),
+        ("笔数风险", "3m30p_cnt_bad", "3M30+ 逾期样本量", "duedate_3m_30 = 1"),
+        ("笔数风险", "3m30p_cnt_bad_rate", "3M30+ 笔数逾期率", "3m30p_cnt_bad / 3m30p_cnt_mature"),
+        ("笔数风险", "3m30p_cnt_lift", "3M30+ 笔数 Lift", "3m30p_cnt_bad_rate ÷ 整体 3M30+ 笔数逾期率"),
+        ("笔数风险", "1m30p_cnt_bad_rate_ci_low / ci_high", "1M30+ 笔数逾期率 95% Wilson 置信区间下/上界", "Wilson 区间（z=1.96）；成熟量为 0 时为空"),
+        ("笔数风险", "3m30p_cnt_bad_rate_ci_low / ci_high", "3M30+ 笔数逾期率 95% Wilson 置信区间下/上界", "Wilson 区间（z=1.96）；成熟量为 0 时为空"),
+        ("笔数风险", "cum_1m30p_cnt_mature / cum_1m30p_cnt_bad", "累计 1M30+ 已成熟样本量 / 逾期样本量", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("笔数风险", "cum_1m30p_cnt_bad_rate", "累计 1M30+ 笔数逾期率", "cum_1m30p_cnt_bad / cum_1m30p_cnt_mature"),
+        ("笔数风险", "cum_3m30p_cnt_mature / cum_3m30p_cnt_bad", "累计 3M30+ 已成熟样本量 / 逾期样本量", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("笔数风险", "cum_3m30p_cnt_bad_rate", "累计 3M30+ 笔数逾期率", "cum_3m30p_cnt_bad / cum_3m30p_cnt_mature"),
+        ("笔数风险", "cum_*_cnt_bad_rate_ci_low / ci_high", "累计笔数逾期率的 95% Wilson 置信区间下/上界", "按累计成熟量与逾期量计算"),
+        ("金额风险", "1m30p_amt_exposure", "1M30+ 已成熟样本的本金敞口", "SUM(principal) WHERE MOB1 已成熟"),
+        ("金额风险", "1m30p_amt_bad", "MOB1 30+ 样本的剩余本金", "SUM(estimate_principal_remaining_mob1)"),
+        ("金额风险", "1m30p_amt_bad_rate", "1M30+ 金额逾期率", "1m30p_amt_bad / 1m30p_amt_exposure"),
+        ("金额风险", "1m30p_amt_lift", "1M30+ 金额 Lift", "1m30p_amt_bad_rate ÷ 整体 1M30+ 金额逾期率"),
+        ("金额风险", "3m30p_amt_exposure", "3M30+ 已成熟样本的本金敞口", "SUM(principal) WHERE MOB3 已成熟"),
+        ("金额风险", "3m30p_amt_bad", "MOB3 30+ 样本的剩余本金", "SUM(estimate_principal_remaining_mob3)"),
+        ("金额风险", "3m30p_amt_bad_rate", "3M30+ 金额逾期率", "3m30p_amt_bad / 3m30p_amt_exposure"),
+        ("金额风险", "3m30p_amt_lift", "3M30+ 金额 Lift", "3m30p_amt_bad_rate ÷ 整体 3M30+ 金额逾期率"),
+        ("金额风险", "cum_1m30p_amt_exposure / cum_1m30p_amt_bad", "累计 1M30+ 本金敞口 / 逾期剩余本金", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("金额风险", "cum_1m30p_amt_bad_rate", "累计 1M30+ 金额逾期率", "cum_1m30p_amt_bad / cum_1m30p_amt_exposure"),
+        ("金额风险", "cum_3m30p_amt_exposure / cum_3m30p_amt_bad", "累计 3M30+ 本金敞口 / 逾期剩余本金", "按 bin_order 从低风险向高风险逐箱累加"),
+        ("金额风险", "cum_3m30p_amt_bad_rate", "累计 3M30+ 金额逾期率", "cum_3m30p_amt_bad / cum_3m30p_amt_exposure"),
+        ("模型策略测算", "cum_pass_rate", "从低风险端累计到当前阈值的模型策略测算通过率", "cum_n / total_n"),
+        ("阈值", "marginal_sample_pct", "当前档位新增样本占比", "marginal_n / total_n"),
+        ("阈值", "marginal_3m30p_cnt_bad_rate", "当前新增档位自身的 3M30+ 风险", "marginal_bad / marginal_mature"),
+        ("阈值", "marginal_*_cnt_bad_rate_ci_low / ci_high", "边际档位笔数逾期率 95% Wilson 置信区间下/上界", "按边际档位成熟量与逾期量计算"),
+        ("阈值", "auto_all_constraints_ok", "该候选阈值是否满足自动通过全部约束", "全部自动通过检查项均为 True"),
+        ("阈值", "accept_all_constraints_ok", "该候选阈值是否满足整体接纳全部约束", "全部整体接纳检查项均为 True"),
+        ("历史实际审批漏斗", "actual_completion_rate", "历史实际进件完成率", "completed_application_cnt / apply_cnt"),
+        ("历史实际审批漏斗", "actual_approval_rate", "历史实际审批通过率", "approved_application_cnt / completed_application_cnt"),
+        ("历史实际审批漏斗", "actual_auto_approval_rate", "历史实际自动审批通过率", "auto_approved_application_cnt / completed_application_cnt"),
+        ("历史实际审批漏斗", "actual_manual_approval_rate", "历史实际人工审批通过率", "manual_approved_application_cnt / completed_application_cnt"),
+        ("历史实际审批漏斗", "actual_auto_approval_share", "历史实际通过件中的自动审批占比", "auto_approved_application_cnt / approved_application_cnt"),
+        ("历史实际审批漏斗", "actual_manual_approval_share", "历史实际通过件中的人工审批占比", "manual_approved_application_cnt / approved_application_cnt"),
+        ("历史实际审批漏斗", "actual_deal_rate", "历史实际成交转化率", "deal_sample_cnt / approved_application_cnt"),
+        ("箱级历史实际审批漏斗", "actual_*（03_最终分箱统计）", "按 Train/OOT 与最终风险档下钻的历史实际数量和比率", "在每个 score_worthiness_final_bin 内按唯一 application_id 复算"),
+        ("模型策略测算", "strategy_estimated_auto_pass_rate", "模型阈值测算的自动通过样本占比", "score_worthiness 满足自动通过阈值的申请数 / 有效模型分申请数"),
+        ("模型策略测算", "strategy_estimated_manual_review_rate", "模型阈值测算的人工审核样本占比", "人工审核分数区间申请数 / 有效模型分申请数"),
+        ("模型策略测算", "strategy_estimated_total_accept_rate", "模型阈值测算的总接纳样本占比", "自动通过数与人工审核数之和 / 有效模型分申请数"),
+        ("模型策略测算", "strategy_estimated_reject_rate", "模型阈值测算的拒绝样本占比", "超过总接纳阈值的申请数 / 有效模型分申请数"),
+        ("箱级模型策略测算", "strategy_estimated_decision", "最终风险档对应的策略归属", "按自动通过阈值和总接纳阈值映射为自动通过/人工审核/拒绝"),
+        ("箱级模型策略测算", "strategy_estimated_bin_flow_rate", "该风险档对策略流量的贡献", "箱内申请数 / 当前样本组有效模型分申请数"),
+        ("箱级模型策略测算", "strategy_estimated_cumulative_flow_rate", "从低风险端累计至当前档的策略流量", "累计申请数 / 当前样本组有效模型分申请数"),
+        ("分箱表整体指标", "strategy_estimated_overall_*_rate", "当前 Train/OOT 样本组的整体策略测算转化率", "整体指标在分箱表中独立成列并重复展示；不作为单箱指标解释"),
+        ("分箱表整体指标", "overall_1m30p_auc / overall_3m30p_auc", "当前 Train/OOT 样本组的整体 AUC", "整体指标在分箱表中独立成列并重复展示；AUC 不定义为单箱指标"),
+        ("分箱表整体指标", "overall_1m30p_ks / overall_3m30p_ks", "当前 Train/OOT 样本组的整体 KS", "整体指标在分箱表中独立成列并重复展示；与箱级 *_ks_curve 区分"),
+        ("箱级模型诊断", "*_iv_component", "1M30+/3M30+ 的箱级 IV 分项", "(bad_dist-good_dist) * LN(bad_dist/good_dist)"),
+        ("箱级模型诊断", "*_ks_curve", "由高风险端累计至当前档的 KS 曲线值", "ABS(cum_bad_dist_from_high-cum_good_dist_from_high)"),
+        ("箱级模型诊断", "train_oot_psi_component", "当前风险档对 Train/OOT PSI 的贡献", "(OOT%-Train%) * LN(OOT%/Train%)"),
+        ("验证", "PSI", "Train 与 OOT 的分箱分布稳定性", "SUM((OOT%-Train%) * LN(OOT%/Train%))"),
+        ("验证", "AUC / KS", "模型风险区分能力指标", "分别衡量排序能力和好坏样本累计差异"),
+    ]
+    return pd.DataFrame(rows, columns=["category", "field", "definition", "calculation"])
+
+
+def build_online_execution_rules() -> pd.DataFrame:
+    """输出上线执行规则的静态清单，供引擎团队上线时逐项核对。"""
+    rows = [
+        ("分数精度", "模型分精度", "线上评分引擎输出与离线一致的 float 模型分（score_worthiness），不限制小数位"),
+        ("分数精度", "边界精度", "阈值 = 最终箱右边界原始值（末档为 Train 最大分数），不做二次取整"),
+        ("阈值取整", "取整原则", "默认按原始精度部署；若工程必须取整（如存储小数位限制），只允许向更严方向取整：自动通过阈值、总接纳阈值均向下取整（floor），不放大接纳人群"),
+        ("阈值取整", "取整后复核", "取整后须重新计算三段占比与风险，与未取整版本对比，确认无风险放大"),
+        ("区间开闭", "分档规则", "采用 (left, right]：自动通过 = score ≤ 自动通过阈值；人工审核 = 自动通过阈值 < score ≤ 总接纳阈值；拒绝 = score > 总接纳阈值"),
+        ("区间开闭", "边界相等", "分数精确等于阈值时归入右闭档（score == 阈值 → 通过/接纳）"),
+        ("区间开闭", "比较方式", "线上用数值比较（float），禁止格式化字符串比较"),
+        ("空值与异常值", "缺失模型分", "线上无法产出模型分或为空 → 按拒绝处理；离线报告中缺失样本已从分箱统计剔除，并在 01_总览 展示缺失量与缺失率，两个口径需知悉"),
+        ("空值与异常值", "异常分数", "NaN/Inf 不入自动通过，按拒绝处理；分数超出训练范围 → 归入对应极端箱（±∞ 边界兜底）"),
+        ("一致性校验", "阈值清单核对", "上线前逐项核对：阈值原始值、开闭符号、末档全量通过点（score ≤ Train 最大分数）"),
+        ("一致性校验", "离线/线上对照", "上线前取最近批次样本，离线分档 vs 线上引擎分档，一致率必须 100%，重点覆盖等于边界及边界 ± 1 ulp 的分数"),
+        ("一致性校验", "上线后监控", "监控线上分档占比与离线报告各档占比（PSI），边界漂移及时告警复核"),
+    ]
+    return pd.DataFrame(rows, columns=["category", "item", "rule"])
+
+
+def build_monthly_bin_stability(data: pd.DataFrame) -> pd.DataFrame:
+    """按月份、样本组和最终风险档输出箱级稳定性指标。"""
+    rows = []
+    valid = data.loc[
+        data["sample_group"].isin(["train", "oot"])
+        & data["application_month"].notna()
+        & data[FINAL_BIN_COL].notna()
+    ].copy()
+
+    for (sample_group, application_month), month_data in valid.groupby(
+        ["sample_group", "application_month"],
+        observed=True,
+    ):
+        stats = calc_bin_stats(
+            month_data,
+            bin_col=FINAL_BIN_COL,
+            order_col="bin_order",
+        )
+        stats.insert(0, "application_month", application_month)
+        stats.insert(0, "sample_group", sample_group)
+        rows.append(stats)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.concat(rows, ignore_index=True)
+    result["primary_rate_diff_prev"] = result.groupby(
+        ["sample_group", "application_month"],
+        observed=True,
+    )[PRIMARY_RATE_COL].diff()
+    if not HIGH_SCORE_HIGH_RISK:
+        result["primary_rate_diff_prev"] = -result["primary_rate_diff_prev"]
+    result["primary_inversion_flag"] = (
+        result["primary_rate_diff_prev"] < -MONTHLY_INVERSION_TOLERANCE
+    )
+    return result
+
+
+def build_monthly_stability_summary(monthly_stats: pd.DataFrame) -> pd.DataFrame:
+    """汇总每个月的主风险指标单调性和样本表现。"""
+    if monthly_stats.empty:
+        return pd.DataFrame()
+
+    return (
+        monthly_stats.groupby(["sample_group", "application_month"], observed=True)
+        .agg(
+            n=("n", "sum"),
+            mature_count=(PRIMARY_MATURE_COL, "sum"),
+            bad_count=(PRIMARY_BAD_COL, "sum"),
+            bin_count=(FINAL_BIN_COL, "nunique"),
+            primary_inversion_count=("primary_inversion_flag", "sum"),
+            max_primary_rate_drop=("primary_rate_diff_prev", lambda s: float((-s).clip(lower=0).max())),
+        )
+        .reset_index()
+        .assign(
+            primary_bad_rate=lambda frame: safe_div(
+                frame["bad_count"], frame["mature_count"]
+            ),
+            primary_monotonic_ok=lambda frame: frame["primary_inversion_count"].eq(0),
+        )
+    )
+
+
+# ============================================================
+# 7. 报告数据整理与输出
+# ============================================================
+
+def build_train_oot_compare(
+    train_stats: pd.DataFrame,
+    oot_stats: pd.DataFrame,
+    final_edges: pd.DataFrame,
+) -> pd.DataFrame:
+    """生成最终箱 Train / OOT 对比表。"""
+    key_cols = [FINAL_BIN_COL]
+    compare_cols = [
+        FINAL_BIN_COL,
+        "n",
+        "sample_pct",
+        "1m30p_cnt_mature",
+        "1m30p_cnt_bad",
+        "1m30p_cnt_bad_rate",
+        "3m30p_cnt_mature",
+        "3m30p_cnt_bad",
+        "3m30p_cnt_bad_rate",
+        "1m30p_amt_exposure",
+        "1m30p_amt_bad",
+        "1m30p_amt_bad_rate",
+        "3m30p_amt_exposure",
+        "3m30p_amt_bad",
+        "3m30p_amt_bad_rate",
+    ]
+
+    comparison = train_stats[compare_cols].merge(
+        oot_stats[compare_cols],
+        on=key_cols,
+        how="outer",
+        suffixes=("_train", "_oot"),
+    )
+
+    return final_edges[
+        [
+            "final_bin_order",
+            FINAL_BIN_COL,
+            "merged_from",
+            "extreme_bin_role",
+            "score_left",
+            "score_right",
+        ]
+    ].merge(comparison, on=FINAL_BIN_COL, how="left")
+
+
+def build_overview(
+    data: pd.DataFrame,
+    train: pd.DataFrame,
+    oot: pd.DataFrame,
+    initial_bin_count: int,
+    final_bin_count: int,
+    selected_merge_ranges: Sequence[Tuple[int, int]],
+    selected_candidate: Optional[pd.Series],
+    protected_boundaries: Set[int],
+    psi: pd.DataFrame,
+    performance: pd.DataFrame,
+    monotonicity: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+    actual_funnel_report: pd.DataFrame,
+    strategy_estimated_flow: pd.DataFrame,
+) -> pd.DataFrame:
+    """整理报告首页的核心结论，并按模块分组展示。"""
+    source_row_count = int(data.attrs.get("source_row_count", len(data)))
+    removed_incomplete_count = int(data.attrs.get("removed_incomplete_count", 0))
+    score_missing_count = int(data.attrs.get("score_missing_count", 0))
+
+    rows = [
+        ("样本", "原始样本量", source_row_count),
+        ("样本", "剔除未完成申请量", removed_incomplete_count),
+        ("样本", "剔除未完成申请率", safe_div(removed_incomplete_count, source_row_count)),
+        ("样本", "有效模型分样本量", len(data)),
+        ("样本", "模型分缺失量", score_missing_count),
+        ("样本", "模型分缺失率", safe_div(score_missing_count, source_row_count)),
+        ("样本", "Train 样本量", len(train)),
+        ("样本", "OOT 样本量", len(oot)),
+        ("时间切分", "Train 截止月份", TRAIN_END_MONTH),
+        ("时间切分", "OOT 起始月份", OOT_START_MONTH),
+        ("分箱", "初始箱数量", initial_bin_count),
+        ("分箱", "最终箱数量", final_bin_count),
+        ("分箱", "合箱主指标", " / ".join(PRIMARY_RATE_COLS)),
+        ("分箱", "最终采用合箱方案", format_merge_ranges(selected_merge_ranges)),
+        ("分箱", "受保护初始边界", ",".join(map(str, sorted(protected_boundaries)))),
+        ("稳定性", "最终箱 Train/OOT PSI", psi["psi_total"].iloc[0]),
+    ]
+
+    if selected_candidate is not None:
+        rows.extend(
+            [
+                ("候选评分", "Train 主指标倒挂数", selected_candidate.get("train_primary_inversion_cnt")),
+                ("候选评分", "Train 全指标倒挂数", selected_candidate.get("train_all_inversion_cnt")),
+                ("候选评分", "主指标 IV 保留率", selected_candidate.get("primary_iv_retention")),
+                ("候选评分", "候选综合得分", selected_candidate.get("candidate_score")),
+            ]
+        )
+
+    for _, perf in performance.iterrows():
+        prefix = f"{perf['sample_group']}_{perf['label']}"
+        rows.extend(
+            [
+                ("模型效果", f"{prefix}_bad_rate", perf["bad_rate"]),
+                ("模型效果", f"{prefix}_auc", perf["auc"]),
+                ("模型效果", f"{prefix}_ks", perf["ks"]),
+            ]
+        )
+
+    for sample_group in ["train", "oot"]:
+        sample_check = monotonicity.loc[monotonicity["sample_group"].eq(sample_group)]
+        if sample_check.empty:
+            continue
+        rows.append(
+            (
+                "单调性",
+                f"{sample_group}_最终箱全部单调",
+                bool(sample_check["is_monotonic_non_decreasing"].all()),
+            )
+        )
+
+    for sample_group in ["Train", "OOT"]:
+        actual_rows = actual_funnel_report.loc[
+            actual_funnel_report["sample_group"].eq(sample_group)
+        ]
+        if not actual_rows.empty:
+            actual = actual_rows.iloc[0]
+            rows.extend(
+                [
+                    ("历史实际审批漏斗", f"{sample_group}_进件完成率", actual["actual_completion_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_审批通过率", actual["actual_approval_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_自动审批通过率", actual["actual_auto_approval_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_人工审批通过率", actual["actual_manual_approval_rate"]),
+                    ("历史实际审批漏斗", f"{sample_group}_自动审批占比", actual["actual_auto_approval_share"]),
+                    ("历史实际审批漏斗", f"{sample_group}_人工审批占比", actual["actual_manual_approval_share"]),
+                    ("历史实际审批漏斗", f"{sample_group}_成交转化率", actual["actual_deal_rate"]),
+                ]
+            )
+
+        estimated_rows = strategy_estimated_flow.loc[
+            strategy_estimated_flow["sample_group"].eq(sample_group)
+        ]
+        if not estimated_rows.empty:
+            estimated = estimated_rows.iloc[0]
+            rows.extend(
+                [
+                    ("模型策略测算流量", f"{sample_group}_测算自动通过率", estimated["strategy_estimated_auto_pass_rate"]),
+                    ("模型策略测算流量", f"{sample_group}_测算人工审核率", estimated["strategy_estimated_manual_review_rate"]),
+                    ("模型策略测算流量", f"{sample_group}_测算总接纳率", estimated["strategy_estimated_total_accept_rate"]),
+                    ("模型策略测算流量", f"{sample_group}_测算拒绝率", estimated["strategy_estimated_reject_rate"]),
+                ]
+            )
+
+    valid_strategy = strategy_plan.loc[strategy_plan["status"].eq("OK")]
+    if not valid_strategy.empty:
+        row = valid_strategy.iloc[0]
+        rows.extend(
+            [
+                ("模型策略阈值", "策略名称", row["strategy_name"]),
+                ("模型策略阈值", "自动通过阈值", row["auto_pass_threshold"]),
+                ("模型策略阈值", "自动通过截止风险档", row["auto_pass_bin"]),
+                ("模型策略阈值", "人工审核上限/拒绝阈值", row["reject_threshold"]),
+                ("模型策略阈值", "人工审核截止风险档", row["manual_review_upper_bin"]),
+                ("策略风险", "接纳人群1M30+笔数逾期率", row["accepted_1m30p_cnt_bad_rate"]),
+                ("策略风险", "接纳人群3M30+笔数逾期率", row["accepted_3m30p_cnt_bad_rate"]),
+                ("策略风险", "接纳人群1M30+金额逾期率", row["accepted_1m30p_amt_bad_rate"]),
+                ("策略风险", "接纳人群3M30+金额逾期率", row["accepted_3m30p_amt_bad_rate"]),
+                ("策略风险", "最后接纳档边际3M30+", row["last_accepted_marginal_3m30p_cnt_bad_rate"]),
+            ]
+        )
+    else:
+        status = strategy_plan.iloc[0]["status"] if not strategy_plan.empty else "未生成"
+        rows.append(("策略", "策略状态", status))
+
+    return pd.DataFrame(rows, columns=["section", "metric", "value"])
+
+
+def build_config_table(
+    selected_merge_ranges: Sequence[Tuple[int, int]],
+    protected_boundaries: Set[int],
+) -> pd.DataFrame:
+    """输出便于后续修改和版本管理的参数表。"""
+    actual_initial_bin_count = max((end for _, end in selected_merge_ranges), default=0)
+    extreme_boundaries_text = ",".join(
+        map(str, sorted(identify_extreme_boundaries(actual_initial_bin_count)))
+    )
+    rows = [
+        {"config_group": "基础配置", "config_name": "DATA_DIR", "config_value": str(DATA_DIR)},
+        {"config_group": "基础配置", "config_name": "TRAIN_END_MONTH", "config_value": TRAIN_END_MONTH},
+        {"config_group": "基础配置", "config_name": "OOT_START_MONTH", "config_value": OOT_START_MONTH},
+        {"config_group": "基础配置", "config_name": "INITIAL_BIN_COUNT", "config_value": INITIAL_BIN_COUNT},
+        {"config_group": "基础配置", "config_name": "HIGH_SCORE_HIGH_RISK", "config_value": HIGH_SCORE_HIGH_RISK},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_SOURCE", "config_value": "application_info.csv"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_COUNT_KEY", "config_value": "COUNT DISTINCT application_id"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_COMPLETED_EXCLUSIONS", "config_value": "0.Incomplete,1.In Progress"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_APPROVED_PREFIXES", "config_value": "3,4"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_DEAL_STATUSES", "config_value": "Active_Account,Closed,Blocked"},
+        {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_COUNT", "config_value": MIN_FINAL_BIN_COUNT},
+        {"config_group": "合箱配置", "config_name": "MAX_FINAL_BIN_COUNT", "config_value": MAX_FINAL_BIN_COUNT},
+        {"config_group": "合箱配置", "config_name": "TARGET_FINAL_BIN_COUNT", "config_value": TARGET_FINAL_BIN_COUNT},
+        {"config_group": "合箱配置", "config_name": "PRIMARY_RATE_COLS", "config_value": " / ".join(PRIMARY_RATE_COLS)},
+        {"config_group": "合箱配置", "config_name": "PRIMARY_RATE_COL", "config_value": PRIMARY_RATE_COL},
+        {"config_group": "合箱配置", "config_name": "MIN_MIDDLE_BIN_SAMPLE_PCT", "config_value": MIN_MIDDLE_BIN_SAMPLE_PCT},
+        {"config_group": "合箱配置", "config_name": "MIN_TAIL_BIN_SAMPLE_PCT", "config_value": MIN_TAIL_BIN_SAMPLE_PCT},
+        {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_MATURE_COUNT", "config_value": MIN_FINAL_BIN_MATURE_COUNT},
+        {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_BAD_COUNT", "config_value": MIN_FINAL_BIN_BAD_COUNT},
+        {"config_group": "合箱配置", "config_name": "MIN_FINAL_BIN_GOOD_COUNT", "config_value": MIN_FINAL_BIN_GOOD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_EXTREME_BIN_MATURE_COUNT", "config_value": MIN_EXTREME_BIN_MATURE_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_BEST_EXTREME_BIN_BAD_COUNT", "config_value": MIN_BEST_EXTREME_BIN_BAD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_BEST_EXTREME_BIN_GOOD_COUNT", "config_value": MIN_BEST_EXTREME_BIN_GOOD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_WORST_EXTREME_BIN_BAD_COUNT", "config_value": MIN_WORST_EXTREME_BIN_BAD_COUNT},
+        {"config_group": "极端箱配置", "config_name": "MIN_WORST_EXTREME_BIN_GOOD_COUNT", "config_value": MIN_WORST_EXTREME_BIN_GOOD_COUNT},
+        {"config_group": "合箱配置", "config_name": "TRAIN_INVERSION_TOLERANCE", "config_value": TRAIN_INVERSION_TOLERANCE},
+        {"config_group": "合箱配置", "config_name": "MONTHLY_INVERSION_TOLERANCE", "config_value": MONTHLY_INVERSION_TOLERANCE},
+        {"config_group": "合箱配置", "config_name": "ADJACENT_PVALUE_TO_MERGE", "config_value": ADJACENT_PVALUE_TO_MERGE},
+        {"config_group": "合箱配置", "config_name": "MIN_ADJACENT_ABS_RATE_DIFF", "config_value": MIN_ADJACENT_ABS_RATE_DIFF},
+        {"config_group": "合箱配置", "config_name": "MAX_FINAL_BIN_SHARE", "config_value": MAX_FINAL_BIN_SHARE},
+        {"config_group": "合箱配置", "config_name": "PROTECTED_BOUNDARIES", "config_value": ",".join(map(str, sorted(protected_boundaries)))},
+        {"config_group": "极端箱配置", "config_name": "PROTECT_EXTREME_INITIAL_BINS", "config_value": PROTECT_EXTREME_INITIAL_BINS},
+        {"config_group": "极端箱配置", "config_name": "BEST_EXTREME_INITIAL_BIN_COUNT", "config_value": BEST_EXTREME_INITIAL_BIN_COUNT},
+        {"config_group": "极端箱配置", "config_name": "WORST_EXTREME_INITIAL_BIN_COUNT", "config_value": WORST_EXTREME_INITIAL_BIN_COUNT},
+        {"config_group": "极端箱配置", "config_name": "ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS", "config_value": ALLOW_EXTREME_BIN_MERGE_FOR_HARD_CONSTRAINTS},
+        {"config_group": "极端箱配置", "config_name": "EXTREME_BOUNDARIES", "config_value": extreme_boundaries_text},
+        {"config_group": "极端箱配置", "config_name": "EXTREME_BOUNDARY_PENALTY", "config_value": EXTREME_BOUNDARY_PENALTY},
+        {"config_group": "极端箱配置", "config_name": "EXTREME_BOUNDARY_VIOLATION_PENALTY", "config_value": EXTREME_BOUNDARY_VIOLATION_PENALTY},
+        {"config_group": "评分配置", "config_name": "PROTECTED_BOUNDARY_PENALTY", "config_value": PROTECTED_BOUNDARY_PENALTY},
+        {"config_group": "评分配置", "config_name": "MERGE_COST_RATE_GAP_WEIGHT", "config_value": MERGE_COST_RATE_GAP_WEIGHT},
+        {"config_group": "评分配置", "config_name": "MERGE_COST_IV_LOSS_WEIGHT", "config_value": MERGE_COST_IV_LOSS_WEIGHT},
+        {"config_group": "评分配置", "config_name": "IV_RETENTION_SCORE_CAP", "config_value": IV_RETENTION_SCORE_CAP},
+        {"config_group": "评分配置", "config_name": "PSI_EPS", "config_value": PSI_EPS},
+        {"config_group": "评分配置", "config_name": "IV_SMOOTHING_EPS", "config_value": IV_SMOOTHING_EPS},
+        {"config_group": "合箱配置", "config_name": "SELECTED_FINAL_BIN_RANGES", "config_value": format_merge_ranges(selected_merge_ranges)},
+    ]
+
+    for name, value in CANDIDATE_SCORE_WEIGHTS.items():
+        rows.append(
+            {
+                "config_group": "候选评分权重",
+                "config_name": name,
+                "config_value": value,
+            }
+        )
+
+    flattened = {
+        **flatten_dict("auto", STRATEGY_CONFIG["auto_constraints"]),
+        **flatten_dict("accept", STRATEGY_CONFIG["accept_constraints"]),
+    }
+    for name, value in flattened.items():
+        rows.append(
+            {
+                "config_group": STRATEGY_CONFIG["strategy_name"],
+                "config_name": name,
+                "config_value": value,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _detect_sections(ws) -> List[Tuple[int, int, int]]:
+    """通过空行分隔符检测 sheet 中的 section 边界。"""
+    sections: List[Tuple[int, int, int]] = []
+    if ws.max_row < 1:
+        return sections
+
+    header_row = 1
+    data_start = 2
+    data_end = data_start
+    while data_end <= ws.max_row:
+        cells = [ws.cell(data_end, col).value for col in range(1, ws.max_column + 1)]
+        if all(c is None for c in cells):
+            sections.append((header_row, data_start, data_end - 1))
+            header_row = data_end + 1
+            data_start = header_row + 1
+            data_end = data_start
+        else:
+            data_end += 1
+    sections.append((header_row, data_start, data_end - 1))
+    return sections
+
+
+def _write_sections(writer, sheet_name: str, sections: List[Tuple[str, pd.DataFrame]]) -> None:
+    """在一个 sheet 中写入多个 DataFrame，section 之间空一行分隔。"""
+    startrow = 0
+    for label, df in sections:
+        if df is None or df.empty:
+            continue
+        df.to_excel(writer, sheet_name=sheet_name, startrow=startrow, index=False)
+        startrow += len(df) + 2
+
+
+def format_excel_report(path: Path) -> None:
+    """按 section 设置格式：表头样式、数字格式、条件高亮。"""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path)
+    body_font = Font(name="微软雅黑", size=10)
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(name="微软雅黑", color="FFFFFF", bold=True, size=10)
+    selected_fill = PatternFill("solid", fgColor="C6E0B4")
+    selected_reject_fill = PatternFill("solid", fgColor="FCE4D6")
+    warning_fill = PatternFill("solid", fgColor="FFF2CC")
+    fail_fill = PatternFill("solid", fgColor="F4CCCC")
+
+    for sheet in workbook.worksheets:
+        sections = _detect_sections(sheet)
+        if not sections:
+            continue
+
+        sheet.freeze_panes = "D2" if sheet.title.startswith("03_") else "A2"
+        sheet.sheet_view.showGridLines = False
+
+        first_data_end = sections[0][2]
+        if first_data_end >= sections[0][1]:
+            sheet.auto_filter.ref = (
+                f"A{sections[0][0]}:"
+                f"{get_column_letter(sheet.max_column)}{first_data_end}"
+            )
+
+        # 列宽。
+        for col_idx in range(1, sheet.max_column + 1):
+            max_length = 0
+            for row_idx in range(1, sheet.max_row + 1):
+                value = sheet.cell(row_idx, col_idx).value
+                max_length = max(max_length, len(str(value)) if value is not None else 0)
+            sheet.column_dimensions[get_column_letter(col_idx)].width = min(
+                max(max_length + 2, 10), 42
+            )
+
+        # 按 section 格式化。
+        for header_row, data_start, data_end in sections:
+            headers = {cell.column: str(cell.value) for cell in sheet[header_row]}
+            header_to_col = {str(cell.value): cell.column for cell in sheet[header_row]}
+
+            for cell in sheet[header_row]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            for row_idx in range(data_start, data_end + 1):
+                for cell in sheet[row_idx]:
+                    cell.font = body_font
+                    header = headers.get(cell.column, "").lower()
+                    if cell.value is None:
+                        continue
+                    header_tokens = set(header.split("_"))
+                    if header_tokens.intersection(
+                        {"rate", "pct", "retention", "share", "distribution"}
+                    ):
+                        cell.number_format = "0.00%"
+                    elif (
+                        header_tokens.intersection({"auc", "ks", "psi", "corr", "iv", "lift"})
+                        or "p_value" in header
+                    ):
+                        cell.number_format = "0.0000"
+                    elif any(key in header for key in [
+                        "threshold", "score_left", "score_right",
+                        "score_min", "score_max", "score_mean",
+                    ]):
+                        cell.number_format = "0.0000"
+                    elif isinstance(cell.value, (int, np.integer)) and not isinstance(cell.value, bool):
+                        cell.number_format = "#,##0"
+                    elif isinstance(cell.value, (int, float)):
+                        cell.number_format = "#,##0.00"
+
+            # 条件高亮：倒挂标记。
+            inversion_cols = [
+                header_to_col.get(k)
+                for k in ["1m30p_inversion_flag", "3m30p_inversion_flag",
+                           "primary_inversion_flag"]
+            ]
+            inversion_cols = [c for c in inversion_cols if c is not None]
+            if inversion_cols:
+                for row_idx in range(data_start, data_end + 1):
+                    if any(sheet.cell(row_idx, col).value is True for col in inversion_cols):
+                        for cell in sheet[row_idx]:
+                            cell.fill = warning_fill
+
+            # 条件高亮：阈值选中行。
+            selected_role_col = header_to_col.get("selected_role")
+            auto_ok_col = header_to_col.get("auto_all_constraints_ok")
+            accept_ok_col = header_to_col.get("accept_all_constraints_ok")
+            if selected_role_col:
+                for row_idx in range(data_start, data_end + 1):
+                    role = sheet.cell(row_idx, selected_role_col).value or ""
+                    if "自动通过" in str(role):
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_fill
+                    if "拒绝阈值" in str(role):
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_reject_fill
+                    for check_col in [auto_ok_col, accept_ok_col]:
+                        if check_col and sheet.cell(row_idx, check_col).value is False:
+                            sheet.cell(row_idx, check_col).fill = fail_fill
+
+            # 条件高亮：阈值敏感性表中的当前方案行。
+            scenario_col = header_to_col.get("scenario")
+            if scenario_col:
+                for row_idx in range(data_start, data_end + 1):
+                    if sheet.cell(row_idx, scenario_col).value == "当前":
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_fill
+
+            # 条件高亮：合箱候选选中行。
+            selected_flag_col = header_to_col.get("selected")
+            hard_ok_col = header_to_col.get("hard_constraints_ok")
+            if selected_flag_col:
+                for row_idx in range(data_start, data_end + 1):
+                    if sheet.cell(row_idx, selected_flag_col).value is True:
+                        for cell in sheet[row_idx]:
+                            cell.fill = selected_fill
+                    elif hard_ok_col and sheet.cell(row_idx, hard_ok_col).value is False:
+                        sheet.cell(row_idx, hard_ok_col).fill = fail_fill
+
+    workbook.save(path)
+
+
+def write_report(
+    overview: pd.DataFrame,
+    binning_process: pd.DataFrame,
+    final_train_stats: pd.DataFrame,
+    final_oot_stats: pd.DataFrame,
+    train_oot_compare: pd.DataFrame,
+    actual_funnel_report: pd.DataFrame,
+    strategy_estimated_flow: pd.DataFrame,
+    threshold_selection: pd.DataFrame,
+    strategy_plan: pd.DataFrame,
+    threshold_sensitivity: pd.DataFrame,
+    strategy_segments: pd.DataFrame,
+    performance: pd.DataFrame,
+    psi: pd.DataFrame,
+    monotonicity: pd.DataFrame,
+    monthly_stability: pd.DataFrame,
+    monthly_stability_summary: pd.DataFrame,
+    merge_candidates: pd.DataFrame,
+    merge_steps: pd.DataFrame,
+    config_table: pd.DataFrame,
+    online_execution_rules: pd.DataFrame,
+    metric_dictionary: pd.DataFrame,
+) -> None:
+    """输出精简版策略报告（6 个 sheet）。"""
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 合并 Train/OOT 最终分箱统计：同结构 + sample_group 列。
+    final_stats_parts = []
+    for label, stats in [
+        ("Train", final_train_stats),
+        ("OOT", final_oot_stats),
+    ]:
+        s = stats.copy()
+        s.insert(0, "sample_group", label)
+        final_stats_parts.append(s)
+    final_stats_all = pd.concat(final_stats_parts, ignore_index=True)
+
+    # 将样本组整体策略转化率与整体 AUC/KS 作为独立字段并入分箱表。
+    # 字段名明确标注 overall，避免被误解为单箱指标。
+    overall_strategy = strategy_estimated_flow.loc[
+        strategy_estimated_flow["sample_group"].isin(["Train", "OOT"]),
+        [
+            "sample_group",
+            "strategy_estimated_auto_pass_rate",
+            "strategy_estimated_manual_review_rate",
+            "strategy_estimated_total_accept_rate",
+            "strategy_estimated_reject_rate",
+        ],
+    ].rename(
+        columns={
+            "strategy_estimated_auto_pass_rate": "strategy_estimated_overall_auto_pass_rate",
+            "strategy_estimated_manual_review_rate": "strategy_estimated_overall_manual_review_rate",
+            "strategy_estimated_total_accept_rate": "strategy_estimated_overall_total_accept_rate",
+            "strategy_estimated_reject_rate": "strategy_estimated_overall_reject_rate",
+        }
+    )
+    final_stats_all = final_stats_all.merge(
+        overall_strategy,
+        on="sample_group",
+        how="left",
+        validate="many_to_one",
+    )
+
+    overall_performance = performance.copy()
+    overall_performance["sample_group"] = (
+        overall_performance["sample_group"].astype(str).str.lower().map(
+            {"train": "Train", "oot": "OOT"}
+        )
+    )
+    performance_wide = overall_performance.pivot(
+        index="sample_group",
+        columns="label",
+        values=["auc", "ks"],
+    )
+    performance_wide.columns = [
+        f"overall_{'1m30p' if label == 'duedate_1m_30' else '3m30p'}_{metric}"
+        for metric, label in performance_wide.columns
+    ]
+    final_stats_all = final_stats_all.merge(
+        performance_wide.reset_index(),
+        on="sample_group",
+        how="left",
+        validate="many_to_one",
+    )
+
+    headline_columns = [
+        "sample_group",
+        "bin_order",
+        FINAL_BIN_COL,
+        "score_left",
+        "score_right",
+        "n",
+        "sample_pct",
+        "cum_pass_rate",
+        "strategy_estimated_decision",
+        "strategy_estimated_bin_flow_rate",
+        "actual_completion_rate",
+        "actual_approval_rate",
+        "actual_auto_approval_rate",
+        "actual_manual_approval_rate",
+        "actual_auto_approval_share",
+        "actual_manual_approval_share",
+        "actual_deal_rate",
+        "1m30p_cnt_bad_rate",
+        "1m30p_amt_bad_rate",
+        "3m30p_cnt_bad_rate",
+        "3m30p_amt_bad_rate",
+        "1m30p_cnt_lift",
+        "1m30p_amt_lift",
+        "3m30p_cnt_lift",
+        "3m30p_amt_lift",
+        "cum_1m30p_cnt_mature",
+        "cum_1m30p_cnt_bad",
+        "cum_1m30p_cnt_bad_rate",
+        "cum_1m30p_amt_exposure",
+        "cum_1m30p_amt_bad",
+        "cum_1m30p_amt_bad_rate",
+        "cum_3m30p_cnt_mature",
+        "cum_3m30p_cnt_bad",
+        "cum_3m30p_cnt_bad_rate",
+        "cum_3m30p_amt_exposure",
+        "cum_3m30p_amt_bad",
+        "cum_3m30p_amt_bad_rate",
+        "1m30p_iv_component",
+        "3m30p_iv_component",
+        "1m30p_ks_curve",
+        "3m30p_ks_curve",
+        "train_oot_psi_component",
+        "strategy_estimated_overall_auto_pass_rate",
+        "strategy_estimated_overall_manual_review_rate",
+        "strategy_estimated_overall_total_accept_rate",
+        "strategy_estimated_overall_reject_rate",
+        "overall_1m30p_auc",
+        "overall_3m30p_auc",
+        "overall_1m30p_ks",
+        "overall_3m30p_ks",
+        "train_oot_psi_total",
+    ]
+    headline_columns = [col for col in headline_columns if col in final_stats_all.columns]
+    remaining_columns = [
+        col for col in final_stats_all.columns if col not in headline_columns
+    ]
+    final_stats_all = final_stats_all[headline_columns + remaining_columns]
+
+    with pd.ExcelWriter(REPORT_PATH, engine="openpyxl") as writer:
+        overview.to_excel(writer, sheet_name="01_总览", index=False)
+
+        _write_sections(writer, "02_分箱详情", [
+            ("分箱过程", binning_process),
+            ("合箱候选评分", merge_candidates),
+            ("合箱步骤", merge_steps),
+        ])
+
+        final_stats_all.to_excel(writer, sheet_name="03_最终分箱统计", index=False)
+
+        _write_sections(writer, "04_策略方案", [
+            ("历史实际审批漏斗", actual_funnel_report),
+            ("模型策略测算流量", strategy_estimated_flow),
+            ("阈值选择过程", threshold_selection),
+            ("模型策略测算结果", strategy_plan),
+            ("模型策略测算阈值敏感性", threshold_sensitivity),
+            ("模型策略测算分段风险验证", strategy_segments),
+        ])
+
+        _write_sections(writer, "05_模型验证", [
+            ("Train_OOT对比", train_oot_compare),
+            ("AUC_KS", performance),
+            ("PSI", psi),
+            ("单调性", monotonicity),
+            ("月度稳定性汇总", monthly_stability_summary),
+            ("月度箱表现", monthly_stability),
+        ])
+
+        _write_sections(writer, "06_附录", [
+            ("配置参数", config_table),
+            ("上线执行规则", online_execution_rules),
+            ("指标说明", metric_dictionary),
+        ])
+
+    format_excel_report(REPORT_PATH)
+
+
+# ============================================================
+# 8. 主流程
+# ============================================================
+
+def _log_step(label: str, t_prev: float) -> float:
+    t_now = time.time()
+    elapsed = t_now - t_prev
+    print(f"  [{label}] 耗时 {elapsed:.1f}s | 累计 {t_now - _log_step._t0:.1f}s")
+    return t_now
+
+
+def main() -> None:
+    _t = _log_step._t0 = time.time()
+
+    data = load_analysis_data()
+    actual_funnel_report = data.attrs.get("actual_funnel_report", pd.DataFrame())
+
+    all_data, train, oot = split_train_oot(data)
+    _t = _log_step("1/9 数据加载与时间切分", _t)
+
+    # 1) 完整 Train 学习初始边界，并复用到 OOT。
+    edges = learn_equal_freq_edges(train, SCORE_COL, INITIAL_BIN_COUNT)
+    actual_initial_bin_count = len(edges) - 1
+    initial_edges = build_initial_edge_table(edges)
+
+    if actual_initial_bin_count < MIN_FINAL_BIN_COUNT:
+        raise ValueError(
+            f"模型分唯一值不足，实际仅形成 {actual_initial_bin_count} 个初始箱，"
+            f"小于最小最终箱数 {MIN_FINAL_BIN_COUNT}"
+        )
+
+    all_binned = apply_edges(all_data, SCORE_COL, edges, INITIAL_BIN_COL)
+    train_binned = all_binned.loc[all_binned["sample_group"].eq("train")].copy()
+    oot_binned = all_binned.loc[all_binned["sample_group"].eq("oot")].copy()
+
+    train_initial_stats = calc_complete_initial_stats(
+        train_binned,
+        initial_edges,
+    )
+    _t = _log_step(f"2/9 Train 等频初分：{actual_initial_bin_count} 箱", _t)
+
+    # 2) 基于完整 Train 自动选择合箱；OOT 不参与。
+    merge_candidates, merge_steps, protected_boundaries = build_merge_candidate_score_table(
+        train_initial_stats,
+        actual_initial_bin_count,
+        STRATEGY_CONFIG,
+    )
+    selected_merge_ranges = selected_ranges_from_candidate_table(merge_candidates)
+
+    merge_map = build_merge_map(selected_merge_ranges, actual_initial_bin_count)
+    final_edges = build_final_edge_table(
+        initial_edges,
+        merge_map,
+        actual_initial_bin_count,
+    )
+    _t = _log_step(
+        f"3/9 自动合箱完成：{len(final_edges)} 档，方案={format_merge_ranges(selected_merge_ranges)}",
+        _t,
+    )
+
+    # 3) 将最终合箱映射应用到所有样本。
+    train_final = apply_merge_map(train_binned, merge_map)
+    oot_final = apply_merge_map(oot_binned, merge_map)
+    all_final = apply_merge_map(all_binned, merge_map)
+
+    def final_stats(frame: pd.DataFrame) -> pd.DataFrame:
+        return calc_bin_stats(
+            frame,
+            bin_col=FINAL_BIN_COL,
+            order_col="bin_order",
+        ).merge(
+            final_edges,
+            left_on=["bin_order", FINAL_BIN_COL],
+            right_on=["final_bin_order", FINAL_BIN_COL],
+            how="left",
+        )
+
+    final_train_stats = final_stats(train_final)
+    final_oot_stats = final_stats(oot_final)
+    _t = _log_step("4/9 生成 Train/OOT 最终箱统计", _t)
+
+    # 4) 最终验证。
+    rate_cols = ALL_RISK_RATE_COLS
+    monotonicity = pd.concat(
+        [
+            check_monotonicity(final_train_stats, rate_cols, "train"),
+            check_monotonicity(final_oot_stats, rate_cols, "oot"),
+        ],
+        ignore_index=True,
+    )
+
+    psi = calc_population_psi(train_final, oot_final, FINAL_BIN_COL, final_edges)
+    performance = calc_performance_table(all_final)
+    train_oot_compare = build_train_oot_compare(
+        final_train_stats,
+        final_oot_stats,
+        final_edges,
+    )
+    monthly_stability = build_monthly_bin_stability(all_final)
+    monthly_stability_summary = build_monthly_stability_summary(monthly_stability)
+    _t = _log_step(
+        f"5/9 OOT 单调性/PSI/AUC/KS 验证：PSI={psi['psi_total'].iloc[0]:.4f}",
+        _t,
+    )
+
+    # 5) 使用完整 Train 生成策略阈值。
+    threshold_curve = build_threshold_curve(train_final, final_edges)
+    strategy_plan = build_strategy_plan(threshold_curve, STRATEGY_CONFIG)
+    threshold_sensitivity = build_threshold_sensitivity(threshold_curve, strategy_plan)
+    strategy_segments = build_strategy_segment_report(
+        train_final,
+        oot_final,
+        strategy_plan,
+    )
+    strategy_estimated_flow = build_strategy_estimated_flow_report(
+        train_final,
+        oot_final,
+        strategy_plan,
+    )
+    binning_process = build_binning_process_table(train_initial_stats, merge_map)
+    threshold_selection = build_threshold_selection_table(
+        threshold_curve,
+        strategy_plan,
+        STRATEGY_CONFIG,
+    )
+    final_train_report = build_enriched_final_bin_report(
+        final_train_stats,
+        train_final,
+        strategy_plan,
+        psi,
+    )
+    final_oot_report = build_enriched_final_bin_report(
+        final_oot_stats,
+        oot_final,
+        strategy_plan,
+        psi,
+    )
+    _t = _log_step("6/9 历史实际审批漏斗与模型策略测算流量", _t)
+
+    selected_candidate_rows = merge_candidates.loc[
+        merge_candidates.get("selected", pd.Series(False, index=merge_candidates.index)).eq(True)
+    ]
+    selected_candidate = (
+        selected_candidate_rows.iloc[0] if not selected_candidate_rows.empty else None
+    )
+
+    overview = build_overview(
+        all_data,
+        train_final,
+        oot_final,
+        actual_initial_bin_count,
+        len(final_edges),
+        selected_merge_ranges,
+        selected_candidate,
+        protected_boundaries,
+        psi,
+        performance,
+        monotonicity,
+        strategy_plan,
+        actual_funnel_report,
+        strategy_estimated_flow,
+    )
+    config_table = build_config_table(
+        selected_merge_ranges,
+        protected_boundaries,
+    )
+    online_execution_rules = build_online_execution_rules()
+    metric_dictionary = build_metric_dictionary()
+
+    write_report(
+        overview=overview,
+        binning_process=binning_process,
+        final_train_stats=final_train_report,
+        final_oot_stats=final_oot_report,
+        train_oot_compare=train_oot_compare,
+        actual_funnel_report=actual_funnel_report,
+        strategy_estimated_flow=strategy_estimated_flow,
+        threshold_selection=threshold_selection,
+        strategy_plan=strategy_plan,
+        threshold_sensitivity=threshold_sensitivity,
+        strategy_segments=strategy_segments,
+        performance=performance,
+        psi=psi,
+        monotonicity=monotonicity,
+        monthly_stability=monthly_stability,
+        monthly_stability_summary=monthly_stability_summary,
+        merge_candidates=merge_candidates,
+        merge_steps=merge_steps,
+        config_table=config_table,
+        online_execution_rules=online_execution_rules,
+        metric_dictionary=metric_dictionary,
+    )
+
+    _t = _log_step("7/9 写入 Excel 报告", _t)
+    _t = _log_step("8/9 报告格式化完成", _t)
+    _log_step(f"9/9 完成 => {REPORT_PATH}", _t)
+
+
+if __name__ == "__main__":
+    main()
+
