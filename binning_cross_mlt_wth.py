@@ -119,6 +119,9 @@ def build_cross_sample(
         "estimate_principal_remaining_mob3",
         "dpd_days_ever_mob1",
         "dpd_days_ever_mob3",
+        "application_status",
+        "assessment_status",
+        "status",
         mlt.FINAL_BIN_COL,
         "bin_order",
         mlt.SCORE_COL,
@@ -196,6 +199,40 @@ def build_cross_matrix(
     group = cross.loc[cross["sample_group"].eq(sample_group)].copy()
     overall = group_overall_rates(group)
     group_total = len(group)
+    group_principal = float(
+        pd.to_numeric(group["principal"], errors="coerce").fillna(0).sum()
+    )
+
+    def cell_metrics(frame: pd.DataFrame) -> Dict[str, object]:
+        """单个交叉格（或边际人群）的完整指标集。"""
+        n = len(frame)
+        _, _, r1 = rate_of(frame, "duedate_1m_30")
+        _, _, r3 = rate_of(frame, "duedate_3m_30")
+        a1 = amt_rate_of(frame, "dpd_days_ever_mob1", "estimate_principal_remaining_mob1")
+        a3 = amt_rate_of(frame, "dpd_days_ever_mob3", "estimate_principal_remaining_mob3")
+        principal = float(
+            pd.to_numeric(frame["principal"], errors="coerce").fillna(0).sum()
+        )
+        funnel = mlt._actual_funnel_row(frame, "cell")
+        return {
+            "n": n,
+            "sample_pct": n / group_total,
+            "1m30p_cnt_bad_rate": r1,
+            "3m30p_cnt_bad_rate": r3,
+            "1m30p_amt_bad_rate": a1,
+            "3m30p_amt_bad_rate": a3,
+            "1m30p_cnt_lift": r1 / overall["1m30p_cnt_bad_rate"]
+            if overall["1m30p_cnt_bad_rate"] else np.nan,
+            "3m30p_cnt_lift": r3 / overall["3m30p_cnt_bad_rate"]
+            if overall["3m30p_cnt_bad_rate"] else np.nan,
+            "1m30p_amt_lift": a1 / overall["1m30p_amt_bad_rate"]
+            if overall["1m30p_amt_bad_rate"] else np.nan,
+            "3m30p_amt_lift": a3 / overall["3m30p_amt_bad_rate"]
+            if overall["3m30p_amt_bad_rate"] else np.nan,
+            "principal_pct": principal / group_principal if group_principal else np.nan,
+            "actual_approval_rate": funnel["actual_approval_rate"],
+            "actual_deal_rate": funnel["actual_deal_rate"],
+        }
 
     orders = sorted(
         set(group["mlt_bin_order"].dropna().astype(int))
@@ -204,83 +241,58 @@ def build_cross_matrix(
     rows: List[Dict] = []
     for mo, wo in product(orders, orders):
         cell = group.loc[group["mlt_bin_order"].eq(mo) & group["wth_bin_order"].eq(wo)]
-        n = len(cell)
-        _, _, r1 = rate_of(cell, "duedate_1m_30")
-        _, _, r3 = rate_of(cell, "duedate_3m_30")
-        a1 = amt_rate_of(cell, "dpd_days_ever_mob1", "estimate_principal_remaining_mob1")
-        a3 = amt_rate_of(cell, "dpd_days_ever_mob3", "estimate_principal_remaining_mob3")
         rows.append(
             {
                 "mlt_bin_order": mo,
                 "mlt_bin": _label(mlt_edges, mo),
                 "wth_bin_order": wo,
                 "wth_bin": _label(wth_edges, wo),
-                "n": n,
-                "sample_pct": n / group_total,
-                "1m30p_cnt_bad_rate": r1,
-                "3m30p_cnt_bad_rate": r3,
-                "1m30p_amt_bad_rate": a1,
-                "3m30p_amt_bad_rate": a3,
-                "3m30p_cnt_lift": r3 / overall["3m30p_cnt_bad_rate"]
-                if overall["3m30p_cnt_bad_rate"] else np.nan,
+                **cell_metrics(cell),
             }
         )
-    matrix = pd.DataFrame(rows)
 
     # 行边际（mlt 单模型口径）与列边际（价值单模型口径）。
     for mo in orders:
         row_cell = group.loc[group["mlt_bin_order"].eq(mo)]
-        _, _, r3 = rate_of(row_cell, "duedate_3m_30")
-        _, _, r1 = rate_of(row_cell, "duedate_1m_30")
         rows.append(
             {
                 "mlt_bin_order": mo,
                 "mlt_bin": _label(mlt_edges, mo),
                 "wth_bin_order": 0,
                 "wth_bin": "行边际",
-                "n": len(row_cell),
-                "sample_pct": len(row_cell) / group_total,
-                "1m30p_cnt_bad_rate": r1,
-                "3m30p_cnt_bad_rate": r3,
-                "1m30p_amt_bad_rate": amt_rate_of(row_cell, "dpd_days_ever_mob1", "estimate_principal_remaining_mob1"),
-                "3m30p_amt_bad_rate": amt_rate_of(row_cell, "dpd_days_ever_mob3", "estimate_principal_remaining_mob3"),
-                "3m30p_cnt_lift": r3 / overall["3m30p_cnt_bad_rate"]
-                if overall["3m30p_cnt_bad_rate"] else np.nan,
+                **cell_metrics(row_cell),
             }
         )
     for wo in orders:
         col_cell = group.loc[group["wth_bin_order"].eq(wo)]
-        _, _, r3 = rate_of(col_cell, "duedate_3m_30")
-        _, _, r1 = rate_of(col_cell, "duedate_1m_30")
         rows.append(
             {
                 "mlt_bin_order": 0,
                 "mlt_bin": "列边际",
                 "wth_bin_order": wo,
                 "wth_bin": _label(wth_edges, wo),
-                "n": len(col_cell),
-                "sample_pct": len(col_cell) / group_total,
-                "1m30p_cnt_bad_rate": r1,
-                "3m30p_cnt_bad_rate": r3,
-                "1m30p_amt_bad_rate": amt_rate_of(col_cell, "dpd_days_ever_mob1", "estimate_principal_remaining_mob1"),
-                "3m30p_amt_bad_rate": amt_rate_of(col_cell, "dpd_days_ever_mob3", "estimate_principal_remaining_mob3"),
-                "3m30p_cnt_lift": r3 / overall["3m30p_cnt_bad_rate"]
-                if overall["3m30p_cnt_bad_rate"] else np.nan,
+                **cell_metrics(col_cell),
             }
         )
+
+    overall_metrics = cell_metrics(group)
+    overall_metrics.update(
+        {
+            "sample_pct": 1.0,
+            "1m30p_cnt_lift": 1.0,
+            "3m30p_cnt_lift": 1.0,
+            "1m30p_amt_lift": 1.0,
+            "3m30p_amt_lift": 1.0,
+            "principal_pct": 1.0,
+        }
+    )
     rows.append(
         {
             "mlt_bin_order": 0,
             "mlt_bin": "整体",
             "wth_bin_order": 0,
             "wth_bin": "整体",
-            "n": group_total,
-            "sample_pct": 1.0,
-            "1m30p_cnt_bad_rate": overall["1m30p_cnt_bad_rate"],
-            "3m30p_cnt_bad_rate": overall["3m30p_cnt_bad_rate"],
-            "1m30p_amt_bad_rate": overall["1m30p_amt_bad_rate"],
-            "3m30p_amt_bad_rate": overall["3m30p_amt_bad_rate"],
-            "3m30p_cnt_lift": 1.0,
+            **overall_metrics,
         }
     )
     return pd.DataFrame(rows)
