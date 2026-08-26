@@ -1,6 +1,6 @@
 # 模型分数分箱与策略阈值方法及操作指南
 
-> 本文档是本项目统一的方法论与操作说明，与当前 `binning.py` 的实际执行逻辑对应，涵盖样本设计、指标口径、分箱与阈值方法、方案验证、运行方式和结果解读。
+> 本文档是本项目统一的方法论与操作说明，与当前 `binning_mlt_cnt.py` 的实际执行逻辑对应，涵盖样本设计、指标口径、分箱与阈值方法、方案验证、运行方式和结果解读。
 >
 > 当前脚本的核心目标是：以 `score_mlt` 为主模型分，在完整 Train 上建立稳定风险等级，并划分自动通过、人工审核和拒绝阈值，最终生成 `out/binning_strategy_report_YYYYMMDD.xlsx`。
 
@@ -52,11 +52,14 @@
 
 ### 1. 目录结构
 
-脚本使用相对路径读取数据，因此运行时需要保证当前工作目录包含 `binning.py` 和 `res` 文件夹。
+脚本使用相对路径读取数据，因此运行时需要保证当前工作目录包含 `binning_mlt_cnt.py` 和 `res` 文件夹。
 
 ```text
 项目目录/
-├── binning.py
+├── binning_mlt_cnt.py
+├── binning_mlt_amt.py
+├── binning_worthiness_cnt.py
+├── binning_cross_mlt_wth.py
 ├── res/
 │   ├── sample.csv
 │   ├── application_info.csv
@@ -1231,7 +1234,7 @@ STRATEGY_CONFIG
 ### 第 4 步：运行脚本
 
 ```bash
-python binning.py
+python binning_mlt_cnt.py
 ```
 
 ### 第 5 步：检查运行日志
@@ -1337,9 +1340,9 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 
 ---
 
-## 九、金额口径脚本 binning_amount.py
+## 九、金额口径脚本 binning_mlt_amt.py
 
-`binning_amount.py` 是与 `binning.py` 并行的**独立备选分箱方案**，以金额逾期率为合箱主指标，其余流程与笔数版一致。`binning.py` 冻结不改动，两个脚本可独立运行、互不影响。
+`binning_mlt_amt.py` 是与 `binning_mlt_cnt.py` 并行的**独立备选分箱方案**，以金额逾期率为合箱主指标，其余流程与笔数版一致。`binning_mlt_cnt.py` 冻结不改动，两个脚本可独立运行、互不影响。
 
 ### 1. 运行方式
 
@@ -1353,7 +1356,7 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 out/binning_amt_strategy_report_YYYYMMDD.xlsx
 ```
 
-报告文档为 `分箱方法论与结果说明报告（金额口径）.md`，与其 Excel 的数值一致性由 `scr/_verify_report_sync_amt.py` 核对（重跑后运行一次即可）。
+报告文档为 `分箱方法论与结果说明报告（mlt 金额口径）.md`，与其 Excel 的数值一致性由 `scr/_verify_report_sync_mlt_amt.py` 核对（重跑后运行一次即可）。
 
 ### 2. 混合口径设计
 
@@ -1365,16 +1368,40 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 ### 3. 与笔数版方案的差异
 
-金额口径整体逾期率低于笔数口径（Train 3M30+ 金额率 7.32% vs 笔数率 9.56%），金额尺度下的合箱行为与笔数版不同，最终方案、保护边界与策略阈值均为独立结果，与笔数版方案（`binning.py`）不可混用。当前金额版选中方案：7 档 `[(1,1),(2,4),(5,10),(11,13),(14,17),(18,19),(20,20)]`，自动通过阈值 `0.0494555109039948`（累计通过率 20.18%），总接纳阈值 `0.1411377275703105`（累计接纳率 65.14%），Train/OOT PSI 0.0061。约束值为同风险水平设定（校准自笔数版方案阈值处的金额累计/边际率），与笔数版方案不可直接比较通过率。
+金额口径整体逾期率低于笔数口径（Train 3M30+ 金额率 7.32% vs 笔数率 9.56%），金额尺度下的合箱行为与笔数版不同，最终方案、保护边界与策略阈值均为独立结果，与笔数版方案（`binning_mlt_cnt.py`）不可混用。当前金额版选中方案：7 档 `[(1,1),(2,4),(5,10),(11,13),(14,17),(18,19),(20,20)]`，自动通过阈值 `0.0494555109039948`（累计通过率 20.18%），总接纳阈值 `0.1411377275703105`（累计接纳率 65.14%），Train/OOT PSI 0.0061。约束值为同风险水平设定（校准自笔数版方案阈值处的金额累计/边际率），与笔数版方案不可直接比较通过率。
 
 **分布整形限制**：金额版 7 档候选的 C 档（初始箱 5–10）占比 29.84% 超过 21% 上限，整形尝试拆分后无法在不重新超限的前提下合并回 7 档（低风险侧合回方案均使某档再次超限或跨越被禁止的极端箱边界），故整形失败、原候选保留，属该口径下的合法结果；整形成功的 8 档变体（将 C 档拆为 (5,6)+(7,10)）作为备选展示在候选评估表中。
 
 ### 4. 与笔数版核对脚本的差异
 
-`scr/_verify_report_sync_amt.py` 与 `scr/_verify_report_sync.py` 的区别：Excel 源改用 `out/binning_amt_strategy_report_*.xlsx`；阈值选择与敏感性表主展示列为金额率，笔数率降为带 CI 上界的参考列；CI 表表头为 `3M30+ 笔数逾期率 [95% CI 上界]`；月度稳定性断言按金额版实际倒挂月份设定。
+`scr/_verify_report_sync_mlt_amt.py` 与 `scr/_verify_report_sync_mlt_cnt.py` 的区别：Excel 源改用 `out/binning_amt_strategy_report_*.xlsx`；阈值选择与敏感性表主展示列为金额率，笔数率降为带 CI 上界的参考列；CI 表表头为 `3M30+ 笔数逾期率 [95% CI 上界]`；月度稳定性断言按金额版实际倒挂月份设定。
 
 ---
 
-## 十、一句话总结
+## 十、价值模型与两模型交叉脚本
 
-> **当前脚本在完整 Train 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度和风险倒挂自动合箱为 6~8 个风险等级（目标 7 档），并在 OOT 上进行独立验证；随后在风险约束下测算自动通过、人工审核、总接纳和拒绝流量，同时基于 `application_info` 计算历史实际审批漏斗，最终将两套口径分开输出到 6 个 sheet 的 Excel 策略报告。**
+### 1. 价值模型分箱脚本 binning_worthiness_cnt.py
+
+`binning_worthiness_cnt.py` 以价值模型分（`aus_new_worthiness_bid_3rdmodel_v1_0_20260429`，重命名为 `score_worthiness`）替换 mlt 主风险模型分，管线与 `binning_mlt_cnt.py` 完全一致（笔数违约合箱、同一套策略风险约束），两个脚本可独立运行。价值模型分经数据验证为高分高风险（初始 20 箱 3M30+ 笔数逾期率随分数单调上升）。
+
+```bash
+"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" binning_worthiness_cnt.py
+```
+
+输出 `out/binning_worthiness_strategy_report_YYYYMMDD.xlsx`；报告文档为 `分箱方法论与结果说明报告（价值模型笔数口径）.md`。注意：价值模型分覆盖 306,149 笔（93.32%），缺失 21,914 笔均为无银行交易数据的申请（按拒绝处理）；同一套风险约束下其通过率明显低于 mlt（自动通过 20.00% / 总接纳 40.00%），区分能力与月度稳定性弱于 mlt，详见其报告。
+
+### 2. 两模型交叉分析脚本 binning_cross_mlt_wth.py
+
+`binning_cross_mlt_wth.py` 复用两个模型管线生成各自 7 档最终分档，按 `application_id` 内连接出 306,149 笔双分样本，做 7×7 交叉矩阵、条件增量、组合评分（z 平均 / 7:3 加权 / 档位平均 / 档位取大）与二维策略模拟（AND / OR 组合、接纳网格、四象限）。
+
+```bash
+"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" binning_cross_mlt_wth.py
+```
+
+输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`；报告文档为 `两模型交叉效果评估报告（mlt × 价值模型）.md`。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
+
+---
+
+## 十一、一句话总结
+
+> **binning_mlt_cnt.py 在完整 Train 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度和风险倒挂自动合箱为 6~8 个风险等级（目标 7 档），并在 OOT 上进行独立验证；随后在风险约束下测算自动通过、人工审核、总接纳和拒绝流量，同时基于 `application_info` 计算历史实际审批漏斗，最终将两套口径分开输出到 6 个 sheet 的 Excel 策略报告。**

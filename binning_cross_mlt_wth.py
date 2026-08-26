@@ -2,7 +2,7 @@
 """
 两模型交叉分析：mlt 主风险模型 × 价值模型（worthiness）
 
-以 binning.py（mlt 笔数版）与 binning_worthiness.py（价值模型）各自的最终风险档为轴，
+以 binning_mlt_cnt.py（mlt 笔数版）与 binning_worthiness_cnt.py（价值模型）各自的最终风险档为轴，
 对同时存在两个模型分的样本做 7×7 交叉矩阵分析，并评估组合评分与二维策略效果。
 
 核心内容（对应日志 1/7 ~ 7/7）：
@@ -20,7 +20,7 @@
 7. 输出 out/binning_cross_strategy_report_YYYYMMDD.xlsx（7 个 sheet）。
 
 运行方式：
-    python binning_cross.py
+    python binning_cross_mlt_wth.py
 """
 
 import time
@@ -31,8 +31,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-import binning as mlt
-import binning_worthiness as wth
+import binning_mlt_cnt as mlt
+import binning_worthiness_cnt as wth
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter

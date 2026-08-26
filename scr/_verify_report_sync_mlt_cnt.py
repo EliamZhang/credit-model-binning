@@ -1,13 +1,12 @@
-"""核对 分箱方法论与结果说明报告（金额口径）.md 与最新金额版分箱报告 Excel 的数值一致性。
+"""核对 分箱方法论与结果说明报告（mlt 笔数口径）.md 与最新分箱报告 Excel 的数值一致性。
 
-用法：重跑 binning_amount.py 生成最新 Excel 后运行
-    python scr/_verify_report_sync_amt.py
+用法：重跑 binning_mlt_cnt.py 生成最新 Excel 后运行
+    python scr/_verify_report_sync_mlt_cnt.py
 逐格比对 md 报告各数值表格与 Excel（按 md 显示格式归一化：百分数、千分位、CI、pp、
 全精度阈值、布尔约束列），输出所有不一致项；全部一致时打印核对通过。
 
 核对范围：md 中全部数值表格 + 月度稳定性文字断言 + 附录配置关键项。
 正文叙述性数字（如 "3.57%→3.53%"）不在此范围。
-金额版：主指标为金额逾期率；笔数逾期率保留为参考列（含 95% Wilson CI 上界）。
 """
 import glob
 import re
@@ -17,8 +16,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from openpyxl import load_workbook
 
-MD_PATH = "分箱方法论与结果说明报告（金额口径）.md"
-SRC_PATTERN = "out/binning_amt_strategy_report_*.xlsx"
+MD_PATH = "分箱方法论与结果说明报告（mlt 笔数口径）.md"
+SRC_PATTERN = "out/binning_strategy_report_*.xlsx"
 
 # Excel 各 sheet 的表头起始字段，用于按表分段
 TABLE_HEADERS = {
@@ -399,13 +398,16 @@ def check_ci_table(md_tbl, sheet03, sample_group: str):
             continue
         check_cell(row[h.index("样本量")], er[col_of(sheet03, "n")], f"{where}.样本量")
         check_cell(row[h.index("占比")], er[col_of(sheet03, "sample_pct")], f"{where}.占比")
-        check_cell(row[h.index("1M30+ 金额逾期率")], er[col_of(sheet03, "1m30p_amt_bad_rate")],
-                   f"{where}.1M30+金额率")
+        check_ci_cell(row[h.index("1M30+ 笔数逾期率 [95% CI]")],
+                      er[col_of(sheet03, "1m30p_cnt_bad_rate")],
+                      er[col_of(sheet03, "1m30p_cnt_bad_rate_ci_low")],
+                      er[col_of(sheet03, "1m30p_cnt_bad_rate_ci_high")], f"{where}.1M30+率")
+        check_ci_cell(row[h.index("3M30+ 笔数逾期率 [95% CI]")],
+                      er[col_of(sheet03, "3m30p_cnt_bad_rate")],
+                      er[col_of(sheet03, "3m30p_cnt_bad_rate_ci_low")],
+                      er[col_of(sheet03, "3m30p_cnt_bad_rate_ci_high")], f"{where}.3M30+率")
         check_cell(row[h.index("3M30+ 金额逾期率")], er[col_of(sheet03, "3m30p_amt_bad_rate")],
                    f"{where}.3M30+金额率")
-        check_ci_cell(row[h.index("3M30+ 笔数逾期率 [95% CI 上界]")],
-                      er[col_of(sheet03, "3m30p_cnt_bad_rate")],
-                      None, er[col_of(sheet03, "3m30p_cnt_bad_rate_ci_high")], f"{where}.3M30+笔数率")
 
 
 FUNNEL_CNT_COLS = {
@@ -440,15 +442,13 @@ def norm_sg(s: str) -> str:
     return {"Train": "train", "OOT": "oot"}.get(s, s)
 
 
-def check_threshold_table(md_tbl, sheet03, thr_ex):
+def check_threshold_table(md_tbl, sheet03):
     """md 候选档表（7 行 A-G）对应 03_最终分箱统计：阈值=右边界（末档用分数上限），
-    主列为金额累计/边际率；笔数 CI 上界为参考列；约束两列对应 04 策略方案
-    阈值选择表的 auto/accept 检查（该列仅存在于 04 表）。"""
+    累计/边际列直接取 cum_* / 单箱 3m30p 率；约束两列是判断文本，无 Excel 字段。"""
     h = md_tbl["header"]
     for row in md_tbl["rows"]:
         bin_name = row[0]
         er = row_of(sheet03, sample_group="Train", score_mlt_final_bin=bin_name)
-        et = row_of(thr_ex, score_mlt_final_bin=bin_name, selected_role=None)
         where = f"阈值选择 {bin_name}"
         if er is None:
             issues.append(f"{where}: Excel 03 中找不到")
@@ -461,27 +461,19 @@ def check_threshold_table(md_tbl, sheet03, thr_ex):
         check_text(row[h.index("候选档")], er[col_of(sheet03, "score_mlt_final_bin")], f"{where}.档位")
         check_cell(row[h.index("阈值")], thr_val, f"{where}.阈值")
         check_cell(row[h.index("累计通过率")], er[col_of(sheet03, "cum_pass_rate")], f"{where}.累计通过率")
-        check_cell(row[h.index("累计 1M30+ 金额逾期率")], er[col_of(sheet03, "cum_1m30p_amt_bad_rate")], f"{where}.累计1M30+金额率")
-        check_cell(row[h.index("累计 3M30+ 金额逾期率")], er[col_of(sheet03, "cum_3m30p_amt_bad_rate")], f"{where}.累计3M30+金额率")
-        check_cell(row[h.index("边际 3M30+ 金额逾期率")], er[col_of(sheet03, "3m30p_amt_bad_rate")], f"{where}.边际3M30+金额率")
-        check_ci_cell(row[h.index("累计 3M30+ 笔数逾期率 [CI 上界]")],
+        check_cell(row[h.index("累计 1M30+")], er[col_of(sheet03, "cum_1m30p_cnt_bad_rate")], f"{where}.累计1M30+")
+        check_ci_cell(row[h.index("累计 3M30+ [CI 上界]")],
                       er[col_of(sheet03, "cum_3m30p_cnt_bad_rate")],
-                      None, er[col_of(sheet03, "cum_3m30p_cnt_bad_rate_ci_high")], f"{where}.累计3M30+笔数率")
-        check_ci_cell(row[h.index("边际 3M30+ 笔数逾期率 [CI 上界]")],
+                      None, er[col_of(sheet03, "cum_3m30p_cnt_bad_rate_ci_high")], f"{where}.累计3M30+")
+        check_ci_cell(row[h.index("边际 3M30+ [CI 上界]")],
                       er[col_of(sheet03, "3m30p_cnt_bad_rate")],
-                      None, er[col_of(sheet03, "3m30p_cnt_bad_rate_ci_high")], f"{where}.边际3M30+笔数率")
-        et = row_of(thr_ex, score_mlt_final_bin=bin_name, selected_role=None)
-        if et is not None:
-            check_bool_cell(row[h.index("自动检查")], et[col_of(thr_ex, "auto_all_constraints_ok")], f"{where}.自动检查")
-            check_bool_cell(row[h.index("接纳检查")], et[col_of(thr_ex, "accept_all_constraints_ok")], f"{where}.接纳检查")
-        # 非选中档（A/C/E/F/G）的约束列为阈值选择过程值，Excel 04 表仅存选中档两行，
-        # 故无 Excel 对应字段可核对（与笔数版同处理）
+                      None, er[col_of(sheet03, "3m30p_cnt_bad_rate_ci_high")], f"{where}.边际3M30+")
 
 
 SEGMENT_COLS = {
     "样本量": "n", "占比": "strategy_estimated_segment_rate",
-    "1M30+ 金额逾期率": "1m30p_amt_bad_rate", "3M30+ 金额逾期率": "3m30p_amt_bad_rate",
-    "3M30+ 笔数逾期率": "3m30p_cnt_bad_rate",
+    "1M30+ 笔数逾期率": "1m30p_cnt_bad_rate", "3M30+ 笔数逾期率": "3m30p_cnt_bad_rate",
+    "3M30+ 金额逾期率": "3m30p_amt_bad_rate",
 }
 
 
@@ -515,15 +507,13 @@ def check_sensitivity(md_tbl, ex04_sens):
         check_text(row[h.index("档位")], er[col_of(ex04_sens, "score_mlt_final_bin")], f"{where}.档位")
         check_cell(row[h.index("自动通过率")], er[col_of(ex04_sens, "strategy_estimated_auto_pass_rate")], f"{where}.自动通过率")
         check_cell(row[h.index("人工审核率")], er[col_of(ex04_sens, "strategy_estimated_manual_review_rate")], f"{where}.人工审核率")
-        check_cell(row[h.index("总接纳率")], er[col_of(ex04_sens, "strategy_estimated_total_accept_rate")], f"{where}.总接纳率")
         check_cell(row[h.index("拒绝率")], er[col_of(ex04_sens, "strategy_estimated_reject_rate")], f"{where}.拒绝率")
-        check_cell(row[h.index("自动 3M30+ 金额逾期率")], er[col_of(ex04_sens, "auto_3m30p_amt_bad_rate")], f"{where}.自动3M30+金额率")
-        check_cell(row[h.index("接纳 3M30+ 金额逾期率")], er[col_of(ex04_sens, "accept_3m30p_amt_bad_rate")], f"{where}.接纳3M30+金额率")
-        check_cell(row[h.index("边际 3M30+ 金额逾期率")], er[col_of(ex04_sens, "accept_marginal_3m30p_amt_bad_rate")], f"{where}.边际3M30+金额率")
-        check_ci_cell(row[h.index("边际 3M30+ 笔数逾期率 [CI 上界]")],
+        check_cell(row[h.index("自动 3M30+")], er[col_of(ex04_sens, "auto_3m30p_cnt_bad_rate")], f"{where}.自动3M30+")
+        check_cell(row[h.index("接纳 3M30+")], er[col_of(ex04_sens, "accept_3m30p_cnt_bad_rate")], f"{where}.接纳3M30+")
+        check_ci_cell(row[h.index("边际 3M30+ [CI 上界]")],
                       er[col_of(ex04_sens, "accept_marginal_3m30p_cnt_bad_rate")],
                       None, er[col_of(ex04_sens, "accept_marginal_3m30p_cnt_bad_rate_ci_high")],
-                      f"{where}.边际3M30+笔数率")
+                      f"{where}.边际3M30+")
 
 
 MONO_METRICS = {
@@ -586,19 +576,14 @@ def check_monthly(ex05) -> list[str]:
     monthly = [t for t in ex05 if "primary_inversion_count" in t["header"]][0]
     train_rows = [r for r in monthly["rows"] if str(r[0]) == "train"]
     oot_rows = [r for r in monthly["rows"] if str(r[0]) == "oot"]
-    # 金额口径（3M30+ 金额逾期率）主指标：Train 仅 2024-01 与 2025-07 各 1 次倒挂，
-    # OOT 仅 2026-01 1 次倒挂（与笔数版方案的 2026-02 不同，属金额口径实际结果）。
-    t_inv = [(str(r[col_of(monthly, "application_month")]),
-              int(r[col_of(monthly, "primary_inversion_count")]),
-              r[col_of(monthly, "max_primary_rate_drop")])
-             for r in train_rows if int(r[col_of(monthly, "primary_inversion_count")]) > 0]
+    t_ok = all(int(r[col_of(monthly, "primary_inversion_count")]) == 0 for r in train_rows)
     oot_inv = [(str(r[col_of(monthly, "application_month")]),
                 int(r[col_of(monthly, "primary_inversion_count")]),
                 r[col_of(monthly, "max_primary_rate_drop")])
                for r in oot_rows if int(r[col_of(monthly, "primary_inversion_count")]) > 0]
     may = [r for r in oot_rows if str(r[col_of(monthly, "application_month")]) == "2026-05"]
-    msg = [f"月度稳定性断言: Train 倒挂月份（应仅 2024-01、2025-07 且各 1 次）: {t_inv}",
-           f"  OOT 倒挂月份（应仅 2026-01 且 1 次）: {oot_inv}",
+    msg = [f"月度稳定性断言: Train {len(train_rows)} 个月全部无倒挂 = {t_ok}",
+           f"  OOT 倒挂月份（应仅 2026-02 且 1 次）: {oot_inv}",
            f"  2026-05 成熟样本量（应为 0）: {may[0][col_of(monthly, 'mature_count')] if may else '未找到'}"]
     return msg
 
@@ -657,15 +642,14 @@ def main():
     check_candidates(md_tables_with("档位数", "方案")[0], ex02, issues)
     check_merge_steps(md_tables_with("合并初始箱")[0], ex02)
     check_constraint_table(md_tables_with("3M30+ 成熟量")[0], sheet03)
-    ci_tbls = md_tables_with(any_of=["[95% CI"])
+    ci_tbls = md_tables_with(any_of=["[95% CI]"])
     check_ci_table(ci_tbls[0], sheet03, "Train")
     check_ci_table(ci_tbls[1], sheet03, "OOT")
 
     funnel = [t for t in ex04 if "actual_apply_cnt" in t["header"]][0]
     check_funnel(md_tables_with("申请数")[0], md_tables_with("进件完成率")[0], funnel)
 
-    thr_ex = [t for t in ex04 if "auto_all_constraints_ok" in t["header"]][0]
-    check_threshold_table(md_tables_with("候选档")[0], sheet03, thr_ex)
+    check_threshold_table(md_tables_with("候选档")[0], sheet03)
 
     seg = [t for t in ex04 if t["header"][0] == "sample_group"][0]
     seg_tbls = md_tables_with("分段", "占比")

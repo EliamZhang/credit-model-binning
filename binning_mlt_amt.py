@@ -2,9 +2,9 @@
 """
 模型分数分箱与策略阈值分析（金额逾期率口径，独立方案）
 
-本脚本由 binning.py 复制改造而来，合箱主指标由"笔数逾期率"切换为"金额逾期率"，
+本脚本由 binning_mlt_cnt.py 复制改造而来，合箱主指标由"笔数逾期率"切换为"金额逾期率"，
 作为与笔数口径方案并行的独立备选方案。数据加载、等频初分、合箱流程、验证与输出
-结构均与 binning.py 保持一致。
+结构均与 binning_mlt_cnt.py 保持一致。
 
 口径约定（混合口径）：
 - 合箱主指标率：1M30+ / 3M30+ 金额逾期率（amt_bad_rate），用于单调性、相邻差异、
@@ -35,7 +35,7 @@
 
 
 运行方式：
-    python binning_amount.py
+    python binning_mlt_amt.py
 
 输入目录：res/
 输出文件：out/binning_amt_strategy_report_YYYYMMDD.xlsx

@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-价值模型分数分箱与策略阈值分析（worthiness 口径）
+mlt 主风险模型分数分箱与策略阈值分析（笔数口径）
 
-以价值模型（aus_new_worthiness_bid_3rdmodel）替换 binning.py 中的主风险模型（mlt），
-其余管线（数据拼接、样本切分、笔数违约合箱、阈值测算、报告输出）与 binning.py 完全一致。
-价值模型分经数据验证为高分高风险：十分位 3M30+ 笔数逾期率随分数单调上升
-（最低分位 4.53% → 最高分位 24.11%），因此保持 HIGH_SCORE_HIGH_RISK = True。
 
 核心流程（对应日志中 1/9 ~ 9/9）：
-1. 从 res/ 读取 sample.csv + application_info.csv + 价值模型分文件，融合为宽表；按时间窗口 2025-10
+1. 从 res/ 读取 sample.csv + application_info.csv + 模型分文件，融合为宽表；按时间窗口 2025-10
    / 2025-11 切分 Train（≤2025-10）与 OOT（≥2025-11）；
 2. 完整 Train 用于学习分箱边界、执行合箱和选择候选方案；OOT 全程不参与调参，仅用于最终验证；
-3. Train 上按 score_worthiness 做 20 等频分箱，生成初始边界；边界复用到 OOT，得到统一的
-   score_worthiness_bin20 分箱标签；
+3. Train 上按 score_mlt 做 20 等频分箱，生成初始边界；边界复用到 OOT，得到统一的
+   score_mlt_bin20 分箱标签；
 4. 从 Train 初始箱出发，自动执行：约束修正 → 同时监控 1M30+ 与 3M30+ 笔数逾期率
    做相邻单调合并 → 策略关键边界保护 → 评分候选方案，输出 6~8 档最终方案；同时保留手工兜底；
 5. 将最终合箱映射应用到 Train / OOT，生成统一口径的最终箱统计；
@@ -23,14 +19,14 @@
 8. 汇总为 6 个 sheet：01_总览、02_分箱详情（过程+候选+步骤）、03_最终分箱统计
    （Train/OOT 合一）、04_策略方案（历史实际审批漏斗+模型策略测算流量+阈值选择+分段验证）、
    05_模型验证（Train/OOT 对比+AUC/KS+PSI+单调性+月度稳定性）、06_附录（配置+上线执行规则+指标说明）；
-9. 写入 out/binning_worthiness_strategy_report_YYYYMMDD.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
+9. 写入 out/binning_strategy_report_YYYYMMDD.xlsx 并格式化（冻结窗格、列宽、条件色阶）。
 
 
 运行方式：
-    python binning_worthiness.py
+    python binning_mlt_cnt.py
 
 输入目录：res/
-输出文件：out/binning_worthiness_strategy_report_YYYYMMDD.xlsx
+输出文件：out/binning_strategy_report_YYYYMMDD.xlsx
 """
 
 import ast
@@ -51,14 +47,14 @@ from openpyxl.utils import get_column_letter
 
 DATA_DIR = Path("res")
 OUT_DIR = Path("out")
-REPORT_PATH = OUT_DIR / f"binning_worthiness_strategy_report_{time.strftime('%Y%m%d')}.xlsx"
+REPORT_PATH = OUT_DIR / f"binning_strategy_report_{time.strftime('%Y%m%d')}.xlsx"
 
 SAMPLE_FILE = "sample.csv"
 APPLICATION_FILE = "application_info.csv"
-SCORE_FILE = "aus_new_worthiness_bid_3rdmodel_v1_0_20260429.csv"
+SCORE_FILE = "aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv"
 
-RAW_SCORE_COL = "aus_new_worthiness_bid_3rdmodel_v1_0_20260429"
-SCORE_COL = "score_worthiness"
+RAW_SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
+SCORE_COL = "score_mlt"
 
 # 未完成申请状态：加载时整体剔除，不进入历史漏斗、分箱与策略测算。
 INCOMPLETE_STATUSES = ["0.Incomplete", "1.In Progress"]
@@ -67,11 +63,10 @@ TRAIN_END_MONTH = "2025-10"
 OOT_START_MONTH = "2025-11"
 
 INITIAL_BIN_COUNT = 20
-INITIAL_BIN_COL = "score_worthiness_bin20"
-FINAL_BIN_COL = "score_worthiness_final_bin"
+INITIAL_BIN_COL = "score_mlt_bin20"
+FINAL_BIN_COL = "score_mlt_final_bin"
 
-# 当前模型按“高分高风险”处理。价值模型分经数据验证（十分位 3M30+ 笔数逾期率
-# 随分数单调上升：最低分位 4.53% → 最高分位 24.11%），与 mlt 方向一致。
+# 当前模型按“高分高风险”处理。
 HIGH_SCORE_HIGH_RISK = True
 
 # 最终风险档位数量。
@@ -2547,7 +2542,7 @@ def build_strategy_estimated_flow_report(
         accepted_cnt = auto_cnt + manual_cnt
         rows.append(
             {
-                "metric_scope": "模型策略测算流量（score_worthiness阈值）",
+                "metric_scope": "模型策略测算流量（score_mlt阈值）",
                 "sample_group": sample_group,
                 "strategy_estimated_total_application_cnt": total_cnt,
                 "strategy_estimated_auto_pass_cnt": auto_cnt,
@@ -2797,8 +2792,8 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("历史实际审批漏斗", "actual_auto_approval_share", "历史实际通过件中的自动审批占比", "auto_approved_application_cnt / approved_application_cnt"),
         ("历史实际审批漏斗", "actual_manual_approval_share", "历史实际通过件中的人工审批占比", "manual_approved_application_cnt / approved_application_cnt"),
         ("历史实际审批漏斗", "actual_deal_rate", "历史实际成交转化率", "deal_sample_cnt / approved_application_cnt"),
-        ("箱级历史实际审批漏斗", "actual_*（03_最终分箱统计）", "按 Train/OOT 与最终风险档下钻的历史实际数量和比率", "在每个 score_worthiness_final_bin 内按唯一 application_id 复算"),
-        ("模型策略测算", "strategy_estimated_auto_pass_rate", "模型阈值测算的自动通过样本占比", "score_worthiness 满足自动通过阈值的申请数 / 有效模型分申请数"),
+        ("箱级历史实际审批漏斗", "actual_*（03_最终分箱统计）", "按 Train/OOT 与最终风险档下钻的历史实际数量和比率", "在每个 score_mlt_final_bin 内按唯一 application_id 复算"),
+        ("模型策略测算", "strategy_estimated_auto_pass_rate", "模型阈值测算的自动通过样本占比", "score_mlt 满足自动通过阈值的申请数 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_manual_review_rate", "模型阈值测算的人工审核样本占比", "人工审核分数区间申请数 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_total_accept_rate", "模型阈值测算的总接纳样本占比", "自动通过数与人工审核数之和 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_reject_rate", "模型阈值测算的拒绝样本占比", "超过总接纳阈值的申请数 / 有效模型分申请数"),
@@ -2820,7 +2815,7 @@ def build_metric_dictionary() -> pd.DataFrame:
 def build_online_execution_rules() -> pd.DataFrame:
     """输出上线执行规则的静态清单，供引擎团队上线时逐项核对。"""
     rows = [
-        ("分数精度", "模型分精度", "线上评分引擎输出与离线一致的 float 模型分（score_worthiness），不限制小数位"),
+        ("分数精度", "模型分精度", "线上评分引擎输出与离线一致的 float 模型分（score_mlt），不限制小数位"),
         ("分数精度", "边界精度", "阈值 = 最终箱右边界原始值（末档为 Train 最大分数），不做二次取整"),
         ("阈值取整", "取整原则", "默认按原始精度部署；若工程必须取整（如存储小数位限制），只允许向更严方向取整：自动通过阈值、总接纳阈值均向下取整（floor），不放大接纳人群"),
         ("阈值取整", "取整后复核", "取整后须重新计算三段占比与风险，与未取整版本对比，确认无风险放大"),
