@@ -1118,28 +1118,6 @@ def count_rate_inversions(
     return total
 
 
-def calc_spearman_corr(left: pd.Series, right: pd.Series) -> float:
-    """用 rank + pearson 计算 Spearman 相关性，避免依赖 scipy。"""
-    valid = pd.DataFrame({"left": left, "right": right}).dropna()
-    if len(valid) < 2:
-        return np.nan
-    return valid["left"].rank(method="average").corr(
-        valid["right"].rank(method="average"),
-        method="pearson",
-    )
-
-
-def calc_psi_from_bin_stats(
-    base_stats: pd.DataFrame,
-    compare_stats: pd.DataFrame,
-    eps: float = PSI_EPS,
-) -> float:
-    """用同一候选箱的样本占比计算 PSI。"""
-    base_pct = base_stats["sample_pct"].fillna(0).to_numpy(dtype="float64") + eps
-    compare_pct = compare_stats["sample_pct"].fillna(0).to_numpy(dtype="float64") + eps
-    return float(((compare_pct - base_pct) * np.log(compare_pct / base_pct)).sum())
-
-
 def calc_iv_from_stats(
     stats: pd.DataFrame,
     bad_col: str = PRIMARY_AMT_BAD_COL,
