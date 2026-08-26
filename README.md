@@ -1400,6 +1400,16 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`；报告文档为 `两模型交叉效果评估报告（mlt × 价值模型）.md`。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
 
+### 3. 价值模型条件分箱脚本 binning_worthiness_cond_cnt.py
+
+`binning_worthiness_cond_cnt.py` 在 mlt 主模型 7 档之内对价值模型分做条件分箱：每个 mlt 档内用 Train 样本对 `score_worthiness` 等频切 3 个子箱（边界复用 OOT），形成 21 个组合格（A1–G3），评估档内子箱显著性、头尾拉开效果、整体区分度（IV / 序数 AUC / KS）与组合序单调性。
+
+```bash
+"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" binning_worthiness_cond_cnt.py
+```
+
+输出 `out/binning_worthiness_cond_strategy_report_YYYYMMDD.xlsx`；报告文档为 `分箱方法论与结果说明报告（价值模型条件分箱）.md`。核心结论：价值子箱的分层能力集中在 mlt 高风险档（G 档内跨度 10.79pp，G3 3M30+ 45.87%、Lift 4.80），头部几乎拉不开（A 档内三子箱 1.62%–1.80% 均不显著），整体区分度提升有限（Train 3M30+ IV 0.6993 → 0.7017、OOT 序数 AUC 反降 0.0014）；建议只作 mlt F/G 档内的尾部加严规则使用，不作为整体分档方案。
+
 ---
 
 ## 十一、一句话总结
