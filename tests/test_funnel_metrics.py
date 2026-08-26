@@ -2,7 +2,18 @@ import unittest
 
 import pandas as pd
 
-import binning_mlt_cnt as binning
+import pipeline.settings as settings
+from pipeline.binning_cnt import refine_ranges_under_share_cap
+from pipeline.data_loading import (
+    _actual_funnel_row,
+    build_bin_actual_funnel_report,
+    drop_incomplete_applications,
+)
+from pipeline.risk_metrics import add_bin_lift, add_bin_model_diagnostics, calc_iv_from_stats
+from pipeline.strategy import build_strategy_estimated_flow_report
+
+FINAL_BIN_COL = settings.FINAL_BIN_COL
+SCORE_COL = settings.SCORE_COL
 
 
 class FunnelMetricTests(unittest.TestCase):
@@ -40,7 +51,7 @@ class FunnelMetricTests(unittest.TestCase):
             }
         )
 
-        result = binning._actual_funnel_row(data, "Test")
+        result = _actual_funnel_row(data, "Test")
 
         self.assertEqual(result["actual_apply_cnt"], 6)
         self.assertEqual(result["actual_completed_application_cnt"], 5)
@@ -60,13 +71,13 @@ class FunnelMetricTests(unittest.TestCase):
         train = pd.DataFrame(
             {
                 "application_id": [1, 2, 3, 4],
-                binning.SCORE_COL: [0.1, 0.2, 0.3, 0.4],
+                SCORE_COL: [0.1, 0.2, 0.3, 0.4],
             }
         )
         oot = pd.DataFrame(
             {
                 "application_id": [5, 6],
-                binning.SCORE_COL: [0.15, 0.35],
+                SCORE_COL: [0.15, 0.35],
             }
         )
         strategy_plan = pd.DataFrame(
@@ -79,7 +90,7 @@ class FunnelMetricTests(unittest.TestCase):
             ]
         )
 
-        result = binning.build_strategy_estimated_flow_report(
+        result = build_strategy_estimated_flow_report(
             train,
             oot,
             strategy_plan,
@@ -114,7 +125,7 @@ class FunnelMetricTests(unittest.TestCase):
         data = pd.DataFrame(
             {
                 "application_id": [1, 2, 3, 4],
-                binning.FINAL_BIN_COL: ["A", "A", "B", "B"],
+                FINAL_BIN_COL: ["A", "A", "B", "B"],
                 "bin_order": [1, 1, 2, 2],
                 "application_status": [
                     "4.Funded",
@@ -132,8 +143,8 @@ class FunnelMetricTests(unittest.TestCase):
             }
         )
 
-        result = binning.build_bin_actual_funnel_report(data).set_index(
-            binning.FINAL_BIN_COL
+        result = build_bin_actual_funnel_report(data).set_index(
+            FINAL_BIN_COL
         )
 
         self.assertAlmostEqual(result.loc["A", "actual_completion_rate"], 1.0)
@@ -155,7 +166,7 @@ class FunnelMetricTests(unittest.TestCase):
             }
         )
 
-        result = binning.drop_incomplete_applications(data)
+        result = drop_incomplete_applications(data)
 
         self.assertEqual(result["application_id"].tolist(), [2, 4])
 
@@ -170,14 +181,14 @@ class FunnelMetricTests(unittest.TestCase):
             }
         )
 
-        result = binning.add_bin_model_diagnostics(stats)
+        result = add_bin_model_diagnostics(stats)
 
-        expected_1m_iv = binning.calc_iv_from_stats(
+        expected_1m_iv = calc_iv_from_stats(
             stats,
             bad_col="1m30p_cnt_bad",
             good_col="1m30p_cnt_good",
         )
-        expected_3m_iv = binning.calc_iv_from_stats(
+        expected_3m_iv = calc_iv_from_stats(
             stats,
             bad_col="3m30p_cnt_bad",
             good_col="3m30p_cnt_good",
@@ -202,7 +213,7 @@ class FunnelMetricTests(unittest.TestCase):
             }
         )
 
-        result = binning.add_bin_lift(stats)
+        result = add_bin_lift(stats)
 
         self.assertEqual(result["bin_order"].tolist(), [1, 2])
         overall = {
@@ -239,7 +250,7 @@ class FunnelMetricTests(unittest.TestCase):
             }
         )
 
-        result = binning.add_bin_lift(stats)
+        result = add_bin_lift(stats)
 
         self.assertEqual(result["bin_order"].tolist(), [0, 1, 2])
         self.assertAlmostEqual(result["1m30p_cnt_lift"].iloc[0], 1.0)
@@ -252,7 +263,7 @@ class FunnelMetricTests(unittest.TestCase):
         stats = self._share_cap_stats()
         # (2,4)=45% 与 (5,6)=45% 均超 35% 上限：低风险侧优先拆分为 5 箱，
         # 再合并代价最低的可行相邻对（仅 (1,1)+(2,2) 合并后仍不超过上限）回到 4 档。
-        result = binning.refine_ranges_under_share_cap(
+        result = refine_ranges_under_share_cap(
             [(1, 1), (2, 4), (5, 6)],
             stats,
             protected_boundaries=set(),
@@ -266,7 +277,7 @@ class FunnelMetricTests(unittest.TestCase):
     def test_refine_ranges_under_share_cap_keeps_compliant_ranges_unchanged(self):
         stats = self._share_cap_stats()
         # 各箱占比均不超过上限时原样返回。
-        result = binning.refine_ranges_under_share_cap(
+        result = refine_ranges_under_share_cap(
             [(1, 2), (3, 3), (4, 4)],
             stats,
             protected_boundaries=set(),
@@ -280,7 +291,7 @@ class FunnelMetricTests(unittest.TestCase):
     def test_refine_ranges_under_share_cap_returns_none_when_single_bin_unsplittable(self):
         stats = self._share_cap_stats()
         # (2,5)=70% 超 10% 上限，但任一可行拆点的左子箱都 ≥20%，拆不出合规子箱。
-        result = binning.refine_ranges_under_share_cap(
+        result = refine_ranges_under_share_cap(
             [(1, 1), (2, 5), (6, 6)],
             stats,
             protected_boundaries=set(),
@@ -294,7 +305,7 @@ class FunnelMetricTests(unittest.TestCase):
     def test_refine_ranges_under_share_cap_returns_none_when_all_merges_blocked(self):
         stats = self._share_cap_stats()
         # 拆分后唯一可行的合并对 (1,1)+(2,2) 跨 extreme 边界 1，被拦截后无法回到目标档数。
-        result = binning.refine_ranges_under_share_cap(
+        result = refine_ranges_under_share_cap(
             [(1, 1), (2, 4), (5, 6)],
             stats,
             protected_boundaries=set(),

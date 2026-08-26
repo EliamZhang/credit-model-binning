@@ -16,7 +16,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from openpyxl import load_workbook
 
-MD_PATH = "分箱方法论与结果说明报告（mlt 笔数口径）.md"
+MD_PATH = "docs/分箱方法论与结果说明报告（mlt 笔数口径）.md"
 SRC_PATTERN = "out/binning_strategy_report_*.xlsx"
 
 # Excel 各 sheet 的表头起始字段，用于按表分段
