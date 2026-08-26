@@ -143,6 +143,9 @@ def build_combined_stats(
     group = cross.loc[cross["sample_group"].eq(sample_group)].copy()
     overall = group_overall_rates(group)
     total = len(group)
+    group_principal = float(
+        pd.to_numeric(group["principal"], errors="coerce").fillna(0).sum()
+    )
 
     rows: List[Dict] = []
     for tier in range(1, 8):
@@ -158,6 +161,10 @@ def build_combined_stats(
             ci3_low, ci3_high = mlt.wilson_ci(np.array([b3]), np.array([m3]))
             ci1_low, ci1_high = mlt.wilson_ci(np.array([b1]), np.array([m1]))
             a3 = amt_rate_of(cell, ANCHOR_DPD_COL, ANCHOR_REMAINING_COL)
+            principal = float(
+                pd.to_numeric(cell["principal"], errors="coerce").fillna(0).sum()
+            )
+            funnel = mlt._actual_funnel_row(cell, "cell")
             rows.append(
                 {
                     "combined_order": (tier - 1) * SUB_BIN_COUNT + sub,
@@ -176,6 +183,9 @@ def build_combined_stats(
                     "3m30p_amt_bad_rate": a3,
                     "3m30p_cnt_lift": r3 / overall["3m30p_cnt_bad_rate"]
                     if overall["3m30p_cnt_bad_rate"] else np.nan,
+                    "principal_pct": principal / group_principal if group_principal else np.nan,
+                    "actual_approval_rate": funnel["actual_approval_rate"],
+                    "actual_deal_rate": funnel["actual_deal_rate"],
                     "3m30p_cnt_mature": m3,
                     "3m30p_cnt_bad": b3,
                     "3m30p_cnt_good": m3 - b3,
@@ -427,6 +437,59 @@ def build_segment_relayer_table(cross: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_sub_bin_strategy_table(cross: pd.DataFrame) -> pd.DataFrame:
+    """二维策略对照：mlt 档上限 × 条件子箱上限 的自动通过/总接纳方案。"""
+    rows: List[Dict] = []
+    policies = [
+        ("mlt 单模型（现行）", 3, SUB_BIN_COUNT, 5, SUB_BIN_COUNT),
+        ("接纳收子箱 ≤2", 3, SUB_BIN_COUNT, 5, 2),
+        ("自动通过收子箱 ≤2", 3, 2, 5, SUB_BIN_COUNT),
+        ("两端均收子箱 ≤2", 3, 2, 5, 2),
+        ("两端均收子箱 ≤1", 3, 1, 5, 1),
+    ]
+    for name, auto_mlt, auto_sub, acc_mlt, acc_sub in policies:
+        row = {
+            "policy": name,
+            "mlt_auto_bin": auto_mlt,
+            "sub_auto_bin": auto_sub,
+            "mlt_accept_bin": acc_mlt,
+            "sub_accept_bin": acc_sub,
+        }
+        for group_key, prefix in [("train", "train"), ("oot", "oot")]:
+            g = cross.loc[cross["sample_group"].eq(group_key)]
+            total = len(g)
+            auto = g["mlt_bin_order"].le(auto_mlt) & g["wth_sub_bin"].le(auto_sub)
+            accept = g["mlt_bin_order"].le(acc_mlt) & g["wth_sub_bin"].le(acc_sub)
+            manual = accept & ~auto
+            reject = ~accept
+            for seg_label, mask in [("auto", auto), ("manual", manual), ("accept", accept), ("reject", reject)]:
+                seg = g.loc[mask]
+                _, _, r3 = rate_of(seg, "duedate_3m_30")
+                row[f"{prefix}_{seg_label}_rate"] = len(seg) / total
+                row[f"{prefix}_{seg_label}_3m30p"] = r3
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_sub_bin_strategy_grid(cross: pd.DataFrame) -> pd.DataFrame:
+    """AND 接纳网格：mlt 档上限 × 条件子箱上限，Train/OOT 接纳率与接纳 3M30+。"""
+    rows: List[Dict] = []
+    for mlt_cut in range(1, 8):
+        for sub_cut in range(1, SUB_BIN_COUNT + 1):
+            row = {"mlt_accept_bin": mlt_cut, "sub_accept_bin": sub_cut}
+            for group_key, prefix in [("train", "train"), ("oot", "oot")]:
+                g = cross.loc[cross["sample_group"].eq(group_key)]
+                total = len(g)
+                accept = g["mlt_bin_order"].le(mlt_cut) & g["wth_sub_bin"].le(sub_cut)
+                seg = g.loc[accept]
+                _, _, r3 = rate_of(seg, "duedate_3m_30")
+                row[f"{prefix}_accept_rate"] = len(seg) / total
+                row[f"{prefix}_accept_3m30p"] = r3
+            row["is_current_mlt"] = mlt_cut == 5 and sub_cut == SUB_BIN_COUNT
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 # ============================================================
 # 5. 主流程
 # ============================================================
@@ -475,7 +538,9 @@ def main() -> None:
     disc = build_discrimination_comparison(cross)
     iv_cmp = build_iv_comparison(cross)
     seg_relay = build_segment_relayer_table(cross)
-    print("[5/6] 区分度对比完成")
+    strategy_table = build_sub_bin_strategy_table(cross)
+    strategy_grid = build_sub_bin_strategy_grid(cross)
+    print("[5/6] 区分度对比与二维策略模拟完成")
 
     # 6) 总览与附录。
     train_head = head_tail.loc[
@@ -543,7 +608,13 @@ def main() -> None:
         ("现行策略分段内的价值子箱再分层（应用示意）", None),
         (None, seg_relay),
     ])
-    write_sheet(wb, "07_附录", [("配置参数", None), (None, appendix)])
+    write_sheet(wb, "07_二维策略模拟", [
+        ("策略对照（mlt 档上限 × 条件子箱上限）", None),
+        (None, strategy_table),
+        ("AND 接纳网格（mlt 档上限 × 子箱上限）", None),
+        (None, strategy_grid),
+    ])
+    write_sheet(wb, "08_附录", [("配置参数", None), (None, appendix)])
     wb.save(REPORT_PATH)
     print(f"完成 => {REPORT_PATH}（耗时 {time.time() - t0:.1f}s）")
 

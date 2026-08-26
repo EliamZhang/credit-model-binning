@@ -1,0 +1,2485 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>新客价值模型效果评估文档 · 修订版</title>
+<style>
+    :root {
+      --ink: #102033;
+      --muted: #657286;
+      --line: rgba(16, 32, 51, .10);
+      --card: rgba(255,255,255,.92);
+      --soft: #f5f7fb;
+      --navy: #0b1d33;
+      --navy-2: #142e4c;
+      --teal: #1d7d70;
+      --teal-2: #4fb5a5;
+      --gold: #c69a46;
+      --shadow: 0 22px 60px rgba(13, 32, 54, .12);
+      --shadow-soft: 0 12px 32px rgba(13, 32, 54, .08);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.72;
+      background:
+        radial-gradient(circle at top left, rgba(79,181,165,.16), transparent 34rem),
+        radial-gradient(circle at 90% 6%, rgba(198,154,70,.12), transparent 28rem),
+        linear-gradient(180deg, #f7f9fc 0%, #eef2f7 100%);
+    }
+    a { color: inherit; }
+    .page { max-width: 1440px; margin: 0 auto; padding: 28px 28px 64px; }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border-radius: 32px;
+      padding: 44px 48px 42px;
+      color: #fff;
+      background:
+        linear-gradient(135deg, rgba(11,29,51,.98), rgba(20,46,76,.96) 46%, rgba(29,125,112,.88));
+      box-shadow: var(--shadow);
+      min-height: 360px;
+    }
+    .hero:before {
+      content: "";
+      position: absolute;
+      inset: -35% -10% auto auto;
+      width: 680px;
+      height: 680px;
+      background: radial-gradient(circle, rgba(255,255,255,.18), transparent 68%);
+      transform: rotate(18deg);
+    }
+    .hero:after {
+      content: "";
+      position: absolute;
+      inset: auto auto -90px -80px;
+      width: 360px;
+      height: 360px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(198,154,70,.28), transparent 70%);
+    }
+    .hero-content { position: relative; z-index: 1; max-width: 1120px; }
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 12px;
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 999px;
+      background: rgba(255,255,255,.08);
+      backdrop-filter: blur(10px);
+      color: rgba(255,255,255,.86);
+      font-size: 13px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .eyebrow:before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 5px rgba(198,154,70,.18); }
+    .hero h1 {
+      margin: 22px 0 14px;
+      max-width: 980px;
+      font-size: clamp(34px, 5vw, 64px);
+      line-height: 1.08;
+      letter-spacing: -.045em;
+      font-weight: 750;
+    }
+    .hero p {
+      margin: 0;
+      max-width: 900px;
+      color: rgba(255,255,255,.78);
+      font-size: 17px;
+    }
+    .hero-meta {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 24px;
+    }
+    .hero-meta span {
+      padding: 9px 12px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 12px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.84);
+      font-size: 13px;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: -52px;
+      position: relative;
+      z-index: 2;
+      padding: 0 24px;
+    }
+    .kpi {
+      padding: 18px 18px 16px;
+      background: rgba(255,255,255,.88);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,.7);
+      border-radius: 22px;
+      box-shadow: var(--shadow-soft);
+      min-height: 116px;
+    }
+    .kpi small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .kpi strong {
+      display: block;
+      font-size: 28px;
+      line-height: 1;
+      letter-spacing: -.02em;
+      color: var(--navy);
+    }
+    .kpi strong.kpi-nowrap {
+      white-space: nowrap;
+      font-size: clamp(22px, 1.9vw, 26px);
+      letter-spacing: -.045em;
+    }
+    .kpi em {
+      display: block;
+      margin-top: 8px;
+      color: #66768a;
+      font-size: 13px;
+      font-style: normal;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 24px;
+      margin-top: 28px;
+      align-items: start;
+    }
+    .sidebar {
+      position: sticky;
+      top: 18px;
+      background: rgba(255,255,255,.74);
+      backdrop-filter: blur(18px);
+      border: 1px solid rgba(16,32,51,.08);
+      border-radius: 24px;
+      padding: 18px;
+      box-shadow: var(--shadow-soft);
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+    }
+    .sidebar h3 { margin: 0 0 12px; font-size: 14px; letter-spacing: .08em; color: var(--navy); text-transform: uppercase; }
+    .toc { display: grid; gap: 6px; }
+    .toc a {
+      display: block;
+      text-decoration: none;
+      border-radius: 12px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: #536276;
+      border: 1px solid transparent;
+    }
+    .toc a:hover { background: #f3f6fa; color: var(--navy); border-color: rgba(16,32,51,.08); }
+    .toc .toc-h1 { font-weight: 700; color: #22364d; margin-top: 5px; }
+    .toc .toc-h2 { padding-left: 18px; font-size: 12px; }
+    .toc .toc-h3 { padding-left: 30px; font-size: 12px; color: #607086; }
+    .toc .toc-h4 { padding-left: 42px; font-size: 11px; color: #6c798b; line-height: 1.35; }
+    .exec-summary {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+    .summary-card, .chapter-card {
+      background: var(--card);
+      border: 1px solid rgba(16,32,51,.08);
+      border-radius: 28px;
+      box-shadow: var(--shadow-soft);
+    }
+    .summary-card { padding: 24px; }
+    .summary-card h2 {
+      margin: 0 0 14px;
+      font-size: 24px;
+      line-height: 1.25;
+      letter-spacing: -.02em;
+    }
+    .summary-card p { margin: 0 0 14px; color: #4e5d70; }
+    .pill-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 11px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, rgba(29,125,112,.10), rgba(198,154,70,.10));
+      border: 1px solid rgba(29,125,112,.13);
+      color: #25465a;
+      font-size: 13px;
+    }
+    .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+    .decision {
+      position: relative;
+      padding: 16px 16px 15px;
+      border-radius: 20px;
+      background: linear-gradient(180deg, rgba(255,255,255,.94), rgba(246,248,251,.92));
+      border: 1px solid rgba(16,32,51,.08);
+    }
+    .decision:before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; border-radius: 20px 0 0 20px; background: linear-gradient(180deg, var(--teal), var(--gold)); }
+    .decision b { display: block; margin-bottom: 6px; color: var(--navy); }
+    .decision span { display: block; font-size: 13px; color: #5d697a; line-height: 1.55; }
+    .chapter-card {
+      padding: 28px;
+      margin-bottom: 24px;
+      overflow: hidden;
+    }
+    .chapter-kicker {
+      color: var(--gold);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    .chapter-title-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 16px;
+      margin-bottom: 18px;
+    }
+    .chapter-title-row h2 { margin: 4px 0 0; font-size: 28px; line-height: 1.2; letter-spacing: -.03em; }
+    .chapter-title-row span { color: #7b8797; font-size: 12px; white-space: nowrap; }
+    .markdown-body { font-size: 15px; color: #26384d; }
+    .markdown-body h1 {
+      margin: 30px 0 18px;
+      padding-top: 4px;
+      font-size: 28px;
+      letter-spacing: -.025em;
+      color: var(--navy);
+    }
+    .markdown-body h2 {
+      position: relative;
+      margin: 34px 0 14px;
+      padding-left: 16px;
+      font-size: 22px;
+      letter-spacing: -.02em;
+      color: #14283e;
+    }
+    .markdown-body h2:before {
+      content: "";
+      position: absolute;
+      left: 0; top: .45em;
+      width: 5px; height: 1.05em;
+      border-radius: 999px;
+      background: linear-gradient(180deg, var(--teal), var(--gold));
+    }
+    .markdown-body h3 { margin: 26px 0 12px; color: #1b3148; font-size: 18px; }
+    .markdown-body h3 + p strong { color: #173f54; }
+    .markdown-body h4 { margin: 20px 0 10px; color: #26384d; }
+    .markdown-body p { margin: 10px 0 14px; }
+    .markdown-body blockquote {
+      margin: 16px 0;
+      padding: 14px 16px;
+      border-left: 4px solid var(--gold);
+      background: linear-gradient(90deg, rgba(198,154,70,.10), rgba(255,255,255,.4));
+      border-radius: 14px;
+      color: #4b596c;
+    }
+    .markdown-body hr { border: 0; height: 1px; background: var(--line); margin: 28px 0; }
+    .markdown-body code {
+      padding: 2px 6px;
+      border-radius: 7px;
+      background: rgba(20,46,76,.07);
+      color: #0f5f56;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .92em;
+    }
+    .markdown-body ul, .markdown-body ol { padding-left: 1.3em; }
+    .table-frame {
+      margin: 18px 0 24px;
+      overflow-x: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(16,32,51,.10);
+      box-shadow: 0 12px 30px rgba(13,32,54,.06);
+      background: #fff;
+    }
+    table.data-table {
+      border-collapse: separate;
+      border-spacing: 0;
+      width: 100%;
+      min-width: 680px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    table.data-table th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 12px 12px;
+      color: rgba(255,255,255,.95);
+      text-align: left;
+      font-weight: 680;
+      background: linear-gradient(135deg, #102033 0%, #183957 60%, #1d7d70 100%);
+      border-right: 1px solid rgba(255,255,255,.12);
+      white-space: nowrap;
+    }
+    table.data-table th:first-child { border-top-left-radius: 17px; }
+    table.data-table th:last-child { border-top-right-radius: 17px; border-right: 0; }
+    table.data-table td {
+      padding: 11px 12px;
+      border-bottom: 1px solid rgba(16,32,51,.07);
+      border-right: 1px solid rgba(16,32,51,.05);
+      vertical-align: top;
+      background-clip: padding-box;
+    }
+    table.data-table tbody tr:nth-child(even) td { background-color: rgba(29,125,112,.035); }
+    table.data-table tbody tr:hover td { background-color: rgba(198,154,70,.14) !important; }
+    table.data-table td:first-child,
+    table.data-table th:first-child {
+      position: sticky;
+      left: 0;
+      z-index: 3;
+      font-weight: 700;
+      box-shadow: 8px 0 16px rgba(16,32,51,.04);
+    }
+    table.data-table td:first-child { background: rgba(255,255,255,.96); color: #18324b; }
+    table.data-table tbody tr:nth-child(even) td:first-child { background: rgba(244,250,248,.96); }
+    table.data-table tr:last-child td { border-bottom: 0; }
+    .heat-cell { transition: background-color .18s ease, color .18s ease; }
+    .heat-cell[data-heat-type="risk"] { color: #7a141d; }
+    .heat-cell[data-heat-type="value"] { color: #0f4a43; }
+    .heat-cell[data-heat-type="approval"] { color: #163e66; }
+    .heat-cell[data-heat-type="distribution"] { color: #5d3c0c; }
+    .heat-cell[data-heat-type="model"] { color: #3d3117; }
+    .heat-cell[data-heat-type="neutral"] { color: #173f55; }
+    .section-divider { height: 1px; background: linear-gradient(90deg, transparent, rgba(16,32,51,.14), transparent); margin: 28px 0; }
+    .footer {
+      margin-top: 30px;
+      padding: 20px 4px;
+      text-align: center;
+      color: #7a8798;
+      font-size: 13px;
+    }
+    .backtop {
+      position: fixed;
+      right: 22px;
+      bottom: 22px;
+      z-index: 20;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 1px solid rgba(16,32,51,.12);
+      background: rgba(255,255,255,.88);
+      backdrop-filter: blur(12px);
+      box-shadow: var(--shadow-soft);
+      display: grid;
+      place-items: center;
+      text-decoration: none;
+      color: var(--navy);
+      font-weight: 800;
+    }
+
+
+    /* Enhanced narrative blocks for Chapter 01 */
+    .insight-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 22px;
+    }
+    .insight-card,
+    .segment-card,
+    .action-card {
+      position: relative;
+      border: 1px solid rgba(16,32,51,.08);
+      border-radius: 20px;
+      background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(247,249,252,.92));
+      box-shadow: 0 12px 28px rgba(13,32,54,.06);
+      overflow: hidden;
+    }
+    .insight-card { padding: 18px 18px 16px; }
+    .insight-card:before,
+    .segment-card:before,
+    .action-card:before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 5px;
+      background: linear-gradient(180deg, var(--teal), var(--gold));
+    }
+    .insight-card.risk:before,
+    .segment-card.danger:before,
+    .action-card.danger:before { background: linear-gradient(180deg, #b4232c, #e06a73); }
+    .insight-card.value:before,
+    .segment-card.positive:before,
+    .action-card.positive:before { background: linear-gradient(180deg, #13795b, #4fb58d); }
+    .segment-card.caution:before,
+    .action-card.caution:before { background: linear-gradient(180deg, #b7791f, #e0b15b); }
+    .segment-card.neutral:before,
+    .action-card.neutral:before { background: linear-gradient(180deg, #2f6fa3, #6aa5d7); }
+    .insight-card.wide { grid-column: 1 / -1; }
+    .insight-label,
+    .segment-label,
+    .action-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: .02em;
+      background: rgba(16,32,51,.06);
+      color: #26384d;
+    }
+    .segment-label.positive, .tag-positive { background: rgba(19,121,91,.10); color: #0d6b50; border: 1px solid rgba(19,121,91,.16); }
+    .segment-label.danger, .tag-danger { background: rgba(180,35,44,.10); color: #9d1c25; border: 1px solid rgba(180,35,44,.16); }
+    .segment-label.caution, .tag-caution { background: rgba(183,121,31,.12); color: #8a5a12; border: 1px solid rgba(183,121,31,.16); }
+    .segment-label.neutral, .tag-neutral { background: rgba(47,111,163,.10); color: #245d89; border: 1px solid rgba(47,111,163,.16); }
+    .insight-card h3,
+    .segment-card h3,
+    .action-card h3 {
+      margin: 10px 0 8px;
+      font-size: 17px;
+      color: var(--navy);
+      letter-spacing: -.01em;
+    }
+    .insight-card p,
+    .segment-card p,
+    .action-card p { margin: 8px 0 0; color: #4b596c; }
+    .metric-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .metric-chip {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 120px;
+      padding: 9px 10px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.82);
+      border: 1px solid rgba(16,32,51,.08);
+    }
+    .metric-chip small { color: #738196; font-size: 11px; }
+    .metric-chip strong { color: var(--navy); font-size: 14px; }
+    .metric-chip .good { color: #0d6b50; }
+    .metric-chip .bad { color: #9d1c25; }
+    .metric-chip .warn { color: #8a5a12; }
+    .segment-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 22px;
+    }
+    .segment-card { padding: 18px 18px 16px; }
+    .segment-identity {
+      display: inline-flex;
+      align-items: center;
+      margin-top: 10px;
+      padding: 6px 10px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .01em;
+      background: rgba(255,255,255,.72);
+      border: 1px solid rgba(16,32,51,.08);
+      color: var(--navy);
+      box-shadow: 0 8px 18px rgba(13,32,54,.05);
+    }
+    .segment-identity.positive { color: #0d6b50; background: rgba(19,121,91,.10); border-color: rgba(19,121,91,.16); }
+    .segment-identity.danger { color: #9d1c25; background: rgba(180,35,44,.10); border-color: rgba(180,35,44,.16); }
+    .segment-identity.caution { color: #8a5a12; background: rgba(183,121,31,.12); border-color: rgba(183,121,31,.16); }
+    .segment-identity.neutral { color: #245d89; background: rgba(47,111,163,.10); border-color: rgba(47,111,163,.16); }
+    .segment-product {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin: 10px 0 12px;
+      padding: 10px 11px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.72);
+      border: 1px solid rgba(16,32,51,.08);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.65);
+    }
+    .segment-product small {
+      flex: 0 0 auto;
+      color: #738196;
+      font-size: 12px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .segment-product strong {
+      color: var(--navy);
+      font-size: 13px;
+      line-height: 1.55;
+      font-weight: 800;
+    }
+    .segment-card.positive { background: linear-gradient(180deg, rgba(247,252,250,.98), rgba(235,248,244,.92)); }
+    .segment-card.danger { background: linear-gradient(180deg, rgba(255,250,250,.98), rgba(253,237,239,.92)); }
+    .segment-card.caution { background: linear-gradient(180deg, rgba(255,253,247,.98), rgba(252,244,224,.92)); }
+    .segment-card.neutral { background: linear-gradient(180deg, rgba(248,252,255,.98), rgba(236,246,252,.92)); }
+    .segment-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .segment-actions span,
+    .inline-tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(16,32,51,.06);
+      color: #2f4156;
+    }
+    .action-flow {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 8px;
+    }
+    .action-card { padding: 18px 18px 16px; }
+    .key-sentence {
+      padding: 14px 16px;
+      margin: 12px 0 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(29,125,112,.16);
+      background: linear-gradient(90deg, rgba(29,125,112,.09), rgba(198,154,70,.08));
+      color: #29465a;
+    }
+    @media (max-width: 900px) {
+      .insight-grid, .segment-grid, .action-flow { grid-template-columns: 1fr; }
+      .insight-card.wide { grid-column: auto; }
+      .segment-product { display: block; }
+      .segment-product small { display: block; margin-bottom: 4px; white-space: normal; }
+    }
+
+    @media (max-width: 1100px) {
+      .kpi-grid { grid-template-columns: repeat(3, 1fr); }
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: relative; top: auto; max-height: none; }
+      .exec-summary { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .page { padding: 14px 14px 48px; }
+      .hero { padding: 30px 24px 86px; border-radius: 24px; }
+      .kpi-grid { grid-template-columns: 1fr 1fr; padding: 0 10px; margin-top: -62px; }
+      .kpi strong { font-size: 22px; }
+      .chapter-card, .summary-card { padding: 20px; border-radius: 22px; }
+      .chapter-title-row { display: block; }
+      .chapter-title-row span { display: block; margin-top: 8px; white-space: normal; }
+      .decision-grid { grid-template-columns: 1fr; }
+    }
+    @media print {
+      body { background: white; }
+      .page { max-width: none; padding: 0; }
+      .hero, .kpi, .summary-card, .chapter-card { box-shadow: none; }
+      .sidebar, .backtop { display: none; }
+      .layout { display: block; }
+      .chapter-card { break-inside: avoid; }
+      table { break-inside: auto; }
+    }
+  </style>
+</head>
+<body>
+<a aria-label="返回顶部" class="backtop" href="#top">↑</a>
+<main class="page" id="top">
+<section class="hero">
+<div class="hero-content">
+<div class="eyebrow">Value Model · Evaluation</div>
+<h1>新客价值模型效果评估文档</h1>
+<div class="hero-meta">
+<span>模型：新客价值模型 1.0</span>
+<span>算法：LightGBM</span>
+<span>用途：授信 / 定价 / 审批 / 客群分层参考</span>
+<span>生成日期：2026-05-19</span>
+</div>
+</div>
+</section>
+<section aria-label="核心指标" class="kpi-grid"><div class="kpi"><small>建模样本</small><strong>56,330</strong><em>目标样本占比 27.12%</em></div>
+<div class="kpi"><small>建模目标</small><strong class="kpi-nowrap">3M利息 &lt; 160</strong><em>1 = 价值较弱 / 0 = 价值较好</em></div>
+<div class="kpi"><small>OOT AUC</small><strong>0.7294</strong><em>跨时间排序稳定</em></div>
+<div class="kpi"><small>OOT KS</small><strong>0.3467</strong><em>区分能力较好</em></div>
+<div class="kpi"><small>Top 10% 目标率</small><strong>63.00%</strong><em>头部识别明显</em></div>
+<div class="kpi"><small>高风险弱价值区域</small><strong>77,057</strong><em>高风险 × 差价值</em></div>
+</section>
+<section class="layout">
+<aside class="sidebar">
+<h3>Contents</h3>
+<nav class="toc"><a class="toc-h1" href="#chapter-1">Chapter 01 · 价值模型 × 风险模型交叉分箱效果分析</a><a class="toc-h1" href="#c2-风险模型-价值模型联合分层使用说明">一、风险模型 × 价值模型联合分层使用说明</a><a class="toc-h2" href="#c2-1-为什么联合分层成立">1. 为什么联合分层成立</a><a class="toc-h2" href="#c2-2-四类客群矩阵">2. 四类客群矩阵</a><a class="toc-h1" href="#c2-二-数据透视表与原始交叉数据">二、数据透视表与原始交叉数据</a><a class="toc-h2" href="#c2-1-价值分箱整体表现透视表">1. 价值分箱整体表现透视表</a><a class="toc-h2" href="#c2-2-风险分箱整体表现透视表">2. 风险分箱整体表现透视表</a><a class="toc-h2" href="#c2-3-原始交叉明细表">3. 原始交叉明细表</a><a class="toc-h3" href="#c2-original-样本分布">样本分布</a><a class="toc-h4" href="#c2-original-申请样本数">申请样本数</a><a class="toc-h4" href="#c2-original-3m30有效观察样本数">3M30有效观察样本数</a><a class="toc-h3" href="#c2-original-申请样本-经营与承接指标">申请样本 · 经营与承接指标</a><a class="toc-h4" href="#c2-original-申请样本-平均pti">申请样本：平均PTI</a><a class="toc-h4" href="#c2-original-申请样本-平均申请金额">申请样本：平均申请金额</a><a class="toc-h4" href="#c2-original-申请样本-件均总额度">申请样本：件均总额度</a><a class="toc-h4" href="#c2-original-申请样本-平均收入">申请样本：平均收入</a><a class="toc-h4" href="#c2-original-申请样本-平均gross-surplus">申请样本：平均gross surplus</a><a class="toc-h4" href="#c2-original-申请样本-平均net-surplus">申请样本：平均net surplus</a><a class="toc-h3" href="#c2-original-成交样本-经营与承接指标">成交样本 · 经营与承接指标</a><a class="toc-h4" href="#c2-original-成交样本-平均申请金额">成交样本：平均申请金额</a><a class="toc-h4" href="#c2-original-成交样本-平均收入">成交样本：平均收入</a><a class="toc-h4" href="#c2-original-成交样本-平均gross-surplus">成交样本：平均gross surplus</a><a class="toc-h4" href="#c2-original-成交样本-平均net-surplus">成交样本：平均net surplus</a><a class="toc-h3" href="#c2-original-风险表现">风险表现</a><a class="toc-h4" href="#c2-original-3m30人数逾期率">3M30人数逾期率</a><a class="toc-h4" href="#c2-original-3m30金额逾期率">3M30金额逾期率</a><a class="toc-h3" href="#c2-original-申请审批与成交">申请审批与成交</a><a class="toc-h4" href="#c2-original-审批通过数">审批通过数</a><a class="toc-h4" href="#c2-original-自动通过数">自动通过数</a><a class="toc-h4" href="#c2-original-人工通过数">人工通过数</a><a class="toc-h4" href="#c2-original-成交样本数">成交样本数</a><a class="toc-h4" href="#c2-original-通过率">通过率</a><a class="toc-h4" href="#c2-original-自动通过率">自动通过率</a><a class="toc-h4" href="#c2-original-人工通过率">人工通过率</a><a class="toc-h4" href="#c2-original-自动通过占比">自动通过占比</a><a class="toc-h4" href="#c2-original-人工通过占比">人工通过占比</a><a class="toc-h4" href="#c2-original-成交率">成交率</a><div class="section-divider"></div><a class="toc-h1" href="#chapter-2">Chapter 02 · 价值分箱画像</a><a class="toc-h1" href="#c3-价值模型分箱画像分析">价值模型分箱画像分析</a><a class="toc-h2" href="#c3-1-核心结论摘要">1. 核心结论摘要</a><a class="toc-h2" href="#c3-2-价值好人群画像">2. 价值好人群画像</a><a class="toc-h2" href="#c3-3-价值差人群画像">3. 价值差人群画像</a><a class="toc-h2" href="#c3-4-价值好但风险差人群画像">4. 价值好但风险差人群画像</a><a class="toc-h2" href="#c3-5-价值差但风险好人群画像">5. 价值差但风险好人群画像</a><a class="toc-h2" href="#c3-6-可用于后续使用分析的启发">6. 可用于后续使用分析的启发</a><div class="section-divider"></div><a class="toc-h1" href="#chapter-3">Chapter 03 · 模型基础信息与效果</a><a class="toc-h1" href="#c1-新客价值模型-1-0-模型报告">新客价值模型 1.0 模型说明</a><a class="toc-h2" href="#c1-1-内容概述">1. 内容概述</a><a class="toc-h2" href="#c1-2-模型基本信息">2. 模型基本信息</a><a class="toc-h2" href="#c1-3-样本设计">3. 样本设计</a><a class="toc-h2" href="#c1-4-变量体系">4. 变量体系</a><a class="toc-h2" href="#c1-5-变量-iv-表现">5. 变量 IV 表现</a><a class="toc-h2" href="#c1-6-模型方法">6. 模型方法</a><a class="toc-h2" href="#c1-7-模型效果评估">7. 模型效果评估</a><a class="toc-h2" href="#c1-8-模型分箱表现">8. 模型分箱表现</a><a class="toc-h2" href="#c1-9-业务解释">9. 业务解释</a></nav>
+</aside>
+<div class="content">
+<div class="footer">© 2026 · Value Model Analysis HTML Document · Prepared for internal model review</div>
+<section class="chapter-card" id="chapter-1">
+<div class="chapter-kicker">Chapter 01</div>
+<div class="chapter-title-row">
+<h2>价值模型 × 风险模型交叉分箱效果分析</h2>
+</div>
+<div class="markdown-body">
+
+<h1 id="c2-风险模型-价值模型联合分层使用说明">一、风险模型 × 价值模型联合分层使用说明</h1>
+<p>风险模型本质上预测客户未来逾期风险，价值模型本质上预测客户未来利息收入表现。模型可以为准入、风险、额度、定价和经营等策略提供量化预测依据。两类模型结合后，可以将客群划分为不同分层区域，辅助识别不同风险水平和不同经营价值的客户群体，从而为提额、降价、自动审批、人工复核、限额、提价和谨慎准入等差异化使用方向提供参考。</p>
+<h2 id="c2-1-为什么联合分层成立">1. 为什么联合分层成立</h2>
+<div class="insight-grid">
+<div class="insight-card risk">
+<span class="insight-label">风险模型方向</span>
+<h3>稳定识别违约风险，是准入、限额和审核的基础。</h3>
+<p>风险分箱从 <strong>风险1</strong> 到 <strong>风险5</strong>，风险指标整体抬升，同时通过率下降，说明风险模型具备清晰的风险排序能力。</p>
+<div class="metric-row">
+<span class="metric-chip"><small>3M30人数逾期率</small><strong class="bad">5.92% → 22.02%</strong></span>
+<span class="metric-chip"><small>3M30金额逾期率</small><strong class="bad">2.61% → 16.04%</strong></span>
+<span class="metric-chip"><small>通过率</small><strong>32.91% → 7.49%</strong></span>
+</div>
+</div>
+<div class="insight-card value">
+<span class="insight-label">价值模型方向</span>
+<h3>补充识别经营价值、额度承接和审批转化潜力。</h3>
+<p>价值分箱从 <strong>价值1</strong> 到 <strong>价值5</strong>，收入、件均总额度和通过率同步下降，说明价值模型提供了风险模型之外的增量信息。</p>
+<div class="metric-row">
+<span class="metric-chip"><small>平均收入</small><strong class="good">9,176 → 5,090</strong></span>
+<span class="metric-chip"><small>件均总额度</small><strong class="good">1,511 → 747</strong></span>
+<span class="metric-chip"><small>通过率</small><strong>41.04% → 6.57%</strong></span>
+</div>
+</div>
+<div class="insight-card wide">
+<span class="insight-label">联合分层价值</span>
+<h3>风险模型预测未来逾期风险，价值模型预测未来利息收入表现。</h3>
+<p>两者结合后，可以在风险水平之外进一步识别客户经营价值，为<strong>优先经营</strong>、<strong>人工复核</strong>、<strong>额度控制</strong>、<strong>定价调整</strong>和<strong>风险暴露压降</strong>等差异化使用方向提供依据。</p>
+</div>
+</div>
+<h2 id="c2-2-四类客群矩阵">2. 四类客群矩阵</h2>
+<div class="segment-grid">
+<div class="segment-card positive">
+<span class="segment-label positive">风险1-2 × 价值1-2</span>
+<div class="segment-identity positive">价值好 × 风险好</div>
+<h3>优先经营客群</h3>
+<div class="segment-product"><small>对应产品</small><strong>3000-5000 优质 MACC / LACC 候选池</strong></div>
+<p>风险低、价值好，适合作为重点经营客群。当前优先承接 3000-5000 优质 MACC，后续可从其中筛选更优质、更稳定人群，作为 LACC / 循环贷的扩展候选。</p>
+<div class="metric-row">
+<span class="metric-chip"><small>样本数</small><strong>18,934</strong></span>
+<span class="metric-chip"><small>样本占比</small><strong>12.00%</strong></span>
+<span class="metric-chip"><small>3M30人数逾期率</small><strong class="good">6.30%</strong></span>
+<span class="metric-chip"><small>3M30金额逾期率</small><strong class="good">3.00%</strong></span>
+</div>
+<div class="segment-actions"><span>优先经营</span><span>优质 MACC</span><span>LACC 候选</span><span>循环贷候选</span></div>
+</div>
+<div class="segment-card caution">
+<span class="segment-label caution">风险4-5 × 价值1-2</span>
+<div class="segment-identity caution">价值好 × 风险差</div>
+<h3>谨慎经营客群</h3>
+<div class="segment-product"><small>对应产品</small><strong>EWA / 超短期产品</strong></div>
+<p>客户具备一定经营价值，但风险压力已经抬升。不适合直接放大额度或期限，更适合通过短期、小额、即时周转产品承接需求，并控制风险暴露。</p>
+<div class="metric-row">
+<span class="metric-chip"><small>定位</small><strong class="warn">有价值但风险高</strong></span>
+<span class="metric-chip"><small>3M30人数逾期率</small><strong class="warn">12.90%</strong></span>
+</div>
+<div class="segment-actions"><span>短期承接</span><span>小额控制</span><span>即时周转</span><span>风险暴露控制</span></div>
+</div>
+<div class="segment-card neutral">
+<span class="segment-label neutral">风险1-2 × 价值4-5</span>
+<div class="segment-identity neutral">价值差 × 风险好</div>
+<h3>收益验证客群</h3>
+<div class="segment-product"><small>对应产品</small><strong>低额度 Personal Loan</strong></div>
+<p>风险相对可控，但收入、额度承接和转化能力偏弱。不适合作为强经营客群，可通过低额度 Personal Loan 验证稳定需求、复贷表现和真实贡献。</p>
+<div class="metric-row">
+<span class="metric-chip"><small>定位</small><strong>低风险但价值弱</strong></span>
+<span class="metric-chip"><small>观察重点</small><strong>稳定需求 / 复贷 / 真实贡献</strong></span>
+</div>
+<div class="segment-actions"><span>低额度验证</span><span>收益观察</span><span>复贷跟踪</span><span>贡献评估</span></div>
+</div>
+<div class="segment-card danger">
+<span class="segment-label danger">风险4-5 × 价值4-5</span>
+<div class="segment-identity danger">价值差 × 风险差</div>
+<h3>优先风险控制客群</h3>
+<div class="segment-product"><small>对应产品</small><strong>原则上不重点承接</strong></div>
+<p>同时处在高风险、弱价值位置，风险暴露明显。该客群不建议绑定扩展型产品，重点应放在限额、提价、人工审核和谨慎准入。</p>
+<div class="metric-row">
+<span class="metric-chip"><small>样本数</small><strong>77,057</strong></span>
+<span class="metric-chip"><small>样本占比</small><strong>48.85%</strong></span>
+<span class="metric-chip"><small>3M30人数逾期率</small><strong class="bad">22.25%</strong></span>
+<span class="metric-chip"><small>3M30金额逾期率</small><strong class="bad">15.38%</strong></span>
+</div>
+<div class="segment-actions"><span>限额</span><span>提价</span><span>人工审核</span><span>谨慎准入</span></div>
+</div>
+</div>
+<h1 id="c2-二-数据透视表与原始交叉数据">二、数据透视表与原始交叉数据</h1>
+<h2 id="c2-1-价值分箱整体表现透视表">1. 价值分箱整体表现透视表</h2>
+<table class="data-table">
+<thead>
+<tr>
+<th>价值分箱</th><th style="text-align:right">样本数</th><th style="text-align:right">样本占比</th><th style="text-align:right">平均PTI</th><th style="text-align:right">平均申请金额</th><th style="text-align:right">件均总额度</th><th style="text-align:right">平均收入</th><th style="text-align:right">平均gross surplus</th><th style="text-align:right">平均net surplus</th><th style="text-align:right">通过率</th><th style="text-align:right">自动通过率</th><th style="text-align:right">人工通过率</th><th style="text-align:right">成交率</th><th style="text-align:right">3M30人数逾期率</th><th style="text-align:right">1M5人数逾期率</th><th style="text-align:right">3M30金额逾期率</th><th style="text-align:right">1M5金额逾期率</th></tr>
+</thead>
+<tbody>
+<tr>
+<td>价值1</td><td style="text-align:right">13,838</td><td style="text-align:right">8.77%</td><td style="text-align:right">4.93%</td><td style="text-align:right">2,614</td><td style="text-align:right">1,511</td><td style="text-align:right">9,611</td><td style="text-align:right">1,709</td><td style="text-align:right">1,334</td><td style="text-align:right">41.04%</td><td style="text-align:right">13.00%</td><td style="text-align:right">28.04%</td><td style="text-align:right">83.04%</td><td style="text-align:right">7.05%</td><td style="text-align:right">3.91%</td><td style="text-align:right">3.35%</td><td style="text-align:right">5.03%</td></tr>
+<tr>
+<td>价值2</td><td style="text-align:right">16,729</td><td style="text-align:right">10.61%</td><td style="text-align:right">4.91%</td><td style="text-align:right">2,388</td><td style="text-align:right">1,240</td><td style="text-align:right">7,284</td><td style="text-align:right">1,065</td><td style="text-align:right">745</td><td style="text-align:right">34.40%</td><td style="text-align:right">11.22%</td><td style="text-align:right">23.18%</td><td style="text-align:right">84.69%</td><td style="text-align:right">9.46%</td><td style="text-align:right">4.69%</td><td style="text-align:right">5.11%</td><td style="text-align:right">7.05%</td></tr>
+<tr>
+<td>价值3</td><td style="text-align:right">20,966</td><td style="text-align:right">13.29%</td><td style="text-align:right">4.74%</td><td style="text-align:right">2,193</td><td style="text-align:right">1,069</td><td style="text-align:right">6,366</td><td style="text-align:right">891</td><td style="text-align:right">598</td><td style="text-align:right">27.08%</td><td style="text-align:right">8.97%</td><td style="text-align:right">18.11%</td><td style="text-align:right">84.91%</td><td style="text-align:right">10.61%</td><td style="text-align:right">6.13%</td><td style="text-align:right">5.95%</td><td style="text-align:right">7.83%</td></tr>
+<tr>
+<td>价值4</td><td style="text-align:right">26,778</td><td style="text-align:right">16.98%</td><td style="text-align:right">4.39%</td><td style="text-align:right">2,047</td><td style="text-align:right">910</td><td style="text-align:right">5,682</td><td style="text-align:right">1,042</td><td style="text-align:right">761</td><td style="text-align:right">19.97%</td><td style="text-align:right">6.23%</td><td style="text-align:right">13.74%</td><td style="text-align:right">86.24%</td><td style="text-align:right">15.91%</td><td style="text-align:right">8.64%</td><td style="text-align:right">9.10%</td><td style="text-align:right">11.55%</td></tr>
+<tr>
+<td>价值5</td><td style="text-align:right">73,270</td><td style="text-align:right">46.45%</td><td style="text-align:right">3.93%</td><td style="text-align:right">1,703</td><td style="text-align:right">747</td><td style="text-align:right">3,924</td><td style="text-align:right">358</td><td style="text-align:right">84</td><td style="text-align:right">6.57%</td><td style="text-align:right">1.30%</td><td style="text-align:right">5.27%</td><td style="text-align:right">87.05%</td><td style="text-align:right">22.90%</td><td style="text-align:right">12.43%</td><td style="text-align:right">14.13%</td><td style="text-align:right">17.25%</td></tr>
+<tr>
+<td>合计</td><td style="text-align:right">157,741</td><td style="text-align:right">100.00%</td><td style="text-align:right">4.60%</td><td style="text-align:right">1,984</td><td style="text-align:right">1,105</td><td style="text-align:right">5,272</td><td style="text-align:right">691</td><td style="text-align:right">394</td><td style="text-align:right">17.32%</td><td style="text-align:right">5.19%</td><td style="text-align:right">12.12%</td><td style="text-align:right">85.11%</td><td style="text-align:right">13.19%</td><td style="text-align:right">7.04%</td><td style="text-align:right">6.54%</td><td style="text-align:right">8.62%</td></tr>
+</tbody>
+</table>
+<h2 id="c2-2-风险分箱整体表现透视表">2. 风险分箱整体表现透视表</h2>
+<table class="data-table">
+<thead>
+<tr>
+<th>风险分箱</th><th style="text-align:right">样本数</th><th style="text-align:right">样本占比</th><th style="text-align:right">平均PTI</th><th style="text-align:right">平均申请金额</th><th style="text-align:right">件均总额度</th><th style="text-align:right">平均收入</th><th style="text-align:right">平均gross surplus</th><th style="text-align:right">平均net surplus</th><th style="text-align:right">通过率</th><th style="text-align:right">自动通过率</th><th style="text-align:right">人工通过率</th><th style="text-align:right">成交率</th><th style="text-align:right">3M30人数逾期率</th><th style="text-align:right">1M5人数逾期率</th><th style="text-align:right">3M30金额逾期率</th><th style="text-align:right">1M5金额逾期率</th></tr>
+</thead>
+<tbody>
+<tr>
+<td>风险1</td><td style="text-align:right">16,683</td><td style="text-align:right">10.58%</td><td style="text-align:right">5.19%</td><td style="text-align:right">2,365</td><td style="text-align:right">1,459</td><td style="text-align:right">6,443</td><td style="text-align:right">287</td><td style="text-align:right">-43</td><td style="text-align:right">32.91%</td><td style="text-align:right">9.75%</td><td style="text-align:right">23.16%</td><td style="text-align:right">84.10%</td><td style="text-align:right">5.92%</td><td style="text-align:right">2.82%</td><td style="text-align:right">2.61%</td><td style="text-align:right">3.98%</td></tr>
+<tr>
+<td>风险2</td><td style="text-align:right">19,660</td><td style="text-align:right">12.46%</td><td style="text-align:right">4.89%</td><td style="text-align:right">2,209</td><td style="text-align:right">1,187</td><td style="text-align:right">5,894</td><td style="text-align:right">163</td><td style="text-align:right">-147</td><td style="text-align:right">29.12%</td><td style="text-align:right">9.44%</td><td style="text-align:right">19.68%</td><td style="text-align:right">84.66%</td><td style="text-align:right">7.79%</td><td style="text-align:right">4.39%</td><td style="text-align:right">3.79%</td><td style="text-align:right">5.65%</td></tr>
+<tr>
+<td>风险3</td><td style="text-align:right">22,342</td><td style="text-align:right">14.16%</td><td style="text-align:right">4.47%</td><td style="text-align:right">2,096</td><td style="text-align:right">1,012</td><td style="text-align:right">5,541</td><td style="text-align:right">595</td><td style="text-align:right">306</td><td style="text-align:right">26.47%</td><td style="text-align:right">8.73%</td><td style="text-align:right">17.74%</td><td style="text-align:right">84.33%</td><td style="text-align:right">11.70%</td><td style="text-align:right">6.91%</td><td style="text-align:right">6.15%</td><td style="text-align:right">8.56%</td></tr>
+<tr>
+<td>风险4</td><td style="text-align:right">30,660</td><td style="text-align:right">19.44%</td><td style="text-align:right">4.31%</td><td style="text-align:right">1,965</td><td style="text-align:right">913</td><td style="text-align:right">5,261</td><td style="text-align:right">910</td><td style="text-align:right">623</td><td style="text-align:right">17.40%</td><td style="text-align:right">5.80%</td><td style="text-align:right">11.61%</td><td style="text-align:right">84.86%</td><td style="text-align:right">15.16%</td><td style="text-align:right">9.39%</td><td style="text-align:right">9.21%</td><td style="text-align:right">11.72%</td></tr>
+<tr>
+<td>风险5</td><td style="text-align:right">60,891</td><td style="text-align:right">38.60%</td><td style="text-align:right">4.04%</td><td style="text-align:right">1,791</td><td style="text-align:right">923</td><td style="text-align:right">5,138</td><td style="text-align:right">1,048</td><td style="text-align:right">768</td><td style="text-align:right">7.49%</td><td style="text-align:right">1.53%</td><td style="text-align:right">5.96%</td><td style="text-align:right">87.92%</td><td style="text-align:right">22.02%</td><td style="text-align:right">12.27%</td><td style="text-align:right">16.04%</td><td style="text-align:right">18.44%</td></tr>
+<tr>
+<td>合计</td><td style="text-align:right">157,741</td><td style="text-align:right">100.00%</td><td style="text-align:right">4.60%</td><td style="text-align:right">1,984</td><td style="text-align:right">1,105</td><td style="text-align:right">5,272</td><td style="text-align:right">691</td><td style="text-align:right">394</td><td style="text-align:right">17.32%</td><td style="text-align:right">5.19%</td><td style="text-align:right">12.12%</td><td style="text-align:right">85.11%</td><td style="text-align:right">13.19%</td><td style="text-align:right">7.04%</td><td style="text-align:right">6.54%</td><td style="text-align:right">8.62%</td></tr>
+</tbody>
+</table>
+<h2 id="c2-3-原始交叉明细表">3. 原始交叉明细表</h2><p>以下交叉表按指标含义重排，并保留每类指标的唯一版本。所有表格延续横轴为风险分箱、纵轴为价值分箱的展示方式。</p><h3 id="c2-original-样本分布">样本分布</h3><p id="c2-original-申请样本数"><strong>申请样本数</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">6,544</td><td style="text-align:right">3,615</td><td style="text-align:right">1,948</td><td style="text-align:right">1,095</td><td style="text-align:right">527</td><td style="text-align:right">13,838</td></tr><tr><td>价值2</td><td style="text-align:right">4,403</td><td style="text-align:right">4,372</td><td style="text-align:right">3,598</td><td style="text-align:right">2,594</td><td style="text-align:right">1,621</td><td style="text-align:right">16,729</td></tr><tr><td>价值3</td><td style="text-align:right">2,875</td><td style="text-align:right">4,630</td><td style="text-align:right">4,723</td><td style="text-align:right">4,604</td><td style="text-align:right">3,931</td><td style="text-align:right">20,966</td></tr><tr><td>价值4</td><td style="text-align:right">1,851</td><td style="text-align:right">3,823</td><td style="text-align:right">5,259</td><td style="text-align:right">7,037</td><td style="text-align:right">8,500</td><td style="text-align:right">26,778</td></tr><tr><td>价值5</td><td style="text-align:right">985</td><td style="text-align:right">3,193</td><td style="text-align:right">6,782</td><td style="text-align:right">15,285</td><td style="text-align:right">46,235</td><td style="text-align:right">73,270</td></tr><tr><td>合计</td><td style="text-align:right">16,683</td><td style="text-align:right">19,660</td><td style="text-align:right">22,342</td><td style="text-align:right">30,660</td><td style="text-align:right">60,891</td><td style="text-align:right">157,741</td></tr></tbody></table><p id="c2-original-3m30有效观察样本数"><strong>3M30有效观察样本数</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">1,203</td><td style="text-align:right">685</td><td style="text-align:right">350</td><td style="text-align:right">218</td><td style="text-align:right">96</td><td style="text-align:right">2,552</td></tr><tr><td>价值2</td><td style="text-align:right">623</td><td style="text-align:right">680</td><td style="text-align:right">619</td><td style="text-align:right">413</td><td style="text-align:right">265</td><td style="text-align:right">2,601</td></tr><tr><td>价值3</td><td style="text-align:right">299</td><td style="text-align:right">597</td><td style="text-align:right">668</td><td style="text-align:right">638</td><td style="text-align:right">438</td><td style="text-align:right">2,640</td></tr><tr><td>价值4</td><td style="text-align:right">112</td><td style="text-align:right">356</td><td style="text-align:right">578</td><td style="text-align:right">744</td><td style="text-align:right">824</td><td style="text-align:right">2,614</td></tr><tr><td>价值5</td><td style="text-align:right">26</td><td style="text-align:right">120</td><td style="text-align:right">263</td><td style="text-align:right">612</td><td style="text-align:right">1,560</td><td style="text-align:right">2,581</td></tr><tr><td>合计</td><td style="text-align:right">2,263</td><td style="text-align:right">2,438</td><td style="text-align:right">2,478</td><td style="text-align:right">2,625</td><td style="text-align:right">3,183</td><td style="text-align:right">12,989</td></tr></tbody></table><h3 id="c2-original-申请样本-经营与承接指标">申请样本 · 经营与承接指标</h3><p id="c2-original-申请样本-平均pti"><strong>申请样本：平均PTI</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">5.13%</td><td style="text-align:right">4.86%</td><td style="text-align:right">4.58%</td><td style="text-align:right">4.54%</td><td style="text-align:right">4.36%</td><td style="text-align:right">4.93%</td></tr><tr><td>价值2</td><td style="text-align:right">5.22%</td><td style="text-align:right">5.01%</td><td style="text-align:right">4.69%</td><td style="text-align:right">4.56%</td><td style="text-align:right">4.67%</td><td style="text-align:right">4.91%</td></tr><tr><td>价值3</td><td style="text-align:right">5.33%</td><td style="text-align:right">4.87%</td><td style="text-align:right">4.63%</td><td style="text-align:right">4.49%</td><td style="text-align:right">4.50%</td><td style="text-align:right">4.74%</td></tr><tr><td>价值4</td><td style="text-align:right">5.14%</td><td style="text-align:right">4.87%</td><td style="text-align:right">4.26%</td><td style="text-align:right">4.26%</td><td style="text-align:right">4.18%</td><td style="text-align:right">4.39%</td></tr><tr><td>价值5</td><td style="text-align:right">5.07%</td><td style="text-align:right">4.51%</td><td style="text-align:right">4.11%</td><td style="text-align:right">3.98%</td><td style="text-align:right">3.72%</td><td style="text-align:right">3.93%</td></tr><tr><td>合计</td><td style="text-align:right">5.19%</td><td style="text-align:right">4.89%</td><td style="text-align:right">4.47%</td><td style="text-align:right">4.31%</td><td style="text-align:right">4.04%</td><td style="text-align:right">4.60%</td></tr></tbody></table><p id="c2-original-申请样本-平均申请金额"><strong>申请样本：平均申请金额</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">2,588.91</td><td style="text-align:right">2,596.09</td><td style="text-align:right">2,670.40</td><td style="text-align:right">2,714.68</td><td style="text-align:right">2,625.05</td><td style="text-align:right">2,614.34</td></tr><tr><td>价值2</td><td style="text-align:right">2,385.67</td><td style="text-align:right">2,369.70</td><td style="text-align:right">2,350.83</td><td style="text-align:right">2,429.41</td><td style="text-align:right">2,437.56</td><td style="text-align:right">2,388.50</td></tr><tr><td>价值3</td><td style="text-align:right">2,221.89</td><td style="text-align:right">2,170.86</td><td style="text-align:right">2,174.96</td><td style="text-align:right">2,207.56</td><td style="text-align:right">2,203.47</td><td style="text-align:right">2,193.15</td></tr><tr><td>价值4</td><td style="text-align:right">2,063.59</td><td style="text-align:right">2,071.48</td><td style="text-align:right">2,033.04</td><td style="text-align:right">2,049.59</td><td style="text-align:right">2,035.33</td><td style="text-align:right">2,047.16</td></tr><tr><td>价值5</td><td style="text-align:right">1,762.89</td><td style="text-align:right">1,766.84</td><td style="text-align:right">1,788.36</td><td style="text-align:right">1,719.88</td><td style="text-align:right">1,678.40</td><td style="text-align:right">1,703.18</td></tr><tr><td>合计</td><td style="text-align:right">2,365.18</td><td style="text-align:right">2,209.20</td><td style="text-align:right">2,095.99</td><td style="text-align:right">1,965.03</td><td style="text-align:right">1,791.20</td><td style="text-align:right">1,984.10</td></tr></tbody></table><p id="c2-original-申请样本-件均总额度"><strong>申请样本：件均总额度</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">1,626.88</td><td style="text-align:right">1,436.99</td><td style="text-align:right">1,326.28</td><td style="text-align:right">1,347.15</td><td style="text-align:right">1,449.17</td><td style="text-align:right">1,511.18</td></tr><tr><td>价值2</td><td style="text-align:right">1,357.29</td><td style="text-align:right">1,251.73</td><td style="text-align:right">1,136.60</td><td style="text-align:right">1,128.42</td><td style="text-align:right">1,277.57</td><td style="text-align:right">1,239.72</td></tr><tr><td>价值3</td><td style="text-align:right">1,253.35</td><td style="text-align:right">1,074.20</td><td style="text-align:right">1,009.51</td><td style="text-align:right">970.82</td><td style="text-align:right">1,134.62</td><td style="text-align:right">1,068.63</td></tr><tr><td>价值4</td><td style="text-align:right">1,107.44</td><td style="text-align:right">987.53</td><td style="text-align:right">870.72</td><td style="text-align:right">824.45</td><td style="text-align:right">947.39</td><td style="text-align:right">909.91</td></tr><tr><td>价值5</td><td style="text-align:right">973.39</td><td style="text-align:right">802.18</td><td style="text-align:right">745.08</td><td style="text-align:right">698.93</td><td style="text-align:right">760.29</td><td style="text-align:right">747.20</td></tr><tr><td>合计</td><td style="text-align:right">1,459.16</td><td style="text-align:right">1,187.15</td><td style="text-align:right">1,011.81</td><td style="text-align:right">912.93</td><td style="text-align:right">922.74</td><td style="text-align:right">1,105.17</td></tr></tbody></table><p id="c2-original-申请样本-平均收入"><strong>申请样本：平均收入</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">8,351.09</td><td style="text-align:right">9,059.92</td><td style="text-align:right">10,050.63</td><td style="text-align:right">13,479.42</td><td style="text-align:right">19,425.10</td><td style="text-align:right">9,611.45</td></tr><tr><td>价值2</td><td style="text-align:right">6,159.43</td><td style="text-align:right">6,669.10</td><td style="text-align:right">7,216.02</td><td style="text-align:right">8,370.26</td><td style="text-align:right">10,388.78</td><td style="text-align:right">7,284.21</td></tr><tr><td>价值3</td><td style="text-align:right">5,059.43</td><td style="text-align:right">5,581.24</td><td style="text-align:right">6,002.29</td><td style="text-align:right">6,610.18</td><td style="text-align:right">8,395.64</td><td style="text-align:right">6,365.85</td></tr><tr><td>价值4</td><td style="text-align:right">4,208.44</td><td style="text-align:right">4,494.39</td><td style="text-align:right">5,001.28</td><td style="text-align:right">5,514.35</td><td style="text-align:right">7,102.55</td><td style="text-align:right">5,681.64</td></tr><tr><td>价值5</td><td style="text-align:right">3,264.66</td><td style="text-align:right">3,373.50</td><td style="text-align:right">3,451.16</td><td style="text-align:right">3,615.17</td><td style="text-align:right">4,152.63</td><td style="text-align:right">3,924.40</td></tr><tr><td>合计</td><td style="text-align:right">6,442.75</td><td style="text-align:right">5,894.10</td><td style="text-align:right">5,540.59</td><td style="text-align:right">5,261.06</td><td style="text-align:right">5,138.09</td><td style="text-align:right">5,271.98</td></tr></tbody></table><p id="c2-original-申请样本-平均gross-surplus"><strong>申请样本：平均gross surplus</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">587.71</td><td style="text-align:right">783.70</td><td style="text-align:right">2,374.10</td><td style="text-align:right">5,727.67</td><td style="text-align:right">11,020.83</td><td style="text-align:right">1,708.81</td></tr><tr><td>价值2</td><td style="text-align:right">318.88</td><td style="text-align:right">221.08</td><td style="text-align:right">1,134.14</td><td style="text-align:right">2,164.56</td><td style="text-align:right">3,400.49</td><td style="text-align:right">1,065.10</td></tr><tr><td>价值3</td><td style="text-align:right">17.73</td><td style="text-align:right">372.16</td><td style="text-align:right">518.00</td><td style="text-align:right">1,270.51</td><td style="text-align:right">2,106.12</td><td style="text-align:right">891.11</td></tr><tr><td>价值4</td><td style="text-align:right">-49.83</td><td style="text-align:right">178.22</td><td style="text-align:right">494.54</td><td style="text-align:right">1,000.67</td><td style="text-align:right">2,039.66</td><td style="text-align:right">1,041.59</td></tr><tr><td>价值5</td><td style="text-align:right">-424.98</td><td style="text-align:right">-947.71</td><td style="text-align:right">-71.42</td><td style="text-align:right">196.31</td><td style="text-align:right">579.83</td><td style="text-align:right">358.29</td></tr><tr><td>合计</td><td style="text-align:right">287.48</td><td style="text-align:right">162.84</td><td style="text-align:right">594.65</td><td style="text-align:right">910.50</td><td style="text-align:right">1,048.00</td><td style="text-align:right">691.26</td></tr></tbody></table><p id="c2-original-申请样本-平均net-surplus"><strong>申请样本：平均net surplus</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">216.95</td><td style="text-align:right">410.19</td><td style="text-align:right">2,002.47</td><td style="text-align:right">5,333.05</td><td style="text-align:right">10,619.66</td><td style="text-align:right">1,333.55</td></tr><tr><td>价值2</td><td style="text-align:right">2.13</td><td style="text-align:right">-92.57</td><td style="text-align:right">826.31</td><td style="text-align:right">1,834.58</td><td style="text-align:right">3,052.31</td><td style="text-align:right">745.29</td></tr><tr><td>价值3</td><td style="text-align:right">-275.88</td><td style="text-align:right">81.90</td><td style="text-align:right">238.32</td><td style="text-align:right">978.22</td><td style="text-align:right">1,792.00</td><td style="text-align:right">597.67</td></tr><tr><td>价值4</td><td style="text-align:right">-343.75</td><td style="text-align:right">-104.97</td><td style="text-align:right">227.01</td><td style="text-align:right">721.61</td><td style="text-align:right">1,752.21</td><td style="text-align:right">760.52</td></tr><tr><td>价值5</td><td style="text-align:right">-718.56</td><td style="text-align:right">-1,238.29</td><td style="text-align:right">-348.42</td><td style="text-align:right">-78.75</td><td style="text-align:right">308.28</td><td style="text-align:right">84.15</td></tr><tr><td>合计</td><td style="text-align:right">-42.67</td><td style="text-align:right">-146.65</td><td style="text-align:right">306.06</td><td style="text-align:right">622.97</td><td style="text-align:right">768.15</td><td style="text-align:right">393.70</td></tr></tbody></table><h3 id="c2-original-成交样本-经营与承接指标">成交样本 · 经营与承接指标</h3><p id="c2-original-成交样本-平均申请金额"><strong>成交样本：平均申请金额</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">2,492.79</td><td style="text-align:right">2,527.84</td><td style="text-align:right">2,653.44</td><td style="text-align:right">2,769.74</td><td style="text-align:right">2,643.96</td><td style="text-align:right">2,548.83</td></tr><tr><td>价值2</td><td style="text-align:right">2,251.12</td><td style="text-align:right">2,288.15</td><td style="text-align:right">2,250.37</td><td style="text-align:right">2,382.46</td><td style="text-align:right">2,388.27</td><td style="text-align:right">2,293.28</td></tr><tr><td>价值3</td><td style="text-align:right">2,130.29</td><td style="text-align:right">1,984.78</td><td style="text-align:right">2,087.33</td><td style="text-align:right">2,164.22</td><td style="text-align:right">2,315.79</td><td style="text-align:right">2,112.04</td></tr><tr><td>价值4</td><td style="text-align:right">2,005.56</td><td style="text-align:right">2,063.06</td><td style="text-align:right">1,889.47</td><td style="text-align:right">1,910.42</td><td style="text-align:right">2,009.61</td><td style="text-align:right">1,959.36</td></tr><tr><td>价值5</td><td style="text-align:right">1,941.94</td><td style="text-align:right">1,646.91</td><td style="text-align:right">1,816.53</td><td style="text-align:right">1,789.55</td><td style="text-align:right">1,865.57</td><td style="text-align:right">1,818.92</td></tr><tr><td>合计</td><td style="text-align:right">2,337.58</td><td style="text-align:right">2,200.86</td><td style="text-align:right">2,117.21</td><td style="text-align:right">2,076.74</td><td style="text-align:right">2,030.62</td><td style="text-align:right">2,156.22</td></tr></tbody></table><p id="c2-original-成交样本-平均收入"><strong>成交样本：平均收入</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">8,796.07</td><td style="text-align:right">9,138.06</td><td style="text-align:right">9,346.55</td><td style="text-align:right">10,668.83</td><td style="text-align:right">11,175.16</td><td style="text-align:right">9,176.20</td></tr><tr><td>价值2</td><td style="text-align:right">6,582.70</td><td style="text-align:right">6,898.90</td><td style="text-align:right">7,191.06</td><td style="text-align:right">7,826.11</td><td style="text-align:right">8,529.29</td><td style="text-align:right">7,128.55</td></tr><tr><td>价值3</td><td style="text-align:right">5,651.63</td><td style="text-align:right">5,939.73</td><td style="text-align:right">6,129.54</td><td style="text-align:right">6,587.70</td><td style="text-align:right">7,547.01</td><td style="text-align:right">6,284.00</td></tr><tr><td>价值4</td><td style="text-align:right">5,223.95</td><td style="text-align:right">5,198.64</td><td style="text-align:right">5,535.39</td><td style="text-align:right">5,817.02</td><td style="text-align:right">6,412.15</td><td style="text-align:right">5,736.81</td></tr><tr><td>价值5</td><td style="text-align:right">4,492.99</td><td style="text-align:right">4,652.58</td><td style="text-align:right">4,657.94</td><td style="text-align:right">4,925.61</td><td style="text-align:right">5,418.27</td><td style="text-align:right">5,090.20</td></tr><tr><td>合计</td><td style="text-align:right">7,459.23</td><td style="text-align:right">6,828.72</td><td style="text-align:right">6,466.29</td><td style="text-align:right">6,447.58</td><td style="text-align:right">6,392.61</td><td style="text-align:right">6,725.83</td></tr></tbody></table><p id="c2-original-成交样本-平均gross-surplus"><strong>成交样本：平均gross surplus</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">2,028.61</td><td style="text-align:right">2,394.00</td><td style="text-align:right">2,756.77</td><td style="text-align:right">3,965.21</td><td style="text-align:right">4,553.59</td><td style="text-align:right">2,452.75</td></tr><tr><td>价值2</td><td style="text-align:right">1,393.89</td><td style="text-align:right">1,695.55</td><td style="text-align:right">1,977.13</td><td style="text-align:right">2,534.58</td><td style="text-align:right">3,086.00</td><td style="text-align:right">1,894.91</td></tr><tr><td>价值3</td><td style="text-align:right">1,162.79</td><td style="text-align:right">1,375.47</td><td style="text-align:right">1,580.13</td><td style="text-align:right">1,891.41</td><td style="text-align:right">2,399.82</td><td style="text-align:right">1,637.71</td></tr><tr><td>价值4</td><td style="text-align:right">1,100.89</td><td style="text-align:right">1,168.08</td><td style="text-align:right">1,368.97</td><td style="text-align:right">1,678.02</td><td style="text-align:right">1,988.42</td><td style="text-align:right">1,545.35</td></tr><tr><td>价值5</td><td style="text-align:right">888.72</td><td style="text-align:right">1,032.17</td><td style="text-align:right">1,161.45</td><td style="text-align:right">1,345.35</td><td style="text-align:right">1,621.43</td><td style="text-align:right">1,419.05</td></tr><tr><td>合计</td><td style="text-align:right">1,659.68</td><td style="text-align:right">1,670.36</td><td style="text-align:right">1,724.84</td><td style="text-align:right">1,948.15</td><td style="text-align:right">2,029.57</td><td style="text-align:right">1,800.43</td></tr></tbody></table><p id="c2-original-成交样本-平均net-surplus"><strong>成交样本：平均net surplus</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">1,602.39</td><td style="text-align:right">1,980.21</td><td style="text-align:right">2,358.63</td><td style="text-align:right">3,531.84</td><td style="text-align:right">4,106.40</td><td style="text-align:right">2,032.22</td></tr><tr><td>价值2</td><td style="text-align:right">1,069.64</td><td style="text-align:right">1,370.52</td><td style="text-align:right">1,660.97</td><td style="text-align:right">2,200.43</td><td style="text-align:right">2,723.21</td><td style="text-align:right">1,568.16</td></tr><tr><td>价值3</td><td style="text-align:right">875.76</td><td style="text-align:right">1,099.73</td><td style="text-align:right">1,313.17</td><td style="text-align:right">1,616.41</td><td style="text-align:right">2,086.93</td><td style="text-align:right">1,358.43</td></tr><tr><td>价值4</td><td style="text-align:right">845.45</td><td style="text-align:right">927.10</td><td style="text-align:right">1,145.75</td><td style="text-align:right">1,446.75</td><td style="text-align:right">1,738.43</td><td style="text-align:right">1,308.91</td></tr><tr><td>价值5</td><td style="text-align:right">674.40</td><td style="text-align:right">835.56</td><td style="text-align:right">979.01</td><td style="text-align:right">1,161.22</td><td style="text-align:right">1,432.11</td><td style="text-align:right">1,231.61</td></tr><tr><td>合计</td><td style="text-align:right">1,294.81</td><td style="text-align:right">1,355.75</td><td style="text-align:right">1,450.93</td><td style="text-align:right">1,687.52</td><td style="text-align:right">1,785.77</td><td style="text-align:right">1,507.53</td></tr></tbody></table><h3 id="c2-original-风险表现">风险表现</h3><p id="c2-original-3m30人数逾期率"><strong>3M30人数逾期率</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">5.74%</td><td style="text-align:right">5.99%</td><td style="text-align:right">10.57%</td><td style="text-align:right">10.55%</td><td style="text-align:right">10.42%</td><td style="text-align:right">7.05%</td></tr><tr><td>价值2</td><td style="text-align:right">5.46%</td><td style="text-align:right">8.38%</td><td style="text-align:right">9.69%</td><td style="text-align:right">13.80%</td><td style="text-align:right">14.34%</td><td style="text-align:right">9.46%</td></tr><tr><td>价值3</td><td style="text-align:right">6.35%</td><td style="text-align:right">8.38%</td><td style="text-align:right">10.78%</td><td style="text-align:right">11.76%</td><td style="text-align:right">14.61%</td><td style="text-align:right">10.61%</td></tr><tr><td>价值4</td><td style="text-align:right">8.04%</td><td style="text-align:right">8.15%</td><td style="text-align:right">14.88%</td><td style="text-align:right">16.80%</td><td style="text-align:right">20.27%</td><td style="text-align:right">15.91%</td></tr><tr><td>价值5</td><td style="text-align:right">11.54%</td><td style="text-align:right">10.83%</td><td style="text-align:right">13.31%</td><td style="text-align:right">19.28%</td><td style="text-align:right">27.05%</td><td style="text-align:right">22.90%</td></tr><tr><td>合计</td><td style="text-align:right">5.92%</td><td style="text-align:right">7.79%</td><td style="text-align:right">11.70%</td><td style="text-align:right">15.16%</td><td style="text-align:right">22.02%</td><td style="text-align:right">13.19%</td></tr></tbody></table><p id="c2-original-3m30金额逾期率"><strong>3M30金额逾期率</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">2.62%</td><td style="text-align:right">2.95%</td><td style="text-align:right">5.31%</td><td style="text-align:right">5.91%</td><td style="text-align:right">7.96%</td><td style="text-align:right">3.35%</td></tr><tr><td>价值2</td><td style="text-align:right">2.48%</td><td style="text-align:right">4.45%</td><td style="text-align:right">5.66%</td><td style="text-align:right">8.65%</td><td style="text-align:right">11.52%</td><td style="text-align:right">5.11%</td></tr><tr><td>价值3</td><td style="text-align:right">2.85%</td><td style="text-align:right">3.72%</td><td style="text-align:right">6.47%</td><td style="text-align:right">8.28%</td><td style="text-align:right">10.38%</td><td style="text-align:right">5.95%</td></tr><tr><td>价值4</td><td style="text-align:right">2.07%</td><td style="text-align:right">4.45%</td><td style="text-align:right">7.26%</td><td style="text-align:right">10.59%</td><td style="text-align:right">15.71%</td><td style="text-align:right">9.10%</td></tr><tr><td>价值5</td><td style="text-align:right">5.21%</td><td style="text-align:right">3.89%</td><td style="text-align:right">5.83%</td><td style="text-align:right">11.08%</td><td style="text-align:right">20.82%</td><td style="text-align:right">14.13%</td></tr><tr><td>合计</td><td style="text-align:right">2.61%</td><td style="text-align:right">3.79%</td><td style="text-align:right">6.15%</td><td style="text-align:right">9.21%</td><td style="text-align:right">16.04%</td><td style="text-align:right">6.54%</td></tr></tbody></table><h3 id="c2-original-申请审批与成交">申请审批与成交</h3><p id="c2-original-审批通过数"><strong>审批通过数</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">2,798</td><td style="text-align:right">1,488</td><td style="text-align:right">793</td><td style="text-align:right">414</td><td style="text-align:right">142</td><td style="text-align:right">5,679</td></tr><tr><td>价值2</td><td style="text-align:right">1,524</td><td style="text-align:right">1,579</td><td style="text-align:right">1,406</td><td style="text-align:right">818</td><td style="text-align:right">370</td><td style="text-align:right">5,755</td></tr><tr><td>价值3</td><td style="text-align:right">761</td><td style="text-align:right">1,421</td><td style="text-align:right">1,516</td><td style="text-align:right">1,276</td><td style="text-align:right">647</td><td style="text-align:right">5,678</td></tr><tr><td>价值4</td><td style="text-align:right">329</td><td style="text-align:right">896</td><td style="text-align:right">1,411</td><td style="text-align:right">1,482</td><td style="text-align:right">1,170</td><td style="text-align:right">5,347</td></tr><tr><td>价值5</td><td style="text-align:right">69</td><td style="text-align:right">328</td><td style="text-align:right">779</td><td style="text-align:right">1,337</td><td style="text-align:right">2,231</td><td style="text-align:right">4,811</td></tr><tr><td>合计</td><td style="text-align:right">5,491</td><td style="text-align:right">5,725</td><td style="text-align:right">5,914</td><td style="text-align:right">5,336</td><td style="text-align:right">4,560</td><td style="text-align:right">27,313</td></tr></tbody></table><p id="c2-original-自动通过数"><strong>自动通过数</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">838</td><td style="text-align:right">492</td><td style="text-align:right">259</td><td style="text-align:right">151</td><td style="text-align:right">45</td><td style="text-align:right">1,799</td></tr><tr><td>价值2</td><td style="text-align:right">462</td><td style="text-align:right">536</td><td style="text-align:right">464</td><td style="text-align:right">294</td><td style="text-align:right">108</td><td style="text-align:right">1,877</td></tr><tr><td>价值3</td><td style="text-align:right">226</td><td style="text-align:right">470</td><td style="text-align:right">544</td><td style="text-align:right">435</td><td style="text-align:right">197</td><td style="text-align:right">1,881</td></tr><tr><td>价值4</td><td style="text-align:right">86</td><td style="text-align:right">274</td><td style="text-align:right">460</td><td style="text-align:right">545</td><td style="text-align:right">295</td><td style="text-align:right">1,668</td></tr><tr><td>价值5</td><td style="text-align:right">11</td><td style="text-align:right">79</td><td style="text-align:right">222</td><td style="text-align:right">347</td><td style="text-align:right">286</td><td style="text-align:right">949</td></tr><tr><td>合计</td><td style="text-align:right">1,627</td><td style="text-align:right">1,855</td><td style="text-align:right">1,951</td><td style="text-align:right">1,777</td><td style="text-align:right">931</td><td style="text-align:right">8,189</td></tr></tbody></table><p id="c2-original-人工通过数"><strong>人工通过数</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">1,960</td><td style="text-align:right">996</td><td style="text-align:right">534</td><td style="text-align:right">263</td><td style="text-align:right">97</td><td style="text-align:right">3,880</td></tr><tr><td>价值2</td><td style="text-align:right">1,062</td><td style="text-align:right">1,043</td><td style="text-align:right">942</td><td style="text-align:right">1,024</td><td style="text-align:right">262</td><td style="text-align:right">3,878</td></tr><tr><td>价值3</td><td style="text-align:right">535</td><td style="text-align:right">951</td><td style="text-align:right">972</td><td style="text-align:right">841</td><td style="text-align:right">450</td><td style="text-align:right">3,797</td></tr><tr><td>价值4</td><td style="text-align:right">243</td><td style="text-align:right">622</td><td style="text-align:right">951</td><td style="text-align:right">937</td><td style="text-align:right">875</td><td style="text-align:right">3,679</td></tr><tr><td>价值5</td><td style="text-align:right">58</td><td style="text-align:right">249</td><td style="text-align:right">557</td><td style="text-align:right">990</td><td style="text-align:right">1,945</td><td style="text-align:right">3,862</td></tr><tr><td>合计</td><td style="text-align:right">3,864</td><td style="text-align:right">3,870</td><td style="text-align:right">3,963</td><td style="text-align:right">3,559</td><td style="text-align:right">3,629</td><td style="text-align:right">19,124</td></tr></tbody></table><p id="c2-original-成交样本数"><strong>成交样本数</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">2,326</td><td style="text-align:right">1,225</td><td style="text-align:right">662</td><td style="text-align:right">342</td><td style="text-align:right">120</td><td style="text-align:right">4,716</td></tr><tr><td>价值2</td><td style="text-align:right">1,295</td><td style="text-align:right">1,356</td><td style="text-align:right">1,159</td><td style="text-align:right">694</td><td style="text-align:right">321</td><td style="text-align:right">4,874</td></tr><tr><td>价值3</td><td style="text-align:right">647</td><td style="text-align:right">1,220</td><td style="text-align:right">1,279</td><td style="text-align:right">1,064</td><td style="text-align:right">559</td><td style="text-align:right">4,821</td></tr><tr><td>价值4</td><td style="text-align:right">279</td><td style="text-align:right">762</td><td style="text-align:right">1,208</td><td style="text-align:right">1,279</td><td style="text-align:right">1,033</td><td style="text-align:right">4,611</td></tr><tr><td>价值5</td><td style="text-align:right">62</td><td style="text-align:right">275</td><td style="text-align:right">670</td><td style="text-align:right">1,143</td><td style="text-align:right">1,976</td><td style="text-align:right">4,188</td></tr><tr><td>合计</td><td style="text-align:right">4,618</td><td style="text-align:right">4,847</td><td style="text-align:right">4,987</td><td style="text-align:right">4,528</td><td style="text-align:right">4,009</td><td style="text-align:right">23,245</td></tr></tbody></table><p id="c2-original-通过率"><strong>通过率</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">42.76%</td><td style="text-align:right">41.16%</td><td style="text-align:right">40.71%</td><td style="text-align:right">37.81%</td><td style="text-align:right">26.94%</td><td style="text-align:right">41.04%</td></tr><tr><td>价值2</td><td style="text-align:right">34.61%</td><td style="text-align:right">36.12%</td><td style="text-align:right">39.08%</td><td style="text-align:right">31.53%</td><td style="text-align:right">22.83%</td><td style="text-align:right">34.40%</td></tr><tr><td>价值3</td><td style="text-align:right">26.47%</td><td style="text-align:right">30.69%</td><td style="text-align:right">32.10%</td><td style="text-align:right">27.72%</td><td style="text-align:right">16.46%</td><td style="text-align:right">27.08%</td></tr><tr><td>价值4</td><td style="text-align:right">17.77%</td><td style="text-align:right">23.44%</td><td style="text-align:right">26.83%</td><td style="text-align:right">21.06%</td><td style="text-align:right">13.76%</td><td style="text-align:right">19.97%</td></tr><tr><td>价值5</td><td style="text-align:right">7.01%</td><td style="text-align:right">10.27%</td><td style="text-align:right">11.49%</td><td style="text-align:right">8.75%</td><td style="text-align:right">4.83%</td><td style="text-align:right">6.57%</td></tr><tr><td>合计</td><td style="text-align:right">32.91%</td><td style="text-align:right">29.12%</td><td style="text-align:right">26.47%</td><td style="text-align:right">17.40%</td><td style="text-align:right">7.49%</td><td style="text-align:right">17.32%</td></tr></tbody></table><p id="c2-original-自动通过率"><strong>自动通过率</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">12.81%</td><td style="text-align:right">13.61%</td><td style="text-align:right">13.30%</td><td style="text-align:right">13.79%</td><td style="text-align:right">8.54%</td><td style="text-align:right">13.00%</td></tr><tr><td>价值2</td><td style="text-align:right">10.49%</td><td style="text-align:right">12.26%</td><td style="text-align:right">12.90%</td><td style="text-align:right">11.33%</td><td style="text-align:right">6.66%</td><td style="text-align:right">11.22%</td></tr><tr><td>价值3</td><td style="text-align:right">7.86%</td><td style="text-align:right">10.15%</td><td style="text-align:right">11.52%</td><td style="text-align:right">9.45%</td><td style="text-align:right">5.01%</td><td style="text-align:right">8.97%</td></tr><tr><td>价值4</td><td style="text-align:right">4.65%</td><td style="text-align:right">7.17%</td><td style="text-align:right">8.75%</td><td style="text-align:right">7.74%</td><td style="text-align:right">3.47%</td><td style="text-align:right">6.23%</td></tr><tr><td>价值5</td><td style="text-align:right">1.12%</td><td style="text-align:right">2.47%</td><td style="text-align:right">3.27%</td><td style="text-align:right">2.27%</td><td style="text-align:right">0.62%</td><td style="text-align:right">1.30%</td></tr><tr><td>合计</td><td style="text-align:right">9.75%</td><td style="text-align:right">9.44%</td><td style="text-align:right">8.73%</td><td style="text-align:right">5.80%</td><td style="text-align:right">1.53%</td><td style="text-align:right">5.19%</td></tr></tbody></table><p id="c2-original-人工通过率"><strong>人工通过率</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">29.95%</td><td style="text-align:right">27.55%</td><td style="text-align:right">27.41%</td><td style="text-align:right">24.02%</td><td style="text-align:right">18.41%</td><td style="text-align:right">28.04%</td></tr><tr><td>价值2</td><td style="text-align:right">24.12%</td><td style="text-align:right">23.86%</td><td style="text-align:right">26.18%</td><td style="text-align:right">20.20%</td><td style="text-align:right">16.16%</td><td style="text-align:right">23.18%</td></tr><tr><td>价值3</td><td style="text-align:right">18.61%</td><td style="text-align:right">20.54%</td><td style="text-align:right">20.58%</td><td style="text-align:right">18.27%</td><td style="text-align:right">11.45%</td><td style="text-align:right">18.11%</td></tr><tr><td>价值4</td><td style="text-align:right">13.13%</td><td style="text-align:right">16.27%</td><td style="text-align:right">18.08%</td><td style="text-align:right">13.32%</td><td style="text-align:right">10.29%</td><td style="text-align:right">13.74%</td></tr><tr><td>价值5</td><td style="text-align:right">5.89%</td><td style="text-align:right">7.80%</td><td style="text-align:right">8.21%</td><td style="text-align:right">6.48%</td><td style="text-align:right">4.21%</td><td style="text-align:right">5.27%</td></tr><tr><td>合计</td><td style="text-align:right">23.16%</td><td style="text-align:right">19.68%</td><td style="text-align:right">17.74%</td><td style="text-align:right">11.61%</td><td style="text-align:right">5.96%</td><td style="text-align:right">12.12%</td></tr></tbody></table><p id="c2-original-自动通过占比"><strong>自动通过占比</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">29.95%</td><td style="text-align:right">33.06%</td><td style="text-align:right">32.66%</td><td style="text-align:right">36.47%</td><td style="text-align:right">31.69%</td><td style="text-align:right">31.68%</td></tr><tr><td>价值2</td><td style="text-align:right">30.31%</td><td style="text-align:right">33.95%</td><td style="text-align:right">33.00%</td><td style="text-align:right">35.91%</td><td style="text-align:right">29.19%</td><td style="text-align:right">32.62%</td></tr><tr><td>价值3</td><td style="text-align:right">29.70%</td><td style="text-align:right">33.08%</td><td style="text-align:right">35.88%</td><td style="text-align:right">34.09%</td><td style="text-align:right">30.45%</td><td style="text-align:right">33.13%</td></tr><tr><td>价值4</td><td style="text-align:right">26.14%</td><td style="text-align:right">30.58%</td><td style="text-align:right">32.60%</td><td style="text-align:right">36.77%</td><td style="text-align:right">25.21%</td><td style="text-align:right">31.20%</td></tr><tr><td>价值5</td><td style="text-align:right">15.94%</td><td style="text-align:right">24.09%</td><td style="text-align:right">28.50%</td><td style="text-align:right">25.95%</td><td style="text-align:right">12.82%</td><td style="text-align:right">19.73%</td></tr><tr><td>合计</td><td style="text-align:right">29.63%</td><td style="text-align:right">32.40%</td><td style="text-align:right">32.99%</td><td style="text-align:right">33.30%</td><td style="text-align:right">20.42%</td><td style="text-align:right">29.98%</td></tr></tbody></table><p id="c2-original-人工通过占比"><strong>人工通过占比</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">70.05%</td><td style="text-align:right">66.94%</td><td style="text-align:right">67.34%</td><td style="text-align:right">63.53%</td><td style="text-align:right">68.31%</td><td style="text-align:right">68.32%</td></tr><tr><td>价值2</td><td style="text-align:right">69.69%</td><td style="text-align:right">66.05%</td><td style="text-align:right">67.00%</td><td style="text-align:right">64.09%</td><td style="text-align:right">70.81%</td><td style="text-align:right">67.38%</td></tr><tr><td>价值3</td><td style="text-align:right">70.30%</td><td style="text-align:right">66.92%</td><td style="text-align:right">64.12%</td><td style="text-align:right">65.91%</td><td style="text-align:right">69.55%</td><td style="text-align:right">66.87%</td></tr><tr><td>价值4</td><td style="text-align:right">73.86%</td><td style="text-align:right">69.42%</td><td style="text-align:right">67.40%</td><td style="text-align:right">63.23%</td><td style="text-align:right">74.79%</td><td style="text-align:right">68.80%</td></tr><tr><td>价值5</td><td style="text-align:right">84.06%</td><td style="text-align:right">75.91%</td><td style="text-align:right">71.50%</td><td style="text-align:right">74.05%</td><td style="text-align:right">87.18%</td><td style="text-align:right">80.27%</td></tr><tr><td>合计</td><td style="text-align:right">70.37%</td><td style="text-align:right">67.60%</td><td style="text-align:right">67.01%</td><td style="text-align:right">66.70%</td><td style="text-align:right">79.58%</td><td style="text-align:right">70.02%</td></tr></tbody></table><p id="c2-original-成交率"><strong>成交率</strong></p><table class="data-table"><thead><tr><th>价值分箱 \ 风险分箱</th><th style="text-align:right">风险1</th><th style="text-align:right">风险2</th><th style="text-align:right">风险3</th><th style="text-align:right">风险4</th><th style="text-align:right">风险5</th><th style="text-align:right">合计</th></tr></thead><tbody><tr><td>价值1</td><td style="text-align:right">83.13%</td><td style="text-align:right">82.33%</td><td style="text-align:right">83.48%</td><td style="text-align:right">82.61%</td><td style="text-align:right">84.51%</td><td style="text-align:right">83.04%</td></tr><tr><td>价值2</td><td style="text-align:right">84.97%</td><td style="text-align:right">85.88%</td><td style="text-align:right">82.43%</td><td style="text-align:right">84.84%</td><td style="text-align:right">86.76%</td><td style="text-align:right">84.69%</td></tr><tr><td>价值3</td><td style="text-align:right">85.02%</td><td style="text-align:right">85.86%</td><td style="text-align:right">84.37%</td><td style="text-align:right">83.39%</td><td style="text-align:right">86.40%</td><td style="text-align:right">84.91%</td></tr><tr><td>价值4</td><td style="text-align:right">84.80%</td><td style="text-align:right">85.04%</td><td style="text-align:right">85.61%</td><td style="text-align:right">86.30%</td><td style="text-align:right">88.29%</td><td style="text-align:right">86.24%</td></tr><tr><td>价值5</td><td style="text-align:right">89.86%</td><td style="text-align:right">83.84%</td><td style="text-align:right">86.01%</td><td style="text-align:right">85.49%</td><td style="text-align:right">88.57%</td><td style="text-align:right">87.05%</td></tr><tr><td>合计</td><td style="text-align:right">84.10%</td><td style="text-align:right">84.66%</td><td style="text-align:right">84.33%</td><td style="text-align:right">84.86%</td><td style="text-align:right">87.92%</td><td style="text-align:right">85.11%</td></tr></tbody></table></div>
+</section><section class="chapter-card" id="chapter-2">
+<div class="chapter-kicker">Chapter 02</div>
+<div class="chapter-title-row">
+<h2>价值分箱画像</h2>
+</div>
+<div class="markdown-body">
+<h1 id="c3-价值模型分箱画像分析">价值模型分箱画像分析</h1>
+<blockquote>
+<p>基于 <code>model_bin_feature_mean_profile.xlsx</code> 与 <code>model_bin_user_profile_pivot.xlsx</code>。本文档只保留有整体趋势或关键交叉差异支撑的画像；波动较大或存在明显缺失污染的特征不作为核心画像依据。</p>
+</blockquote>
+<h2 id="c3-1-核心结论摘要">1. 核心结论摘要</h2>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:left">人群</th>
+<th style="text-align:left">核心画像</th>
+<th style="text-align:left">主要支撑特征</th>
+<th style="text-align:left">业务解释</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">价值好（Bin 1/2）</td>
+<td style="text-align:left">高工资/高收入、主行业入账高、工资入账更连续、Centrelink占比低、伴侣/稳定渠道占比更高</td>
+<td style="text-align:left">工资收入、总收入、工资次数、主行业入账金额、Centrelink占比、single/couple、Lead Partner/Owned Channels</td>
+<td style="text-align:left">价值好主要由收入体量、工资连续性和职业/渠道稳定性解释，不是单一某个格子的异常。</td>
+</tr>
+<tr>
+<td style="text-align:left">价值差（Bin 4/5）</td>
+<td style="text-align:left">收入低、工资频次低、发薪周期波动高、Centrelink占比高、single占比高、行业Missing占比高</td>
+<td style="text-align:left">工资收入、总收入、工资次数、发薪周期std、Centrelink占比、single、行业Missing</td>
+<td style="text-align:left">价值差更像“收入和可识别职业现金流弱”，当前数据不支持简单归因为负债更重或多头更多。</td>
+</tr>
+<tr>
+<td style="text-align:left">价值好 &amp; 风险差</td>
+<td style="text-align:left">收入/资金体量不错，但支出、赌博、余额波动、收入波动更高</td>
+<td style="text-align:left">总收入、工资收入、总支出、赌博金额/占比、余额std、余额异常天数、收入CV</td>
+<td style="text-align:left">这是典型错配：价值好体现在收入端，风险差更多体现在资金波动、消费风险偏好和账户异常。</td>
+</tr>
+<tr>
+<td style="text-align:left">价值差 &amp; 风险好</td>
+<td style="text-align:left">收入一般/偏低，但支出更保守、赌博低、余额波动较小、还款活动相对更好</td>
+<td style="text-align:left">工资收入、总收入、总支出、赌博占比、余额std、信贷还款金额/次数</td>
+<td style="text-align:left">风险好不是因为高收入，而可能来自低支出、低波动、较保守行为和更可控的还款表现。</td>
+</tr>
+</tbody>
+</table>
+<h2 id="c3-2-价值好人群画像">2. 价值好人群画像</h2>
+<h3 id="c3-2-1-结论">2.1 结论</h3>
+<p>价值好人群的核心画像是：<strong>工资/收入体量高、工资现金流更连续、职业主收入更强、Centrelink收入占比低、发薪周期更稳定、家庭/渠道结构相对更稳定</strong>。这些特征在价值 Bin 1→5 上呈现较稳定的整体趋势，能够解释“价值好”。</p>
+<h3 id="c3-2-2-数值特征支撑表">2.2 数值特征支撑表</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:left">特征</th>
+<th style="text-align:left">Bin1</th>
+<th style="text-align:left">Bin2</th>
+<th style="text-align:left">Bin3</th>
+<th style="text-align:left">Bin4</th>
+<th style="text-align:left">Bin5</th>
+<th style="text-align:left">1/2均值</th>
+<th style="text-align:left">4/5均值</th>
+<th style="text-align:left">方向</th>
+<th style="text-align:left">趋势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">工资收入总额</td>
+<td style="text-align:left">51,630</td>
+<td style="text-align:left">30,647</td>
+<td style="text-align:left">22,884</td>
+<td style="text-align:left">15,939</td>
+<td style="text-align:left">6,320</td>
+<td style="text-align:left">41,139</td>
+<td style="text-align:left">11,130</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">总收入金额</td>
+<td style="text-align:left">171,204</td>
+<td style="text-align:left">110,410</td>
+<td style="text-align:left">89,127</td>
+<td style="text-align:left">72,545</td>
+<td style="text-align:left">46,997</td>
+<td style="text-align:left">140,807</td>
+<td style="text-align:left">59,771</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">工资入账次数</td>
+<td style="text-align:left">22.8</td>
+<td style="text-align:left">18.2</td>
+<td style="text-align:left">16.0</td>
+<td style="text-align:left">13.3</td>
+<td style="text-align:left">7.24</td>
+<td style="text-align:left">20.5</td>
+<td style="text-align:left">10.6</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">Centrelink收入占比</td>
+<td style="text-align:left">1.5%</td>
+<td style="text-align:left">2.7%</td>
+<td style="text-align:left">5.1%</td>
+<td style="text-align:left">10.9%</td>
+<td style="text-align:left">32.9%</td>
+<td style="text-align:left">2.1%</td>
+<td style="text-align:left">14.6%</td>
+<td style="text-align:left">随价值变差上升</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">主行业入账金额</td>
+<td style="text-align:left">49,806</td>
+<td style="text-align:left">32,026</td>
+<td style="text-align:left">25,788</td>
+<td style="text-align:left">20,026</td>
+<td style="text-align:left">12,107</td>
+<td style="text-align:left">40,916</td>
+<td style="text-align:left">16,067</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">发薪周期标准差</td>
+<td style="text-align:left">2.69</td>
+<td style="text-align:left">2.75</td>
+<td style="text-align:left">2.76</td>
+<td style="text-align:left">3.18</td>
+<td style="text-align:left">4.39</td>
+<td style="text-align:left">2.72</td>
+<td style="text-align:left">3.79</td>
+<td style="text-align:left">随价值变差上升</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">总支出金额</td>
+<td style="text-align:left">170,486</td>
+<td style="text-align:left">108,943</td>
+<td style="text-align:left">87,763</td>
+<td style="text-align:left">71,286</td>
+<td style="text-align:left">45,920</td>
+<td style="text-align:left">139,715</td>
+<td style="text-align:left">58,603</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">信贷还款金额</td>
+<td style="text-align:left">24,602</td>
+<td style="text-align:left">16,276</td>
+<td style="text-align:left">12,348</td>
+<td style="text-align:left">8,081</td>
+<td style="text-align:left">3,845</td>
+<td style="text-align:left">20,439</td>
+<td style="text-align:left">5,963</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">贷款还款次数</td>
+<td style="text-align:left">31.5</td>
+<td style="text-align:left">27.4</td>
+<td style="text-align:left">23.9</td>
+<td style="text-align:left">17.2</td>
+<td style="text-align:left">9.85</td>
+<td style="text-align:left">29.4</td>
+<td style="text-align:left">13.5</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">平均年龄</td>
+<td style="text-align:left">38.4</td>
+<td style="text-align:left">36.8</td>
+<td style="text-align:left">36.2</td>
+<td style="text-align:left">35.7</td>
+<td style="text-align:left">34.9</td>
+<td style="text-align:left">37.6</td>
+<td style="text-align:left">35.3</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c3-2-3-基础-渠道-职业分布支撑表">2.3 基础/渠道/职业分布支撑表</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:left">画像维度</th>
+<th style="text-align:left">Bin1</th>
+<th style="text-align:left">Bin2</th>
+<th style="text-align:left">Bin3</th>
+<th style="text-align:left">Bin4</th>
+<th style="text-align:left">Bin5</th>
+<th style="text-align:left">1/2均值</th>
+<th style="text-align:left">4/5均值</th>
+<th style="text-align:left">方向</th>
+<th style="text-align:left">趋势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">家庭类型：single</td>
+<td style="text-align:left">53.1%</td>
+<td style="text-align:left">59.2%</td>
+<td style="text-align:left">61.9%</td>
+<td style="text-align:left">65.9%</td>
+<td style="text-align:left">76.0%</td>
+<td style="text-align:left">56.2%</td>
+<td style="text-align:left">70.9%</td>
+<td style="text-align:left">随价值变差上升</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">家庭类型：couple</td>
+<td style="text-align:left">46.9%</td>
+<td style="text-align:left">40.8%</td>
+<td style="text-align:left">38.1%</td>
+<td style="text-align:left">34.1%</td>
+<td style="text-align:left">24.0%</td>
+<td style="text-align:left">43.8%</td>
+<td style="text-align:left">29.1%</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">渠道：Google</td>
+<td style="text-align:left">48.7%</td>
+<td style="text-align:left">50.1%</td>
+<td style="text-align:left">50.8%</td>
+<td style="text-align:left">53.6%</td>
+<td style="text-align:left">61.2%</td>
+<td style="text-align:left">49.4%</td>
+<td style="text-align:left">57.4%</td>
+<td style="text-align:left">随价值变差上升</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">渠道：Organic</td>
+<td style="text-align:left">17.1%</td>
+<td style="text-align:left">18.2%</td>
+<td style="text-align:left">19.9%</td>
+<td style="text-align:left">21.1%</td>
+<td style="text-align:left">21.9%</td>
+<td style="text-align:left">17.7%</td>
+<td style="text-align:left">21.5%</td>
+<td style="text-align:left">随价值变差上升</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">渠道：Lead Partner</td>
+<td style="text-align:left">19.8%</td>
+<td style="text-align:left">18.9%</td>
+<td style="text-align:left">17.6%</td>
+<td style="text-align:left">15.1%</td>
+<td style="text-align:left">8.2%</td>
+<td style="text-align:left">19.3%</td>
+<td style="text-align:left">11.6%</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">渠道：Owned Channels</td>
+<td style="text-align:left">12.6%</td>
+<td style="text-align:left">11.1%</td>
+<td style="text-align:left">10.1%</td>
+<td style="text-align:left">8.7%</td>
+<td style="text-align:left">7.2%</td>
+<td style="text-align:left">11.8%</td>
+<td style="text-align:left">7.9%</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">行业：Missing</td>
+<td style="text-align:left">1.4%</td>
+<td style="text-align:left">5.6%</td>
+<td style="text-align:left">10.1%</td>
+<td style="text-align:left">17.1%</td>
+<td style="text-align:left">44.3%</td>
+<td style="text-align:left">3.5%</td>
+<td style="text-align:left">30.7%</td>
+<td style="text-align:left">随价值变差上升</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">行业：Government/Public Administration</td>
+<td style="text-align:left">8.7%</td>
+<td style="text-align:left">7.5%</td>
+<td style="text-align:left">6.7%</td>
+<td style="text-align:left">5.7%</td>
+<td style="text-align:left">3.5%</td>
+<td style="text-align:left">8.1%</td>
+<td style="text-align:left">4.6%</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">行业：Construction</td>
+<td style="text-align:left">6.6%</td>
+<td style="text-align:left">5.7%</td>
+<td style="text-align:left">5.2%</td>
+<td style="text-align:left">4.7%</td>
+<td style="text-align:left">2.7%</td>
+<td style="text-align:left">6.1%</td>
+<td style="text-align:left">3.7%</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+<tr>
+<td style="text-align:left">行业：Health Care/Social Assistance</td>
+<td style="text-align:left">4.6%</td>
+<td style="text-align:left">3.9%</td>
+<td style="text-align:left">3.6%</td>
+<td style="text-align:left">3.1%</td>
+<td style="text-align:left">1.7%</td>
+<td style="text-align:left">4.2%</td>
+<td style="text-align:left">2.4%</td>
+<td style="text-align:left">随价值变差下降</td>
+<td style="text-align:left">稳定</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c3-2-4-业务解释">2.4 业务解释</h3>
+<ul>
+<li>价值好不是单纯“风险低”，而是收入端和现金流端更强：工资收入总额、总收入金额、工资入账次数、主行业入账金额均随价值变差明显下降。</li>
+<li>价值好人群的收入结构更偏工资/主业，Centrelink占比低；价值差人群的Centrelink占比随分箱变差显著上升。</li>
+<li>家庭和渠道结构上，价值好人群中 couple、Lead Partner、Owned Channels 占比更高；价值差人群 single、Google、Organic 占比更高。该部分是结构画像，不直接作为风险因果。</li>
+</ul>
+<h2 id="c3-3-价值差人群画像">3. 价值差人群画像</h2>
+<h3 id="c3-3-1-结论">3.1 结论</h3>
+<p>价值差人群相对价值好人群，主要短板集中在：<strong>收入更低、工资入账更少、主行业入账弱、发薪周期更不稳定、Centrelink收入占比更高、职业/行业信息Missing占比更高</strong>。<br/>
+但从当前文件看，不能简单下结论说“价值差=负债更重/多头更多”。信贷还款金额、还款次数、信贷放款金额等反而随价值变差下降，更像整体资金体量和信贷活动规模较低。</p>
+<h3 id="c3-3-2-价值好-vs-价值差对比表">3.2 价值好 vs 价值差对比表</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:left">特征</th>
+<th style="text-align:left">价值好(1/2)</th>
+<th style="text-align:left">价值差(4/5)</th>
+<th style="text-align:left">风险好(1/2)</th>
+<th style="text-align:left">风险差(4/5)</th>
+<th style="text-align:left">差异方向</th>
+<th style="text-align:left">趋势稳定</th>
+<th style="text-align:left">画像解释</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">工资收入总额</td>
+<td style="text-align:left">41,139</td>
+<td style="text-align:left">11,130</td>
+<td style="text-align:left">20,922</td>
+<td style="text-align:left">30,752</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差的工资收入明显更低，是核心短板。</td>
+</tr>
+<tr>
+<td style="text-align:left">总收入金额</td>
+<td style="text-align:left">140,807</td>
+<td style="text-align:left">59,771</td>
+<td style="text-align:left">70,151</td>
+<td style="text-align:left">129,605</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差整体收入体量更低。</td>
+</tr>
+<tr>
+<td style="text-align:left">工资入账次数</td>
+<td style="text-align:left">20.5</td>
+<td style="text-align:left">10.6</td>
+<td style="text-align:left">13.7</td>
+<td style="text-align:left">18.4</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差工资入账频次更低，现金流连续性较弱。</td>
+</tr>
+<tr>
+<td style="text-align:left">Centrelink收入占比</td>
+<td style="text-align:left">2.1%</td>
+<td style="text-align:left">14.6%</td>
+<td style="text-align:left">10.2%</td>
+<td style="text-align:left">3.1%</td>
+<td style="text-align:left">价值差更高</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差对福利/补贴类收入依赖更高。</td>
+</tr>
+<tr>
+<td style="text-align:left">主行业入账金额</td>
+<td style="text-align:left">40,916</td>
+<td style="text-align:left">16,067</td>
+<td style="text-align:left">24,203</td>
+<td style="text-align:left">32,476</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">职业/行业主收入金额随价值变差显著下降。</td>
+</tr>
+<tr>
+<td style="text-align:left">发薪周期标准差</td>
+<td style="text-align:left">2.72</td>
+<td style="text-align:left">3.79</td>
+<td style="text-align:left">2.99</td>
+<td style="text-align:left">3.35</td>
+<td style="text-align:left">价值差更高</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差发薪周期波动更大。</td>
+</tr>
+<tr>
+<td style="text-align:left">总支出金额</td>
+<td style="text-align:left">139,715</td>
+<td style="text-align:left">58,603</td>
+<td style="text-align:left">66,684</td>
+<td style="text-align:left">130,683</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差支出金额也更低，说明不是单纯高消费，而是整体资金体量低。</td>
+</tr>
+<tr>
+<td style="text-align:left">赌博支出占比</td>
+<td style="text-align:left">3.8%</td>
+<td style="text-align:left">2.2%</td>
+<td style="text-align:left">2.0%</td>
+<td style="text-align:left">4.7%</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差占比并不更高，不作为价值差核心画像。</td>
+</tr>
+<tr>
+<td style="text-align:left">余额波动标准差</td>
+<td style="text-align:left">6,360</td>
+<td style="text-align:left">824.9</td>
+<td style="text-align:left">2,688</td>
+<td style="text-align:left">4,757</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值好余额波动更大，更多体现资金体量差异，不能直接解释为风险差。</td>
+</tr>
+<tr>
+<td style="text-align:left">信贷还款金额</td>
+<td style="text-align:left">20,439</td>
+<td style="text-align:left">5,963</td>
+<td style="text-align:left">15,780</td>
+<td style="text-align:left">10,305</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差信贷还款金额更低，不支持“价值差=负债更重”。</td>
+</tr>
+<tr>
+<td style="text-align:left">贷款还款次数</td>
+<td style="text-align:left">29.4</td>
+<td style="text-align:left">13.5</td>
+<td style="text-align:left">25.3</td>
+<td style="text-align:left">18.2</td>
+<td style="text-align:left">价值差更低</td>
+<td style="text-align:left">是</td>
+<td style="text-align:left">价值差还款次数更低，不支持“价值差=多头更多”。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c3-3-3-业务解释">3.3 业务解释</h3>
+<ul>
+<li>价值差的核心不是单点异常，而是多个收入和现金流指标同步走弱。</li>
+<li>当前数据支持“收入低、工资频次低、发薪不稳定、行业识别缺失高”的画像。</li>
+<li>当前数据不支持把价值差直接解释为“高负债/高多头”。如果后续需要验证负债压力，需要增加额度、负债余额、授信使用率、还款失败、逾期历史等更直接指标。</li>
+</ul>
+<h2 id="c3-4-价值好但风险差人群画像">4. 价值好但风险差人群画像</h2>
+<h3 id="c3-4-1-结论">4.1 结论</h3>
+<p>这类人群的“好”主要体现在收入和资金体量仍然较高；“风险差”更多体现在：<strong>支出金额更高、赌博相关支出更高、余额波动更大、余额异常天数更多、收入波动更高</strong>。<br/>
+因此，这类人可以概括为：<strong>收入不错但资金波动大、消费/赌博风险偏好更高、账户行为更不稳定</strong>。</p>
+<h3 id="c3-4-2-与价值好-风险好-价值差-风险差对比表">4.2 与价值好&amp;风险好、价值差&amp;风险差对比表</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:left">特征</th>
+<th style="text-align:left">价值好&amp;风险好</th>
+<th style="text-align:left">价值好&amp;风险差</th>
+<th style="text-align:left">价值差&amp;风险差</th>
+<th style="text-align:left">风险差异方向</th>
+<th style="text-align:left">解释</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">工资收入总额</td>
+<td style="text-align:left">34,024</td>
+<td style="text-align:left">50,253</td>
+<td style="text-align:left">13,314</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">仍然具备高工资收入，且风险差组收入更高。</td>
+</tr>
+<tr>
+<td style="text-align:left">总收入金额</td>
+<td style="text-align:left">96,943</td>
+<td style="text-align:left">191,383</td>
+<td style="text-align:left">75,316</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">整体入账/收入体量明显高于风险好组。</td>
+</tr>
+<tr>
+<td style="text-align:left">总支出金额</td>
+<td style="text-align:left">92,348</td>
+<td style="text-align:left">193,711</td>
+<td style="text-align:left">75,496</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">支出金额同步放大，说明资金进出都更活跃。</td>
+</tr>
+<tr>
+<td style="text-align:left">赌博支出占比</td>
+<td style="text-align:left">2.5%</td>
+<td style="text-align:left">5.2%</td>
+<td style="text-align:left">3.7%</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">风险差组占比更高，是风险错配的重要解释。</td>
+</tr>
+<tr>
+<td style="text-align:left">赌博支出金额</td>
+<td style="text-align:left">2,398</td>
+<td style="text-align:left">7,416</td>
+<td style="text-align:left">2,067</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">风险差组金额明显更高，支持高消费/高风险偏好画像。</td>
+</tr>
+<tr>
+<td style="text-align:left">余额波动标准差</td>
+<td style="text-align:left">4,947</td>
+<td style="text-align:left">8,442</td>
+<td style="text-align:left">1,181</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">风险差组余额波动更大。</td>
+</tr>
+<tr>
+<td style="text-align:left">余额异常天数</td>
+<td style="text-align:left">3.82</td>
+<td style="text-align:left">5.13</td>
+<td style="text-align:left">5.22</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">风险差组异常天数更多。</td>
+</tr>
+<tr>
+<td style="text-align:left">收入波动CV</td>
+<td style="text-align:left">1.83</td>
+<td style="text-align:left">2.10</td>
+<td style="text-align:left">1.96</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">风险差组收入波动更高。</td>
+</tr>
+<tr>
+<td style="text-align:left">发薪周期标准差</td>
+<td style="text-align:left">2.50</td>
+<td style="text-align:left">2.90</td>
+<td style="text-align:left">4.01</td>
+<td style="text-align:left">价值好中风险差更高</td>
+<td style="text-align:left">风险差组发薪周期波动略高，但不是最强解释。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c3-4-3-错配原因解释">4.3 错配原因解释</h3>
+<ul>
+<li><strong>好在哪里</strong>：价值好&amp;风险差人群的工资收入、总收入仍显著高于价值差&amp;风险差，也高于价值好&amp;风险好，说明收入/价值端并不弱。</li>
+<li><strong>风险差在哪里</strong>：同在价值好分箱内，风险差组的总支出、赌博金额、赌博占比、余额波动、余额异常天数和收入波动都更高。</li>
+<li><strong>错配画像</strong>：当前数据更支持“高收入/高资金体量 + 高支出/高波动/高风险消费”的解释，而不是简单“收入差导致风险差”。</li>
+</ul>
+<h2 id="c3-5-价值差但风险好人群画像">5. 价值差但风险好人群画像</h2>
+<h3 id="c3-5-1-结论">5.1 结论</h3>
+<p>这类人群的“价值差”体现为收入低、工资现金流弱、Centrelink占比高；但“风险好”体现为：<strong>支出更低、赌博更低、余额波动更小、余额异常天数更少，且信贷还款活动相对价值差&amp;风险差更好</strong>。<br/>
+可以概括为：<strong>收入不高但行为保守、支出压力相对低、账户波动较小、风险可控</strong>。</p>
+<h3 id="c3-5-2-与价值差-风险差-价值好-风险好对比表">5.2 与价值差&amp;风险差、价值好&amp;风险好对比表</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:left">特征</th>
+<th style="text-align:left">价值差&amp;风险好</th>
+<th style="text-align:left">价值差&amp;风险差</th>
+<th style="text-align:left">价值好&amp;风险好</th>
+<th style="text-align:left">风险差异方向</th>
+<th style="text-align:left">解释</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">工资收入总额</td>
+<td style="text-align:left">8,750</td>
+<td style="text-align:left">13,314</td>
+<td style="text-align:left">34,024</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">收入仍明显低于价值好&amp;风险好，是价值短板。</td>
+</tr>
+<tr>
+<td style="text-align:left">总收入金额</td>
+<td style="text-align:left">45,568</td>
+<td style="text-align:left">75,316</td>
+<td style="text-align:left">96,943</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">收入体量低于价值好&amp;风险好；但高于价值差&amp;风险差。</td>
+</tr>
+<tr>
+<td style="text-align:left">Centrelink收入占比</td>
+<td style="text-align:left">22.1%</td>
+<td style="text-align:left">5.9%</td>
+<td style="text-align:left">2.7%</td>
+<td style="text-align:left">价值差中风险好更高</td>
+<td style="text-align:left">风险好组占比更高，说明收入结构偏保守/福利类，不等于高价值。</td>
+</tr>
+<tr>
+<td style="text-align:left">总支出金额</td>
+<td style="text-align:left">43,062</td>
+<td style="text-align:left">75,496</td>
+<td style="text-align:left">92,348</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">明显低于价值差&amp;风险差，支出更保守。</td>
+</tr>
+<tr>
+<td style="text-align:left">赌博支出占比</td>
+<td style="text-align:left">1.3%</td>
+<td style="text-align:left">3.7%</td>
+<td style="text-align:left">2.5%</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">低于价值差&amp;风险差，风险偏好更低。</td>
+</tr>
+<tr>
+<td style="text-align:left">赌博支出金额</td>
+<td style="text-align:left">531.7</td>
+<td style="text-align:left">2,067</td>
+<td style="text-align:left">2,398</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">明显低于价值差&amp;风险差。</td>
+</tr>
+<tr>
+<td style="text-align:left">余额波动标准差</td>
+<td style="text-align:left">478.1</td>
+<td style="text-align:left">1,181</td>
+<td style="text-align:left">4,947</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">低于价值差&amp;风险差，账户波动更小。</td>
+</tr>
+<tr>
+<td style="text-align:left">余额异常天数</td>
+<td style="text-align:left">3.45</td>
+<td style="text-align:left">5.22</td>
+<td style="text-align:left">3.82</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">低于价值差&amp;风险差。</td>
+</tr>
+<tr>
+<td style="text-align:left">信贷还款金额</td>
+<td style="text-align:left">7,582</td>
+<td style="text-align:left">4,133</td>
+<td style="text-align:left">24,276</td>
+<td style="text-align:left">价值差中风险好更高</td>
+<td style="text-align:left">高于价值差&amp;风险差，可能体现仍有还款活动/信用履约能力。</td>
+</tr>
+<tr>
+<td style="text-align:left">贷款还款次数</td>
+<td style="text-align:left">15.9</td>
+<td style="text-align:left">10.8</td>
+<td style="text-align:left">34.0</td>
+<td style="text-align:left">价值差中风险好更高</td>
+<td style="text-align:left">高于价值差&amp;风险差，支持风险相对可控。</td>
+</tr>
+<tr>
+<td style="text-align:left">发薪周期标准差</td>
+<td style="text-align:left">3.67</td>
+<td style="text-align:left">4.01</td>
+<td style="text-align:left">2.50</td>
+<td style="text-align:left">价值差中风险好更低</td>
+<td style="text-align:left">略低于价值差&amp;风险差，但仍高于价值好&amp;风险好。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c3-5-3-错配原因解释">5.3 错配原因解释</h3>
+<ul>
+<li><strong>价值差体现在哪里</strong>：价值差&amp;风险好人群的工资收入和总收入明显低于价值好&amp;风险好，收入结构中Centrelink占比也更高。</li>
+<li><strong>风险好体现在哪里</strong>：相比价值差&amp;风险差，价值差&amp;风险好人群总支出更低、赌博支出和占比更低、余额波动和余额异常更低。</li>
+<li><strong>错配画像</strong>：这类人不是高收入客户，而是“低收入/弱价值但行为更克制、资金波动更低”的客群。后续可以单独观察其真实逾期率、额度使用率、续贷和贡献情况。</li>
+</ul>
+<h2 id="c3-6-可用于后续使用分析的启发">6. 可用于后续使用分析的启发</h2>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:left">方向</th>
+<th style="text-align:left">可重点关注特征</th>
+<th style="text-align:left">启发</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">解释价值好坏</td>
+<td style="text-align:left">工资收入总额、总收入金额、工资入账次数、主行业入账金额、Centrelink占比、发薪周期std、行业Missing</td>
+<td style="text-align:left">适合作为价值画像和可解释性说明，尤其是收入与工资连续性。</td>
+</tr>
+<tr>
+<td style="text-align:left">解释风险好坏</td>
+<td style="text-align:left">赌博支出占比/金额、余额波动std、余额异常天数、收入/支出CV、总支出金额</td>
+<td style="text-align:left">更适合解释同价值下的风险错配。</td>
+</tr>
+<tr>
+<td style="text-align:left">解释价值好但风险差</td>
+<td style="text-align:left">总收入、总支出、赌博占比/金额、余额波动、余额异常、收入CV</td>
+<td style="text-align:left">后续可单独评估“高收入但高波动/高消费风险偏好”客群。</td>
+</tr>
+<tr>
+<td style="text-align:left">解释价值差但风险好</td>
+<td style="text-align:left">低收入、低支出、低赌博、低余额波动、较好的还款活动</td>
+<td style="text-align:left">后续可评估是否存在保守型低收入客群，不宜只按价值差一刀切。</td>
+</tr>
+<tr>
+<td style="text-align:left">需要谨慎使用</td>
+<td style="text-align:left">地域、渠道、职业Missing、余额均值/最小值</td>
+<td style="text-align:left">更适合做结构补充或数据覆盖提示，不建议直接形成强干预动作结论。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c3-6-1-使用主要提示">6.1 使用主要提示</h3>
+<ul>
+<li>不建议直接说“价值差=高负债/高多头”，当前信贷还款金额、贷款还款次数等特征并未支持这个方向。</li>
+<li>不建议把地域、渠道、职业分布差异直接解释为风险或价值原因；这类指标需要结合样本量、获客结构和渠道准入规则一起看。</li>
+<li>不建议使用被缺失填充值污染的Total列直接下结论。</li>
+</ul>
+</div>
+</section><section class="chapter-card" id="chapter-3">
+<div class="chapter-kicker">Chapter 03</div>
+<div class="chapter-title-row">
+<h2>模型基础信息与效果</h2>
+</div>
+<div class="markdown-body">
+<h1 id="c1-新客价值模型-1-0-模型报告">新客价值模型 1.0 模型说明</h1>
+<h2 id="c1-1-内容概述">1. 内容概述</h2>
+<p>本文档用于总结 <strong>新客价值模型 1.0</strong> 的建模样本、目标变量、入模变量、模型方法、模型效果、分箱区分能力以及后续上线使用建议。</p>
+<p>该模型的核心目标是识别用户的价值水平，重点衡量用户在一定观察期内的利息收入贡献能力，并为后续授信、定价、审批和客群分层提供模型依据。</p>
+<hr/>
+<h2 id="c1-2-模型基本信息">2. 模型基本信息</h2>
+<table class="data-table">
+<thead>
+<tr>
+<th>模块</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>模型名称</td>
+<td>新客价值模型 1.0</td>
+</tr>
+<tr>
+<td>建模目标</td>
+<td>二分类模型：以用户 3 个月维度实付利息收入是否低于 160 作为目标定义，1 表示价值较弱，0 表示价值较好。</td>
+</tr>
+<tr>
+<td>目标变量</td>
+<td><code>y_interest_income_3m</code></td>
+</tr>
+<tr>
+<td>样本粒度</td>
+<td>成功交易贷款申请</td>
+</tr>
+<tr>
+<td>时间定义</td>
+<td>申请发起时间 / 成交申请时间</td>
+</tr>
+<tr>
+<td>建模算法</td>
+<td>LightGBM</td>
+</tr>
+<tr>
+<td>模型类型</td>
+<td>二分类模型</td>
+</tr>
+<tr>
+<td>随机种子</td>
+<td>215</td>
+</tr>
+<tr>
+<td>样本区间</td>
+<td>2024-04-01 至当前可观测时间</td>
+</tr>
+<tr>
+<td>INS/OOS 区间</td>
+<td>2024-04-01 至 2025-09-01</td>
+</tr>
+<tr>
+<td>OOT 区间</td>
+<td>2025-09-01 至当前</td>
+</tr>
+</tbody>
+</table>
+<hr/>
+<h2 id="c1-3-样本设计">3. 样本设计</h2>
+<h3 id="c1-3-1-样本口径">3.1 样本口径</h3>
+<p>本次模型样本基于成功交易客户构建，样本时间范围覆盖 2024 年 4 月至 OOT 最新可观测时间。</p>
+<p>样本划分方式如下：</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>样本集</th>
+<th>定义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INS</td>
+<td>训练样本，用于模型训练</td>
+</tr>
+<tr>
+<td>OOS</td>
+<td>样本外验证集，用于检验模型泛化能力</td>
+</tr>
+<tr>
+<td>OOT</td>
+<td>跨时间验证集，用于检验模型在未来时间窗口上的稳定性</td>
+</tr>
+</tbody>
+</table>
+<hr/>
+<h3 id="c1-3-2-样本分布">3.2 样本分布</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th>样本集</th>
+<th style="text-align:right">样本量</th>
+<th style="text-align:right">样本占比</th>
+<th style="text-align:right">目标样本数</th>
+<th style="text-align:right">目标样本占比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INS</td>
+<td style="text-align:right">34,056</td>
+<td style="text-align:right">60.46%</td>
+<td style="text-align:right">9,235</td>
+<td style="text-align:right">27.12%</td>
+</tr>
+<tr>
+<td>OOS</td>
+<td style="text-align:right">8,501</td>
+<td style="text-align:right">15.09%</td>
+<td style="text-align:right">2,316</td>
+<td style="text-align:right">27.24%</td>
+</tr>
+<tr>
+<td>OOT</td>
+<td style="text-align:right">13,773</td>
+<td style="text-align:right">24.45%</td>
+<td style="text-align:right">3,724</td>
+<td style="text-align:right">27.04%</td>
+</tr>
+<tr>
+<td>Total</td>
+<td style="text-align:right">56,330</td>
+<td style="text-align:right">100.00%</td>
+<td style="text-align:right">15,275</td>
+<td style="text-align:right">27.12%</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c1-3-3-样本结论">3.3 样本结论</h3>
+<p>从样本分布看，INS、OOS、OOT 三个样本集的目标样本占比基本稳定，均在 <strong>27% 左右</strong>。这说明建模样本在不同时间窗口下的目标分布较为一致，未出现明显的样本结构漂移。</p>
+<p>这对模型训练是有利的，因为模型在训练集、验证集和跨时间样本上的目标分布较接近，后续效果对比更具可解释性。</p>
+<hr/>
+<h2 id="c1-4-变量体系">4. 变量体系</h2>
+<h3 id="c1-4-1-入模变量概览">4.1 入模变量概览</h3>
+<p>本次模型主要使用银行流水类变量，变量覆盖收入能力、资金流动、负债还款、余额波动、转账行为和支出结构等维度。</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>变量类型</th>
+<th>代表变量</th>
+<th>业务含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>收入能力</td>
+<td>工资收入、收入均值、其他收入</td>
+<td>衡量用户稳定收入能力</td>
+</tr>
+<tr>
+<td>现金流活跃度</td>
+<td>借方金额均值、借方发生频率</td>
+<td>衡量用户资金流出和账户活跃水平</td>
+</tr>
+<tr>
+<td>余额稳定性</td>
+<td>余额变异系数、余额偏度</td>
+<td>衡量账户余额波动和资金稳定性</td>
+</tr>
+<tr>
+<td>负债行为</td>
+<td>BNPL 还款、贷款还款笔数、贷款放款金额</td>
+<td>衡量用户外部债务和还款压力</td>
+</tr>
+<tr>
+<td>转账行为</td>
+<td>转账簇金额占比、外部转账支出</td>
+<td>衡量资金流向和潜在资金周转需求</td>
+</tr>
+<tr>
+<td>支出结构</td>
+<td>保险支出、债务支出客单价</td>
+<td>衡量用户固定支出和债务负担</td>
+</tr>
+</tbody>
+</table>
+<hr/>
+<h3 id="c1-4-2-变量重要性-top-变量">4.2 变量重要性 Top 变量</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:right">排名</th>
+<th>变量名</th>
+<th>中文含义</th>
+<th style="text-align:right">重要性占比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">1</td>
+<td><code>bank_txn_income_wages_sum_182d</code></td>
+<td>近 182 天工资收入汇总金额</td>
+<td style="text-align:right">20.25%</td>
+</tr>
+<tr>
+<td style="text-align:right">2</td>
+<td><code>bank_txn_income_global_mean_56d</code></td>
+<td>近 56 天收入均值</td>
+<td style="text-align:right">15.60%</td>
+</tr>
+<tr>
+<td style="text-align:right">3</td>
+<td><code>bank_txn_balance_debit_mean_168d</code></td>
+<td>近 168 天借方金额均值</td>
+<td style="text-align:right">15.23%</td>
+</tr>
+<tr>
+<td style="text-align:right">4</td>
+<td><code>bank_txn_lender_repay_bnpl_amount_sum</code></td>
+<td>先买后付还款金额总和</td>
+<td style="text-align:right">6.98%</td>
+</tr>
+<tr>
+<td style="text-align:right">5</td>
+<td><code>bank_txn_category_cluster_transfers_share_28d</code></td>
+<td>近 28 天转账簇金额占比</td>
+<td style="text-align:right">6.32%</td>
+</tr>
+<tr>
+<td style="text-align:right">6</td>
+<td><code>bank_txn_lender_repay_loan_count_max</code></td>
+<td>个人贷款还款单机构最大累计笔数</td>
+<td style="text-align:right">4.98%</td>
+</tr>
+<tr>
+<td style="text-align:right">7</td>
+<td><code>bank_txn_balance_cv_56d</code></td>
+<td>近 56 天余额变异系数</td>
+<td style="text-align:right">4.91%</td>
+</tr>
+<tr>
+<td style="text-align:right">8</td>
+<td><code>bank_txn_lender_disburse_loan_amount_avg_l168d</code></td>
+<td>近 168 天个人贷款放款金额均值</td>
+<td style="text-align:right">4.75%</td>
+</tr>
+<tr>
+<td style="text-align:right">9</td>
+<td><code>bank_txn_category_insurance_debit_amt_14d</code></td>
+<td>近 14 天保险出账金额</td>
+<td style="text-align:right">4.56%</td>
+</tr>
+<tr>
+<td style="text-align:right">10</td>
+<td><code>bank_txn_category_cluster_debt_avg_ticket_168d</code></td>
+<td>债务支出簇近 168 天平均客单价</td>
+<td style="text-align:right">3.60%</td>
+</tr>
+</tbody>
+</table>
+<hr/>
+<h3 id="c1-4-3-变量结论">4.3 变量结论</h3>
+<p>从变量重要性看，模型主要依赖三类核心信息：</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>方向</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>收入能力</td>
+<td>工资收入、收入均值是模型最核心的判断依据，说明模型能够较好识别用户的收入水平和收入稳定性。</td>
+</tr>
+<tr>
+<td>资金流动</td>
+<td>借方金额均值、借方频率、余额波动等变量进入模型，说明用户日常现金流活跃度对价值判断有明显帮助。</td>
+</tr>
+<tr>
+<td>负债与支出</td>
+<td>BNPL 还款、贷款还款、债务支出、转账占比等变量反映用户资金压力和外部负债情况，对区分价值也有贡献。</td>
+</tr>
+</tbody>
+</table>
+<p>整体来看，模型变量结构较合理，既包含正向收入能力变量，也包含负向负债压力和现金流波动变量，符合价值模型的业务逻辑。</p>
+<hr/>
+<h2 id="c1-5-变量-iv-表现">5. 变量 IV 表现</h2>
+<h3 id="c1-5-1-主要变量-iv">5.1 主要变量 IV</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th>变量名</th>
+<th style="text-align:right">IV</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bank_txn_income_wages_sum_182d</code></td>
+<td style="text-align:right">0.21001</td>
+</tr>
+<tr>
+<td><code>bank_txn_balance_debit_mean_168d</code></td>
+<td style="text-align:right">0.19185</td>
+</tr>
+<tr>
+<td><code>bank_txn_income_global_mean_56d</code></td>
+<td style="text-align:right">0.15716</td>
+</tr>
+<tr>
+<td><code>bank_txn_balance_credit_std_14d</code></td>
+<td style="text-align:right">0.07990</td>
+</tr>
+<tr>
+<td><code>bank_txn_category_insurance_debit_amt_14d</code></td>
+<td style="text-align:right">0.07834</td>
+</tr>
+<tr>
+<td><code>bank_txn_category_cluster_debt_avg_ticket_168d</code></td>
+<td style="text-align:right">0.07602</td>
+</tr>
+<tr>
+<td><code>bank_txn_lender_repay_bnpl_amount_sum</code></td>
+<td style="text-align:right">0.06429</td>
+</tr>
+<tr>
+<td><code>bank_txn_category_cluster_transfers_share_28d</code></td>
+<td style="text-align:right">0.06362</td>
+</tr>
+<tr>
+<td><code>bank_txn_balance_cv_56d</code></td>
+<td style="text-align:right">0.05937</td>
+</tr>
+<tr>
+<td><code>bank_txn_lender_repay_loan_count_max</code></td>
+<td style="text-align:right">0.05773</td>
+</tr>
+<tr>
+<td><code>bank_txn_balance_debit_freq_182d</code></td>
+<td style="text-align:right">0.04947</td>
+</tr>
+<tr>
+<td><code>bank_txn_income_otherincome_3rdparty_max_consecutive_days</code></td>
+<td style="text-align:right">0.04509</td>
+</tr>
+<tr>
+<td><code>bank_txn_expense_externaltransfers_daily_min_182d</code></td>
+<td style="text-align:right">0.04163</td>
+</tr>
+<tr>
+<td><code>bank_txn_income_otherincome_category_externaltransfers_mean_84d</code></td>
+<td style="text-align:right">0.03824</td>
+</tr>
+<tr>
+<td><code>bank_txn_lender_disburse_loan_amount_avg_l168d</code></td>
+<td style="text-align:right">0.03293</td>
+</tr>
+<tr>
+<td><code>bank_txn_surplus_liabilitydrawdown_1m_vs_6m</code></td>
+<td style="text-align:right">0.02702</td>
+</tr>
+<tr>
+<td><code>bank_txn_balance_skewness_56d</code></td>
+<td style="text-align:right">0.02604</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c1-5-2-iv-结论">5.2 IV 结论</h3>
+<p>从 IV 表现看，头部变量具备较好的单变量区分能力。</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>变量类别</th>
+<th>表现</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>收入类变量</td>
+<td><code>wages_sum_182d</code>、<code>income_global_mean_56d</code> IV 较高，是模型最重要的信息来源。</td>
+</tr>
+<tr>
+<td>现金流类变量</td>
+<td><code>balance_debit_mean_168d</code> IV 达到 0.19185，说明资金流出水平对价值区分较强。</td>
+</tr>
+<tr>
+<td>负债支出类变量</td>
+<td>BNPL、债务支出、贷款还款等变量 IV 在 0.05 至 0.08 左右，具备稳定辅助区分能力。</td>
+</tr>
+</tbody>
+</table>
+<p>整体来看，模型不是依赖单一变量，而是由收入、现金流、负债和支出等多类变量共同驱动，变量结构相对稳健。</p>
+<hr/>
+<h2 id="c1-6-模型方法">6. 模型方法</h2>
+<h3 id="c1-6-1-算法选择">6.1 算法选择</h3>
+<p>本次模型采用 LightGBM 二分类模型，适用于结构化表格数据，能够处理非线性关系和变量之间的交互关系。</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>参数</th>
+<th style="text-align:right">取值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>algorithm</td>
+<td style="text-align:right">LightGBM</td>
+</tr>
+<tr>
+<td>boosting_type</td>
+<td style="text-align:right">gbdt</td>
+</tr>
+<tr>
+<td>objective</td>
+<td style="text-align:right">binary</td>
+</tr>
+<tr>
+<td>metric</td>
+<td style="text-align:right">auc</td>
+</tr>
+<tr>
+<td>max_depth</td>
+<td style="text-align:right">3</td>
+</tr>
+<tr>
+<td>num_leaves</td>
+<td style="text-align:right">12</td>
+</tr>
+<tr>
+<td>min_data_in_leaf</td>
+<td style="text-align:right">300</td>
+</tr>
+<tr>
+<td>learning_rate</td>
+<td style="text-align:right">0.1</td>
+</tr>
+<tr>
+<td>feature_fraction</td>
+<td style="text-align:right">0.8</td>
+</tr>
+<tr>
+<td>bagging_fraction</td>
+<td style="text-align:right">0.8</td>
+</tr>
+<tr>
+<td>bagging_freq</td>
+<td style="text-align:right">1</td>
+</tr>
+<tr>
+<td>lambda_l1</td>
+<td style="text-align:right">10</td>
+</tr>
+<tr>
+<td>lambda_l2</td>
+<td style="text-align:right">1</td>
+</tr>
+<tr>
+<td>random_state</td>
+<td style="text-align:right">215</td>
+</tr>
+</tbody>
+</table>
+<h3 id="c1-6-2-参数解读">6.2 参数解读</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th>参数方向</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>树深度控制</td>
+<td><code>max_depth=3</code>，限制单棵树复杂度，降低过拟合风险。</td>
+</tr>
+<tr>
+<td>叶子节点控制</td>
+<td><code>num_leaves=12</code>，模型复杂度适中。</td>
+</tr>
+<tr>
+<td>样本约束</td>
+<td><code>min_data_in_leaf=300</code>，防止模型过度学习小样本局部特征。</td>
+</tr>
+<tr>
+<td>特征采样</td>
+<td><code>feature_fraction=0.8</code>，提升模型泛化能力。</td>
+</tr>
+<tr>
+<td>样本采样</td>
+<td><code>bagging_fraction=0.8</code>，降低模型对单一样本集的依赖。</td>
+</tr>
+<tr>
+<td>正则化</td>
+<td><code>lambda_l1=10</code>、<code>lambda_l2=1</code>，增强模型稳定性。</td>
+</tr>
+</tbody>
+</table>
+<p>整体来看，模型参数偏稳健，没有明显过度复杂化，适合价值模型上线前的稳定性要求。</p>
+<hr/>
+<h2 id="c1-7-模型效果评估">7. 模型效果评估</h2>
+<h3 id="c1-7-1-整体效果">7.1 整体效果</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th>样本集</th>
+<th style="text-align:right">样本量</th>
+<th style="text-align:right">实际目标率</th>
+<th style="text-align:right">平均预测分</th>
+<th style="text-align:right">KS</th>
+<th style="text-align:right">AUC</th>
+<th style="text-align:right">Bottom 10% 目标率</th>
+<th style="text-align:right">Top 10% 目标率</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INS</td>
+<td style="text-align:right">30,303</td>
+<td style="text-align:right">22.73%</td>
+<td style="text-align:right">22.75%</td>
+<td style="text-align:right">0.2939</td>
+<td style="text-align:right">0.7015</td>
+<td style="text-align:right">6.70%</td>
+<td style="text-align:right">52.39%</td>
+</tr>
+<tr>
+<td>OOS</td>
+<td style="text-align:right">7,481</td>
+<td style="text-align:right">23.03%</td>
+<td style="text-align:right">22.89%</td>
+<td style="text-align:right">0.3077</td>
+<td style="text-align:right">0.7084</td>
+<td style="text-align:right">7.89%</td>
+<td style="text-align:right">56.88%</td>
+</tr>
+<tr>
+<td>OOT</td>
+<td style="text-align:right">13,154</td>
+<td style="text-align:right">25.75%</td>
+<td style="text-align:right">23.60%</td>
+<td style="text-align:right">0.3467</td>
+<td style="text-align:right">0.7294</td>
+<td style="text-align:right">7.30%</td>
+<td style="text-align:right">63.00%</td>
+</tr>
+</tbody>
+</table>
+<hr/>
+<h3 id="c1-7-2-区分能力结论">7.2 区分能力结论</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th>指标</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AUC</td>
+<td>INS、OOS、OOT 分别为 0.7015、0.7084、0.7294，模型具备较好的排序能力。</td>
+</tr>
+<tr>
+<td>KS</td>
+<td>INS、OOS、OOT 分别为 0.2939、0.3077、0.3467，跨样本表现稳定，且 OOT 效果未下降。</td>
+</tr>
+<tr>
+<td>Top / Bottom 区分</td>
+<td>OOT 中 Top 10% 目标率为 63.00%，Bottom 10% 目标率为 7.30%，头尾区分明显。</td>
+</tr>
+<tr>
+<td>泛化能力</td>
+<td>OOS 和 OOT 的 AUC、KS 均未低于 INS，说明模型没有明显过拟合。</td>
+</tr>
+</tbody>
+</table>
+<p>整体来看，模型在训练样本、样本外验证和跨时间验证上均保持较好的区分能力，具备试运行基础。</p>
+<hr/>
+<h3 id="c1-7-3-校准情况">7.3 校准情况</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th>样本集</th>
+<th style="text-align:right">实际目标率</th>
+<th style="text-align:right">平均预测分</th>
+<th style="text-align:right">差异</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INS</td>
+<td style="text-align:right">22.73%</td>
+<td style="text-align:right">22.75%</td>
+<td style="text-align:right">+0.02pct</td>
+</tr>
+<tr>
+<td>OOS</td>
+<td style="text-align:right">23.03%</td>
+<td style="text-align:right">22.89%</td>
+<td style="text-align:right">-0.14pct</td>
+</tr>
+<tr>
+<td>OOT</td>
+<td style="text-align:right">25.75%</td>
+<td style="text-align:right">23.60%</td>
+<td style="text-align:right">-2.15pct</td>
+</tr>
+</tbody>
+</table>
+<p>从校准角度看：</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>样本集</th>
+<th>判断</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INS</td>
+<td>实际目标率和平均预测分基本一致，校准较好。</td>
+</tr>
+<tr>
+<td>OOS</td>
+<td>预测分略低于实际目标率，但差异很小。</td>
+</tr>
+<tr>
+<td>OOT</td>
+<td>实际目标率高于平均预测分约 2.15 个百分点，存在一定低估。</td>
+</tr>
+</tbody>
+</table>
+<p>因此，模型排序能力较好，但 OOT 存在轻微低估现象。若后续用于精细化定价、额度测算或收益预测，建议补充校准分析；若主要用于排序分层和分层使用，目前表现可以接受。</p>
+<hr/>
+<h2 id="c1-8-模型分箱表现">8. 模型分箱表现</h2>
+<h3 id="c1-8-1-oot-十等分表现">8.1 OOT 十等分表现</h3>
+<table class="data-table">
+<thead>
+<tr>
+<th style="text-align:right">分箱</th>
+<th>分数区间</th>
+<th style="text-align:right">样本量</th>
+<th style="text-align:right">样本占比</th>
+<th style="text-align:right">平均目标率</th>
+<th style="text-align:right">平均预测分</th>
+<th style="text-align:right">Capture Rate</th>
+<th style="text-align:right">Lift</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">10</td>
+<td>0.046649 - 0.106977</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">7.30%</td>
+<td style="text-align:right">8.70%</td>
+<td style="text-align:right">2.83%</td>
+<td style="text-align:right">0.28</td>
+</tr>
+<tr>
+<td style="text-align:right">20</td>
+<td>0.106978 - 0.136739</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">9.96%</td>
+<td style="text-align:right">12.22%</td>
+<td style="text-align:right">3.87%</td>
+<td style="text-align:right">0.39</td>
+</tr>
+<tr>
+<td style="text-align:right">30</td>
+<td>0.136763 - 0.161326</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">13.84%</td>
+<td style="text-align:right">14.93%</td>
+<td style="text-align:right">5.37%</td>
+<td style="text-align:right">0.54</td>
+</tr>
+<tr>
+<td style="text-align:right">40</td>
+<td>0.161346 - 0.185423</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">17.57%</td>
+<td style="text-align:right">17.32%</td>
+<td style="text-align:right">6.82%</td>
+<td style="text-align:right">0.68</td>
+</tr>
+<tr>
+<td style="text-align:right">50</td>
+<td>0.185433 - 0.211802</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">19.16%</td>
+<td style="text-align:right">19.86%</td>
+<td style="text-align:right">7.44%</td>
+<td style="text-align:right">0.74</td>
+</tr>
+<tr>
+<td style="text-align:right">60</td>
+<td>0.211849 - 0.242354</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">20.91%</td>
+<td style="text-align:right">22.67%</td>
+<td style="text-align:right">8.12%</td>
+<td style="text-align:right">0.81</td>
+</tr>
+<tr>
+<td style="text-align:right">70</td>
+<td>0.242359 - 0.277792</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">28.59%</td>
+<td style="text-align:right">25.97%</td>
+<td style="text-align:right">11.10%</td>
+<td style="text-align:right">1.11</td>
+</tr>
+<tr>
+<td style="text-align:right">80</td>
+<td>0.277802 - 0.325729</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">35.36%</td>
+<td style="text-align:right">30.06%</td>
+<td style="text-align:right">13.73%</td>
+<td style="text-align:right">1.37</td>
+</tr>
+<tr>
+<td style="text-align:right">90</td>
+<td>0.325758 - 0.401602</td>
+<td style="text-align:right">1,315</td>
+<td style="text-align:right">9.997%</td>
+<td style="text-align:right">41.67%</td>
+<td style="text-align:right">36.01%</td>
+<td style="text-align:right">16.18%</td>
+<td style="text-align:right">1.62</td>
+</tr>
+<tr>
+<td style="text-align:right">100</td>
+<td>0.401634 - 0.751333</td>
+<td style="text-align:right">1,319</td>
+<td style="text-align:right">10.027%</td>
+<td style="text-align:right">63.00%</td>
+<td style="text-align:right">48.15%</td>
+<td style="text-align:right">24.54%</td>
+<td style="text-align:right">2.45</td>
+</tr>
+</tbody>
+</table>
+<hr/>
+<h3 id="c1-8-2-分箱排序结论">8.2 分箱排序结论</h3>
+<p>从 OOT 十等分表现看，模型分箱具有明显单调性：</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>观察点</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>目标率排序</td>
+<td>从低分箱到高分箱，平均目标率由 7.30% 上升至 63.00%，排序非常清晰。</td>
+</tr>
+<tr>
+<td>Lift 表现</td>
+<td>最高分箱 Lift 达到 2.45，说明高分箱捕获目标样本能力明显强于平均水平。</td>
+</tr>
+<tr>
+<td>Capture Rate</td>
+<td>最高 10% 样本捕获 24.54% 的目标样本，头部集中度较好。</td>
+</tr>
+<tr>
+<td>中高分箱跃升</td>
+<td>从 70 分箱开始，目标率明显抬升，说明模型对高目标客群有较强识别能力。</td>
+</tr>
+</tbody>
+</table>
+<p>整体来看，模型分数具有良好的业务排序性，可用于价值分层、分层使用和差异化资源配置。</p>
+<hr/>
+<h2 id="c1-9-业务解释">9. 业务解释</h2>
+<h3 id="c1-9-1-模型识别的高价值用户特征">9.1 模型识别的高价值用户特征</h3>
+<p>结合变量重要性和分箱表现，高价值用户通常具备以下特征：</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>方向</th>
+<th>特征表现</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>收入能力强</td>
+<td>工资收入总额较高，近期收入均值较高。</td>
+</tr>
+<tr>
+<td>现金流稳定</td>
+<td>账户资金流动更稳定，余额波动相对可控。</td>
+</tr>
+<tr>
+<td>支出结构健康</td>
+<td>债务支出压力相对可控，异常转账和资金周转压力较低。</td>
+</tr>
+<tr>
+<td>外部负债适中</td>
+<td>BNPL、贷款还款等负债行为不会过度集中。</td>
+</tr>
+</tbody>
+</table>
+<hr/>
+<h3 id="c1-9-2-模型识别的低价值用户特征">9.2 模型识别的低价值用户特征</h3>
+<p>低价值用户通常在以下方面表现较弱：</p>
+<table class="data-table">
+<thead>
+<tr>
+<th>方向</th>
+<th>特征表现</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>收入能力不足</td>
+<td>工资收入或近期收入水平偏低。</td>
+</tr>
+<tr>
+<td>现金流压力较大</td>
+<td>借方金额、转账占比、余额波动等指标显示资金流动压力较大。</td>
+</tr>
+<tr>
+<td>负债行为偏重</td>
+<td>BNPL 还款、贷款还款、债务支出等变量表现出更高的负债压力。</td>
+</tr>
+<tr>
+<td>资金稳定性弱</td>
+<td>余额波动较大，账户资金留存能力不足。</td>
+</tr>
+</tbody>
+</table>
+</div>
+</section></div>
+</section>
+</main>
+<script>
+    (function wrapTables() {
+      document.querySelectorAll('table.data-table').forEach((table) => {
+        if (table.parentElement && table.parentElement.classList.contains('table-frame')) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'table-frame';
+        table.parentNode.insertBefore(wrap, table);
+        wrap.appendChild(table);
+      });
+    })();
+
+    function parseNumber(text) {
+      if (!text) return NaN;
+      let t = text.trim();
+      if (!t || /^(NA|N\/A|Missing|<NA>|-|—|--|None|null)$/i.test(t)) return NaN;
+      t = t.replace(/,/g, '')
+           .replace(/%/g, '')
+           .replace(/pct/ig, '')
+           .replace(/[≈约]/g, '')
+           .replace(/\s+/g, '');
+      const match = t.match(/-?\d+(?:\.\d+)?/);
+      if (!match) return NaN;
+      return Number(match[0]);
+    }
+
+    function normalizeText(text) {
+      return (text || '').replace(/\s+/g, '').trim();
+    }
+
+    function isTotalText(text) {
+      const t = normalizeText(text);
+      return /^(合计|总计|小计|总览|Total|GrandTotal|Overall)$/i.test(t);
+    }
+
+    function getTableContextText(table) {
+      const pieces = [];
+      let node = table ? table.previousElementSibling : null;
+
+      // 表格被 wrapTables 包进 .table-frame 之后，标题在外层 wrapper 前面。
+      if ((!node || !node.textContent) && table && table.parentElement) {
+        node = table.parentElement.previousElementSibling;
+      }
+
+      let steps = 0;
+      while (node && steps < 4) {
+        const tag = (node.tagName || '').toLowerCase();
+        if (/^(h1|h2|h3|h4|p|strong)$/.test(tag)) {
+          pieces.push(node.textContent || '');
+        }
+        node = node.previousElementSibling;
+        steps += 1;
+      }
+      return normalizeText(pieces.join(' '));
+    }
+
+    function classifyText(text) {
+      const t = normalizeText(text);
+
+      // 风险表现优先识别，避免“金额逾期率”被归到金额类。
+      if (/(逾期|违约|风险率|坏账|BadRate|M30|M5|DPD|Overdue|Default|Delinq)/i.test(t)) {
+        return 'risk';
+      }
+
+      if (/(通过率|自动通过率|人工通过率|成交率|审批|转化|pass|approve|approval|deal|conversion|成交|自动|人工)/i.test(t)) {
+        return 'approval';
+      }
+
+      if (/(样本占比|样本数|样本量|样本|数量|目标样本|count|cnt|sample)/i.test(t)) {
+        return 'distribution';
+      }
+
+      if (/(收入|工资|金额|额度|申请金额|总额度|PTI|Surplus|gross|net|income|amount|limit|balance|cashflow|debit|credit|支出|还款|放款|客单价|均值|标准差|占比)/i.test(t)) {
+        return 'value';
+      }
+
+      if (/(AUC|KS|Lift|IV|Capture|预测分|目标率|重要性|排名|分数区间|score)/i.test(t)) {
+        return 'model';
+      }
+
+      return 'neutral';
+    }
+
+    function inferHeatType(headerText, table) {
+      const h = normalizeText(headerText);
+      const byHeader = classifyText(h);
+      if (byHeader !== 'neutral') return byHeader;
+
+      // 交叉表的列名通常是“风险1/风险2”，真实指标在表名前缀里。
+      const contextText = getTableContextText(table);
+      const byContext = classifyText(contextText);
+      if (byContext !== 'neutral') return byContext;
+
+      return 'neutral';
+    }
+
+    function getHeatColor(type, norm) {
+      const palettes = {
+        risk:         { rgb: [204, 66, 76],  min: 0.075, max: 0.360 },  // 风险、逾期、违约：红色渐变
+        value:        { rgb: [29, 125, 112], min: 0.060, max: 0.305 },  // 收入、额度、金额、surplus：青绿色渐变
+        approval:     { rgb: [45, 108, 166], min: 0.055, max: 0.285 },  // 通过、自动、人工、成交：蓝色渐变
+        distribution: { rgb: [198, 154, 70], min: 0.065, max: 0.315 },  // 样本数、样本占比：香槟金渐变
+        model:        { rgb: [182, 122, 44], min: 0.055, max: 0.285 },  // 模型指标：琥珀金渐变
+        neutral:      { rgb: [69, 128, 153], min: 0.050, max: 0.260 }   // 其他数值：蓝绿色渐变，避免灰色
+      };
+      const p = palettes[type] || palettes.neutral;
+      const alpha = p.min + norm * (p.max - p.min);
+      return `rgba(${p.rgb[0]}, ${p.rgb[1]}, ${p.rgb[2]}, ${alpha.toFixed(3)})`;
+    }
+
+    (function heatmapTables() {
+      document.querySelectorAll('table.data-table').forEach((table) => {
+        const body = table.tBodies[0];
+        if (!body) return;
+
+        const rows = Array.from(body.rows);
+        const head = table.tHead ? table.tHead.rows[0] : table.rows[0];
+        if (!head || rows.length < 2) return;
+
+        const colCount = head.cells.length;
+        const totalColumns = new Set();
+
+        Array.from(head.cells).forEach((cell, idx) => {
+          if (isTotalText(cell.textContent)) totalColumns.add(idx);
+        });
+
+        // 合计 / 总计 / Total 行不参与渐变计算，也不着色。
+        const eligibleRows = rows.filter((row) => {
+          const firstCell = row.cells[0];
+          return firstCell && !isTotalText(firstCell.textContent);
+        });
+
+        for (let c = 1; c < colCount; c++) {
+          if (totalColumns.has(c)) continue;
+
+          const headerText = head.cells[c] ? head.cells[c].textContent : '';
+          const heatType = inferHeatType(headerText, table);
+          const cells = eligibleRows.map(r => r.cells[c]).filter(Boolean);
+          const values = cells.map(cell => parseNumber(cell.textContent)).filter(Number.isFinite);
+
+          if (values.length < 3) continue;
+
+          const min = Math.min.apply(null, values);
+          const max = Math.max.apply(null, values);
+          if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) continue;
+
+          cells.forEach((cell) => {
+            const val = parseNumber(cell.textContent);
+            if (!Number.isFinite(val)) return;
+            const norm = Math.max(0, Math.min(1, (val - min) / (max - min)));
+
+            cell.classList.add('heat-cell');
+            cell.dataset.heatType = heatType;
+            cell.style.backgroundColor = getHeatColor(heatType, norm);
+          });
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
