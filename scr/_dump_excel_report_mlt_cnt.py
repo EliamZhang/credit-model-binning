@@ -1,6 +1,6 @@
 """核对工具：把 out/ 下最新的分箱报告 Excel 全部 sheet 按行 dump 为文本，用于核对 md 报告数值。
 
-用法：重跑 binning.py 后直接 `python scr/_dump_excel_report.py`，输出到 out/_excel_dump.txt。
+用法：重跑 binning_mlt_cnt.py 后直接 `python scr/_dump_excel_report_mlt_cnt.py`，输出到 out/_excel_dump.txt。
 """
 import glob
 import sys

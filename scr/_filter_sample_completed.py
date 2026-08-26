@@ -29,7 +29,7 @@ sample["_application_status"] = sample["application_id"].map(status_map)
 
 missing_status = sample["_application_status"].isna().sum()
 if missing_status:
-    print(f"警告：{missing_status} 笔申请在 application_info 中无状态（按完成保留，与 binning.py 口径一致）")
+    print(f"警告：{missing_status} 笔申请在 application_info 中无状态（按完成保留，与 binning_mlt_cnt.py 口径一致）")
 
 incomplete = sample["_application_status"].astype("string").isin(INCOMPLETE_STATUSES)
 removed = int(incomplete.sum())

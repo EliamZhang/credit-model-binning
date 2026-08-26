@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-import binning
+import binning_mlt_cnt as binning
 
 
 class FunnelMetricTests(unittest.TestCase):
