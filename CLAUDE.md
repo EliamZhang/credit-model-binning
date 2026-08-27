@@ -61,6 +61,28 @@ tests/      # 单元测试（19 例）
 
 取数一律用 openpyxl 读值（`data_only=True`），不要从控制台输出抄数。
 
+## 2.3 新数据质量检查与交互协议（数据入库后的第一道工序）
+
+用户放入新样本/新模型数据后，**先跑检查脚本，不要直接跑分箱**：
+
+```bash
+python scripts/check_data.py --dataset <d> --model <m>
+```
+
+检查项：文件可读性（行/列数）、必需字段存在性（对照 2.1 清单）、主键唯一性、标签/敞口类字段缺失率（缺失 = 未成熟样本属正常，>90% 才报警）、**样本口径**模型分覆盖率与缺失率（与管线 01_总览口径一致）、分数取值范围与十分位 3M30+ 方向、Train/OOT 样本量与 Train 标签成熟率。报告同时写入 `out/data_check_<d>_<m>_YYYYMMDD.txt` 供追溯。
+
+**分级处理协议（必须遵守）**：
+
+| 级别 | 触发条件（示例） | AI 必须做什么 |
+| --- | --- | --- |
+| BLOCK | 缺必需字段；覆盖率 <80%；样本口径缺失率 >20%；方向与预期相反 | **停下**，向用户列出问题清单，等用户补数据/确认口径后重跑检查 |
+| WARN | 覆盖率 80%–95%；缺失率 5%–20%；方向倒挂 ≥3 处；Train 成熟率 <35%；主键重复率偏高 | 报告数值与影响，问用户"继续（记录在案）还是补数据"，按用户决定执行 |
+| PASS | 全部通过 | 一行摘要报告即可，继续后续流程 |
+
+已知结构性 WARN 直接引用说明、不重复追问：老客价值模型覆盖率 93.32%、缺失 6.68%（无银行交易数据人群）；Train 3M30+ 成熟率基线约 42%。
+
+**交互格式**：报告问题用"问题 → 影响 → 需要你做什么"三段式；需要用户补数据时给出明确清单（文件名、字段、格式、放哪）。检查通过或用户确认继续后，再进入第 4/5 节的配置与分箱流程。
+
 ## 3. 运行入口速查
 
 ```bash
@@ -78,6 +100,7 @@ python scripts/cross_models.py --dataset laoke --model-a mlt --model-b worthines
 python scripts/cross_mlt_wth.py   # 快捷壳（matrix）
 # 测试与核对
 python -m unittest discover tests
+python scripts/check_data.py --dataset <d> --model <m>   # 新数据质量检查（2.3 节协议）
 python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 后必跑
 python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
 ```
@@ -88,19 +111,21 @@ python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
 
 1. **要数据**：向用户确认三张表（sample、application_info、模型分文件）的路径与字段口径，特别是 duedate 标签列、principal、审批状态字段是否同名；若无对应字段，先与用户确认口径映射，不要自行假设；
 2. **放数据**：让用户把 CSV 放入 `res/`（或指定的 data_dir）；文件很大时提醒用户 res/ 已被 gitignore；
-3. **写配置**：在 configs/datasets.py 复制一份（参照 xinke 模板）填 data_dir/sample_file/application_file/train_end_month/oot_start_month/incomplete_statuses，取消 TODO 注释；
-4. **验方向**：用样本数据做十分位违约率检查（分数 decile → 3M30+ 率），确认 high_score_high_risk 取值；价值类模型把"低分=高价值"语义记入 value_semantics；
-5. **试跑**：`python scripts/bin_model.py --dataset <key> --model <model> --metric cnt`，检查日志（样本量、月份切分、初始箱数、缺失量）与 Excel 01_总览；
-6. **写报告**：参照第 7 节规范在 docs/ 写 md，数值一律从 Excel 取。
+3. **跑检查**：数据到位后先写临时配置，跑 `python scripts/check_data.py --dataset <key> --model <model>`，按 2.3 节协议处理 BLOCK/WARN，向用户报告并等确认；
+4. **写配置**：在 configs/datasets.py 复制一份（参照 xinke 模板）填 data_dir/sample_file/application_file/train_end_month/oot_start_month/incomplete_statuses，取消 TODO 注释；
+5. **验方向**：检查脚本已含十分位方向验证；价值类模型把"低分=高价值"语义记入 value_semantics；
+6. **试跑**：`python scripts/bin_model.py --dataset <key> --model <model> --metric cnt`，检查日志（样本量、月份切分、初始箱数、缺失量）与 Excel 01_总览；
+7. **写报告**：参照第 7.1 节规范在 docs/ 写 md，数值一律从 Excel 取。
 
 ## 5. 新增模型操作步骤
 
 1. **要数据**：向用户确认模型分文件的文件名、分数列名、方向（高分=高风险？）、策略约束是否需要调整；价值类模型确认"低分=高价值"语义；
 2. **放数据**：模型分文件放入 `res/`；
-3. **写配置**：在 configs/models.py 复制一份（参照 mlt），填 score_file/raw_score_col/score_col/initial_bin_col/final_bin_col/high_score_high_risk/strategy_config/report_prefix/cross_tag/display_short；列名保持唯一（不同模型不要共用 score_col）；
-4. **验方向**：十分位违约率检查（最高分位 vs 最低分位的 3M30+），不一致要停下来问用户；
-5. **跑分箱**：`python scripts/bin_model.py --dataset <d> --model <m> --metric cnt`；评审方案与阈值后把最终方案记入模型配置注释（供交叉分析 `_current_thresholds` 登记）；
-6. **交叉**：需要与其它模型交叉时按第 6 节。
+3. **跑检查**：`python scripts/check_data.py --dataset <d> --model <m>`（分数文件到位后立即跑），按 2.3 节协议处理 BLOCK/WARN；
+4. **写配置**：在 configs/models.py 复制一份（参照 mlt），填 score_file/raw_score_col/score_col/initial_bin_col/final_bin_col/high_score_high_risk/strategy_config/report_prefix/cross_tag/display_short；列名保持唯一（不同模型不要共用 score_col）；
+5. **验方向**：检查脚本的十分位方向验证结果为准，不一致要停下来问用户；
+6. **跑分箱**：`python scripts/bin_model.py --dataset <d> --model <m> --metric cnt`；评审方案与阈值后把最终方案记入模型配置注释（供交叉分析 `_current_thresholds` 登记）；
+7. **交叉**：需要与其它模型交叉时按第 6 节。
 
 > 金额口径（amt）说明：目前只有 mlt 有金额口径（约束上限按老客校准：auto 金额率 ≤0.0054/0.039、accept ≤0.011/0.0597）。**新模型要做 amt 口径时，约束值必须重新校准**（先跑 cnt 定阈值，再取该阈值处的金额累计/边际率做约束），并与用户确认后才能写入配置。
 
@@ -149,6 +174,7 @@ python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
 ## 7.2 协作协议（与用户交互的行为规范）
 
 - **要数据时问具体问题**：列名/文件名/时间窗口/方向语义/是否剔除未完成申请，给出需要用户提供的清单，不要只说"给我数据"；
+- **新数据先检查再动手**：数据到位后先跑 `scripts/check_data.py` 并按 2.3 节协议交互，BLOCK 必须停下等用户补数据，WARN 必须报告并取得用户决定；
 - **遇异常停下来**：分数方向与预期相反、覆盖率异常低、方案与基准不一致、字段缺失——先向用户说明发现与影响，等确认再继续，不自行改口径；
 - **修改既有报告数值时**：说明改动原因与差异来源（如实现统一导致的 0.0003 级差异），在提交信息中留痕；
 - **不要主动改 configs 里的冻结值**（老客模型配置与第 8 节基准对应），除非用户要求；
