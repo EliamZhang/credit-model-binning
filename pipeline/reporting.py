@@ -81,8 +81,8 @@ def build_metric_dictionary() -> pd.DataFrame:
         ("历史实际审批漏斗", "actual_auto_approval_share", "历史实际通过件中的自动审批占比", "auto_approved_application_cnt / approved_application_cnt"),
         ("历史实际审批漏斗", "actual_manual_approval_share", "历史实际通过件中的人工审批占比", "manual_approved_application_cnt / approved_application_cnt"),
         ("历史实际审批漏斗", "actual_deal_rate", "历史实际成交转化率", "deal_sample_cnt / approved_application_cnt"),
-        ("箱级历史实际审批漏斗", "actual_*（03_最终分箱统计）", "按 Train/OOT 与最终风险档下钻的历史实际数量和比率", "在每个 score_mlt_final_bin 内按唯一 application_id 复算"),
-        ("模型策略测算", "strategy_estimated_auto_pass_rate", "模型阈值测算的自动通过样本占比", "score_mlt 满足自动通过阈值的申请数 / 有效模型分申请数"),
+        ("箱级历史实际审批漏斗", "actual_*（03_最终分箱统计）", "按 Train/OOT 与最终风险档下钻的历史实际数量和比率", f"在每个 {FINAL_BIN_COL} 内按唯一 application_id 复算"),
+        ("模型策略测算", "strategy_estimated_auto_pass_rate", "模型阈值测算的自动通过样本占比", f"{SCORE_COL} 满足自动通过阈值的申请数 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_manual_review_rate", "模型阈值测算的人工审核样本占比", "人工审核分数区间申请数 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_total_accept_rate", "模型阈值测算的总接纳样本占比", "自动通过数与人工审核数之和 / 有效模型分申请数"),
         ("模型策略测算", "strategy_estimated_reject_rate", "模型阈值测算的拒绝样本占比", "超过总接纳阈值的申请数 / 有效模型分申请数"),
@@ -102,7 +102,7 @@ def build_metric_dictionary() -> pd.DataFrame:
 def build_online_execution_rules() -> pd.DataFrame:
     """输出上线执行规则的静态清单，供引擎团队上线时逐项核对。"""
     rows = [
-        ("分数精度", "模型分精度", "线上评分引擎输出与离线一致的 float 模型分（score_mlt），不限制小数位"),
+        ("分数精度", "模型分精度", f"线上评分引擎输出与离线一致的 float 模型分（{SCORE_COL}），不限制小数位"),
         ("分数精度", "边界精度", "阈值 = 最终箱右边界原始值（末档为 Train 最大分数），不做二次取整"),
         ("阈值取整", "取整原则", "默认按原始精度部署；若工程必须取整（如存储小数位限制），只允许向更严方向取整：自动通过阈值、总接纳阈值均向下取整（floor），不放大接纳人群"),
         ("阈值取整", "取整后复核", "取整后须重新计算三段占比与风险，与未取整版本对比，确认无风险放大"),
@@ -257,7 +257,7 @@ def build_config_table(
         {"config_group": "基础配置", "config_name": "OOT_START_MONTH", "config_value": OOT_START_MONTH},
         {"config_group": "基础配置", "config_name": "INITIAL_BIN_COUNT", "config_value": INITIAL_BIN_COUNT},
         {"config_group": "基础配置", "config_name": "HIGH_SCORE_HIGH_RISK", "config_value": HIGH_SCORE_HIGH_RISK},
-        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_SOURCE", "config_value": "old_application_info.csv"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_SOURCE", "config_value": APPLICATION_FILE},
         {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_COUNT_KEY", "config_value": "COUNT DISTINCT application_id"},
         {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_COMPLETED_EXCLUSIONS", "config_value": "0.Incomplete,1.In Progress"},
         {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_APPROVED_PREFIXES", "config_value": "3,4"},

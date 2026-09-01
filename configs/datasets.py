@@ -27,11 +27,11 @@ DATASETS = {
         "incomplete_statuses": ["0.Incomplete", "1.In Progress"],
         "value_semantics": "价值模型分越低 = 价值越高（利息贡献越高），高分 = 高风险（经验验证）",
     },
-    "xinke": {
+    "new": {
         "name": "新客",
         "data_dir": "res",
-        "sample_file": "xinke_sample.csv",
-        "application_file": "xinke_application_info.csv",
+        "sample_file": "new_sample.csv",
+        "application_file": "new_application_info.csv",
         "train_end_month": "2025-10",
         "oot_start_month": "2025-11",
         "incomplete_statuses": ["0.Incomplete", "1.In Progress"],

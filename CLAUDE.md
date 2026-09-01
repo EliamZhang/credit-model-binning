@@ -16,7 +16,7 @@
 
 ```
 res/        # 输入数据（gitignored）：用户把 CSV 放这里，文件名必须与 configs 一致；
-            #   命名前缀约定：老客 old_*、新客 xinke_*，新数据文件不要与既有文件重名
+            #   命名前缀约定：老客 old_*、新客 new_*，新数据文件不要与既有文件重名
 out/        # 输出 Excel 与临时文件（gitignored）
 configs/    # datasets.py（样本集）、models.py（模型）——扩展点
 pipeline/   # 核心管线：settings（常量层）/ data_loading / risk_metrics / binning_cnt /
@@ -35,7 +35,7 @@ tests/      # 单元测试（19 例）
 
 运行环境：Python 3.11（Windows），虚拟环境 `.venv`（解释器 `.venv/Scripts/python.exe`）；依赖首次安装用 `.venv/Scripts/python.exe -m pip install -r requirements.txt`。
 
-⚠️ **xinke 是模板不是可用样本**：configs/datasets.py 中 `xinke` 配置为 TODO 模板，数据尚未入库、不可直接运行；用户说"新客数据来了"时，先按第 4 节流程让用户提供数据并填实配置，再跑。
+✅ **new 是新客已填实配置**：configs/datasets.py 中 `new` 配置与数据（`res/new_*`）已入库、可直接运行；新增样本集时参照 `new` 配置复制一份，按第 4 节流程操作。
 
 ## 2.1 数据字段口径清单（拿到新数据先核对）
 
@@ -113,7 +113,7 @@ python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
 1. **要数据**：向用户确认三张表（sample、application_info、模型分文件）的路径与字段口径，特别是 duedate 标签列、principal、审批状态字段是否同名；若无对应字段，先与用户确认口径映射，不要自行假设；
 2. **放数据**：让用户把 CSV 放入 `res/`（或指定的 data_dir）；文件很大时提醒用户 res/ 已被 gitignore；
 3. **跑检查**：数据到位后先写临时配置，跑 `python scripts/check_data.py --dataset <key> --model <model>`，按 2.3 节协议处理 BLOCK/WARN，向用户报告并等确认；
-4. **写配置**：在 configs/datasets.py 复制一份（参照 xinke 模板）填 data_dir/sample_file/application_file/train_end_month/oot_start_month/incomplete_statuses，取消 TODO 注释；
+4. **写配置**：在 configs/datasets.py 复制一份（参照 new 模板）填 data_dir/sample_file/application_file/train_end_month/oot_start_month/incomplete_statuses；
 5. **验方向**：检查脚本已含十分位方向验证；价值类模型把"低分=高价值"语义记入 value_semantics；
 6. **试跑**：`python scripts/bin_model.py --dataset <key> --model <model> --metric cnt`，检查日志（样本量、月份切分、初始箱数、缺失量）与 Excel 01_总览；
 7. **写报告**：参照第 7.1 节规范在 docs/ 写 md，数值一律从 Excel 取。

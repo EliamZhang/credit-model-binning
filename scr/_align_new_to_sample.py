@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""一次性数据对齐：以 xinke_sample.csv 为主表，把其余新客表裁剪到同一 application_id 集。
+"""一次性数据对齐：以 new_sample.csv 为主表，把其余新客表裁剪到同一 application_id 集。
 
-覆盖：xinke_application_info.csv / xinke_mlt_score.csv / xinke_worthiness_score.csv。
+覆盖：new_application_info.csv / new_mlt_score.csv / new_worthiness_score.csv。
 规则：只保留主表内存在的 application_id；按 application_id 去重（保留第一条，与管线
-加载口径一致）。幂等：主表不变时重跑结果不变。原始文件已在 _filter_xinke_completed.py
+加载口径一致）。幂等：主表不变时重跑结果不变。原始文件已在 _filter_new_completed.py
 备份为 *_original.csv，此处直接覆盖目标文件。
 """
 import sys
@@ -15,11 +15,11 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 RES = ROOT / "res"
-SAMPLE = RES / "xinke_sample.csv"
+SAMPLE = RES / "new_sample.csv"
 TARGETS = [
-    RES / "xinke_application_info.csv",
-    RES / "xinke_mlt_score.csv",
-    RES / "xinke_worthiness_score.csv",
+    RES / "new_application_info.csv",
+    RES / "new_mlt_score.csv",
+    RES / "new_worthiness_score.csv",
 ]
 CHUNK = 200_000
 
@@ -33,7 +33,7 @@ def has_bom(path: Path) -> bool:
 sample_ids = set()
 for chunk in pd.read_csv(SAMPLE, usecols=["application_id"], dtype={"application_id": str}, chunksize=CHUNK):
     sample_ids.update(chunk["application_id"].dropna().astype(str))
-print(f"主表 xinke_sample.csv：{len(sample_ids):,} 个 application_id\n")
+print(f"主表 new_sample.csv：{len(sample_ids):,} 个 application_id\n")
 
 # 2) 逐表对齐：过滤 + 全局去重（保留第一条，跨 chunk 有效）
 for path in TARGETS:
@@ -55,4 +55,4 @@ for path in TARGETS:
     pd.concat(kept_parts, ignore_index=True).to_csv(path, index=False, encoding=enc)
     print(f"{path.name}: {before:,} -> {after:,}（剔除主表外/重复 {before - after:,}）")
 
-print("\n对齐完成：三张新客表均与 xinke_sample.csv 主键一致。")
+print("\n对齐完成：三张新客表均与 new_sample.csv 主键一致。")

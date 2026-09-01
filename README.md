@@ -1424,7 +1424,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 ### 1. 新增样本集
 
-1. 在 `configs/datasets.py` 复制一份配置（参照 `xinke` 模板），填写文件路径、Train/OOT 月份、未完成状态值；
+1. 在 `configs/datasets.py` 复制一份配置（参照 `new` 模板），填写文件路径、Train/OOT 月份、未完成状态值；
 2. 把数据文件放入 `res/`；
 3. 跑 `python scripts/bin_model.py --dataset <key> --model mlt --metric cnt` 试跑；
 4. 检查运行日志与 Excel 总览（样本量、月份切分、缺失量）是否符合预期。

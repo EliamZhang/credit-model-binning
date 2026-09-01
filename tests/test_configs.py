@@ -7,7 +7,7 @@ import configs.models as models
 
 
 class ConfigCompletenessTests(unittest.TestCase):
-    def test_laoke_and_xinke_have_required_dataset_keys(self):
+    def test_laoke_and_new_have_required_dataset_keys(self):
         for key, cfg in datasets.DATASETS.items():
             with self.subTest(key=key):
                 for required in datasets.REQUIRED_DATASET_KEYS:

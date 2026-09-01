@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """一次性数据清理：新客四张表剔除未完成申请（0.Incomplete / 1.In Progress）。
 
-覆盖：xinke_sample.csv / xinke_application_info.csv / xinke_mlt_score.csv /
-xinke_worthiness_score.csv。判定依据 xinke_application_info.csv 的 application_status；
+覆盖：new_sample.csv / new_application_info.csv / new_mlt_score.csv /
+new_worthiness_score.csv。判定依据 new_application_info.csv 的 application_status；
 状态缺失按完成保留（与管线加载口径一致）。原文件备份为 *_original.csv（幂等：备份已存在则跳过）。
 """
 import shutil
@@ -15,12 +15,12 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 RES = ROOT / "res"
-APP_INFO = RES / "xinke_application_info.csv"
+APP_INFO = RES / "new_application_info.csv"
 TARGETS = [
-    RES / "xinke_sample.csv",
-    RES / "xinke_application_info.csv",
-    RES / "xinke_mlt_score.csv",
-    RES / "xinke_worthiness_score.csv",
+    RES / "new_sample.csv",
+    RES / "new_application_info.csv",
+    RES / "new_mlt_score.csv",
+    RES / "new_worthiness_score.csv",
 ]
 INCOMPLETE_STATUSES = ["0.Incomplete", "1.In Progress"]
 CHUNK = 200_000
@@ -32,7 +32,7 @@ def has_bom(path: Path) -> bool:
 
 
 # 1) 构建申请状态映射（以 application_info 为基准）
-print("读取 xinke_application_info.csv 状态…")
+print("读取 new_application_info.csv 状态…")
 status_map = {}
 missing_status = 0
 for chunk in pd.read_csv(
