@@ -1101,3 +1101,48 @@ def selected_ranges_from_candidate_table(
     if selected.empty:
         raise ValueError("未生成任何可用的合箱候选方案")
     return parse_merge_ranges(str(selected.iloc[0]["ranges"]))
+def resolve_merge_ranges(
+    candidates: pd.DataFrame,
+    initial_bin_count: int,
+    train_initial_stats: pd.DataFrame,
+) -> List[Tuple[int, int]]:
+    """选定最终合箱方案：settings.FINAL_BIN_RANGES 指定时校验后直接采用，否则走自动评分表。
+
+    手动方案（模型配置 final_bin_ranges）硬校验：连续覆盖 1..initial_bin_count、档数在
+    [MIN_FINAL_BIN_COUNT, MAX_FINAL_BIN_COUNT]、Train 主指标（PRIMARY_RATE_COLS）无倒挂；
+    箱级约束与极端边界跨越数仅写入日志供评审（与自动路径的评分口径一致，不阻断）。
+    """
+    if not FINAL_BIN_RANGES:
+        return selected_ranges_from_candidate_table(candidates)
+
+    ranges = (
+        parse_merge_ranges(FINAL_BIN_RANGES)
+        if isinstance(FINAL_BIN_RANGES, str)
+        else [tuple(r) for r in FINAL_BIN_RANGES]
+    )
+    covered = [i for lo, hi in ranges for i in range(lo, hi + 1)]
+    if covered != list(range(1, initial_bin_count + 1)):
+        raise ValueError(
+            f"手动合箱方案未连续覆盖 1..{initial_bin_count}：{format_merge_ranges(ranges)}"
+        )
+    if not (MIN_FINAL_BIN_COUNT <= len(ranges) <= MAX_FINAL_BIN_COUNT):
+        raise ValueError(
+            f"手动合箱方案档数 {len(ranges)} 超出 {MIN_FINAL_BIN_COUNT}~{MAX_FINAL_BIN_COUNT}"
+        )
+
+    merged_stats = aggregate_initial_stats_by_ranges(train_initial_stats, ranges)
+    inversions = count_rate_inversions(merged_stats, PRIMARY_RATE_COLS, TRAIN_INVERSION_TOLERANCE)
+    if inversions:
+        raise ValueError(f"手动合箱方案 Train 主指标倒挂 {inversions} 处，请调整方案")
+
+    details = calc_bin_constraint_details(merged_stats)
+    violation_count = int((~details["all_constraints_ok"]).sum())
+    crossed = count_crossed_boundaries(
+        ranges,
+        identify_extreme_boundaries(initial_bin_count),
+    )
+    print(
+        f"手动合箱方案校验：覆盖 1..{initial_bin_count}、{len(ranges)} 档、"
+        f"Train 主指标倒挂 0 处、极端边界跨越 {crossed} 处、箱级约束违规 {violation_count} 项"
+    )
+    return ranges

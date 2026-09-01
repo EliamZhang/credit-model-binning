@@ -46,6 +46,10 @@ MIN_FINAL_BIN_COUNT = 6
 MAX_FINAL_BIN_COUNT = 8
 TARGET_FINAL_BIN_COUNT = 7
 
+# 手动指定合箱方案（模型配置可选 final_bin_ranges 注入）：非 None 时跳过自动合箱评分，
+# 校验结构（连续覆盖 1..初始箱数、档数范围）与 Train 主指标单调性后直接采用。
+FINAL_BIN_RANGES = None
+
 # 合箱主指标：同时监控 1M30+ 和 3M30+ 笔数逾期率。
 PRIMARY_RATE_COLS = ["1m30p_cnt_bad_rate", "3m30p_cnt_bad_rate"]
 PRIMARY_RATE_COL = "3m30p_cnt_bad_rate"  # 保留单列引用，用于 p-value 等需要主锚定指标的场景
@@ -214,6 +218,7 @@ CONSTANT_NAMES = [
     "INITIAL_BIN_COUNT",
     "INITIAL_BIN_COL",
     "FINAL_BIN_COL",
+    "FINAL_BIN_RANGES",
     "HIGH_SCORE_HIGH_RISK",
     "MIN_FINAL_BIN_COUNT",
     "MAX_FINAL_BIN_COUNT",
@@ -305,6 +310,7 @@ def apply_model(model_cfg: dict) -> None:
     globals()["FINAL_BIN_COL"] = model_cfg["final_bin_col"]
     globals()["HIGH_SCORE_HIGH_RISK"] = model_cfg["high_score_high_risk"]
     globals()["STRATEGY_CONFIG"] = model_cfg["strategy_config"]
+    globals()["FINAL_BIN_RANGES"] = model_cfg.get("final_bin_ranges")
     # RISK_NUMERIC_COLS / REQUIRED_ANALYSIS_COLS 中引用 SCORE_COL 的取值随之更新。
     # 占位符用上一次的 score_col（重复 apply 时字面量 "score_mlt" 可能已不在列表中，
     # 如交叉分析一个进程内先后 apply 两个模型）。

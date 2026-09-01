@@ -74,7 +74,7 @@ def build_model_final_bins(
             initial_bin_count,
             settings.STRATEGY_CONFIG,
         )
-        selected_ranges = binning_cnt.selected_ranges_from_candidate_table(candidates)
+        selected_ranges = binning_cnt.resolve_merge_ranges(candidates, initial_bin_count, train_initial_stats)
         merge_map = binning_cnt.build_merge_map(selected_ranges, initial_bin_count)
         final_edges = binning_cnt.build_final_edge_table(initial_edges, merge_map, initial_bin_count)
         final = binning_cnt.apply_merge_map(all_binned, merge_map)

@@ -21,7 +21,7 @@ from pipeline.binning_cnt import (
     build_merge_map,
     format_merge_ranges,
     learn_equal_freq_edges,
-    selected_ranges_from_candidate_table,
+    resolve_merge_ranges,
 )
 from pipeline.binning_cnt import build_merge_candidate_score_table as _cnt_build_merge_candidate_score_table
 from pipeline.binning_cnt import calc_complete_initial_stats as _cnt_calc_complete_initial_stats
@@ -117,13 +117,17 @@ def run_binning(report_path: Path) -> None:
     )
     _t = _log_step(f"2/9 Train 等频初分：{actual_initial_bin_count} 箱", _t)
 
-    # 2) 基于完整 Train 自动选择合箱；OOT 不参与。
+    # 2) 基于完整 Train 选择合箱；OOT 不参与。模型配置指定 final_bin_ranges 时校验后直接采用。
     merge_candidates, merge_steps, protected_boundaries = build_merge_candidate_score_table(
         train_initial_stats,
         actual_initial_bin_count,
         STRATEGY_CONFIG,
     )
-    selected_merge_ranges = selected_ranges_from_candidate_table(merge_candidates)
+    selected_merge_ranges = resolve_merge_ranges(
+        merge_candidates,
+        actual_initial_bin_count,
+        train_initial_stats,
+    )
 
     merge_map = build_merge_map(selected_merge_ranges, actual_initial_bin_count)
     final_edges = build_final_edge_table(
