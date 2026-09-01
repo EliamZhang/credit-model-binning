@@ -104,6 +104,7 @@ python -m unittest discover tests
 python scripts/check_data.py --dataset <d> --model <m>   # 新数据质量检查（2.3 节协议）
 python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 后必跑
 python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
+python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生成三份新客报告（数值从 Excel 读）
 ```
 
 输出文件名规则：`out/<model.report_prefix>_YYYYMMDD.xlsx`；交叉用 `REPORT_PREFIXES`（scripts/cross_models.py）登记的历史前缀，新组合默认 `binning_cross_<a>_<b>_strategy_report`。
