@@ -25,7 +25,7 @@ MODELS = {
         "name": "mlt 主风险模型",
         "cross_tag": "mlt",
         "display_short": "mlt",
-        "score_file": "aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv",
+        "score_file": "old_mlt_score.csv",
         "raw_score_col": "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score",
         "score_col": "score_mlt",
         "initial_bin_col": "score_mlt_bin20",
@@ -52,7 +52,7 @@ MODELS = {
         "name": "价值模型",
         "cross_tag": "wth",
         "display_short": "价值模型",
-        "score_file": "aus_new_worthiness_bid_3rdmodel_v1_0_20260429.csv",
+        "score_file": "old_worthiness_score.csv",
         "raw_score_col": "aus_new_worthiness_bid_3rdmodel_v1_0_20260429",
         "score_col": "score_worthiness",
         "initial_bin_col": "score_worthiness_bin20",
@@ -75,6 +75,72 @@ MODELS = {
             },
         },
         "report_prefix": "binning_worthiness_strategy_report",
+    },
+    "xinke_mlt": {
+        "name": "新客 mlt 主风险模型",
+        "cross_tag": "xke_mlt",
+        "display_short": "新客mlt",
+        "score_file": "xinke_mlt_score.csv",
+        "raw_score_col": "aus_new_risk_bid_3rdmodel_v1_0_20251201",
+        "score_col": "score_xinke_mlt",
+        "initial_bin_col": "score_xinke_mlt_bin20",
+        "final_bin_col": "score_xinke_mlt_final_bin",
+        # 方向经 scripts/check_data.py 十分位方向验证通过（4.34%→35.65%，倒挂 0 处），
+        # 高分高风险成立。分文件 -1.0 特殊值（6.61%，无银行交易数据人群兜底分）已按缺失分
+        # 处理（scr/_mask_xinke_mlt_minus1.py 置空，2026-09-01 用户确认），缺失 42,575 笔。
+        "high_score_high_risk": True,
+        # 最终方案（2026-09-01 用户确认）：7 档 [(1,1),(2,4),(5,8),(9,10),(11,14),(15,19),(20,20)]，
+        # 自动通过阈值 0.08716503179896717（A+B 档，Train 流量 20%），人工审核上限 0.1389779549508124
+        # （C 档，总接纳 40%）；Train 3M30+ AUC 0.711 / PSI 0.0075；接纳人群 3M30+ 7.40%。
+        # 策略约束沿用默认值（用户确认不再按新客数据校准）。
+        # 策略约束先沿用默认值；新客分箱完成后需按新客数据重新校准并与用户确认。
+        "strategy_config": {
+            "strategy_name": "默认策略",
+            "objective": "平衡通过率、整体风险和边际风险",
+            "auto_constraints": {
+                "max_cum_1m30p_cnt_bad_rate": 0.0090,
+                "max_cum_3m30p_cnt_bad_rate": 0.0550,
+                "max_marginal_3m30p_cnt_bad_rate": 0.0900,
+            },
+            "accept_constraints": {
+                "max_cum_1m30p_cnt_bad_rate": 0.0130,
+                "max_cum_3m30p_cnt_bad_rate": 0.0750,
+                "max_marginal_3m30p_cnt_bad_rate": 0.1700,
+            },
+        },
+        "report_prefix": "binning_xinke_mlt_strategy_report",
+    },
+    "xinke_worthiness": {
+        "name": "新客价值模型",
+        "cross_tag": "xke_wth",
+        "display_short": "新客价值模型",
+        "score_file": "xinke_worthiness_score.csv",
+        "raw_score_col": "aus_new_worthiness_bid_3rdmodel_v1_0_20260429",
+        "score_col": "score_xinke_worthiness",
+        "initial_bin_col": "score_xinke_worthiness_bin20",
+        "final_bin_col": "score_xinke_worthiness_final_bin",
+        # 方向经 scripts/check_data.py 十分位方向验证通过（6.50%→39.26%，倒挂 0 处），
+        # 高分高风险成立；价值语义"低分 = 高价值"与风险方向不冲突（低分档 = 低风险 + 高价值）。
+        "high_score_high_risk": True,
+        # 最终方案（2026-09-01 用户确认）：6 档 [(1,1),(2,3),(4,4),(5,9),(10,19),(20,20)]，
+        # 自动通过阈值 0.1170685806554901（A 档，Train 流量 5%），人工审核上限 0.1933179021763764
+        # （C 档，总接纳 20%）；Train 3M30+ AUC 0.670 / PSI 0.0055；接纳人群 3M30+ 7.47%。
+        # 策略约束沿用默认值（用户确认不再按新客数据校准）。
+        "strategy_config": {
+            "strategy_name": "默认策略",
+            "objective": "平衡通过率、整体风险和边际风险",
+            "auto_constraints": {
+                "max_cum_1m30p_cnt_bad_rate": 0.0090,
+                "max_cum_3m30p_cnt_bad_rate": 0.0550,
+                "max_marginal_3m30p_cnt_bad_rate": 0.0900,
+            },
+            "accept_constraints": {
+                "max_cum_1m30p_cnt_bad_rate": 0.0130,
+                "max_cum_3m30p_cnt_bad_rate": 0.0750,
+                "max_marginal_3m30p_cnt_bad_rate": 0.1700,
+            },
+        },
+        "report_prefix": "binning_xinke_worthiness_strategy_report",
     },
 }
 

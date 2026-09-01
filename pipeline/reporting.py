@@ -257,7 +257,7 @@ def build_config_table(
         {"config_group": "基础配置", "config_name": "OOT_START_MONTH", "config_value": OOT_START_MONTH},
         {"config_group": "基础配置", "config_name": "INITIAL_BIN_COUNT", "config_value": INITIAL_BIN_COUNT},
         {"config_group": "基础配置", "config_name": "HIGH_SCORE_HIGH_RISK", "config_value": HIGH_SCORE_HIGH_RISK},
-        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_SOURCE", "config_value": "application_info.csv"},
+        {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_SOURCE", "config_value": "old_application_info.csv"},
         {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_FUNNEL_COUNT_KEY", "config_value": "COUNT DISTINCT application_id"},
         {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_COMPLETED_EXCLUSIONS", "config_value": "0.Incomplete,1.In Progress"},
         {"config_group": "历史实际审批漏斗", "config_name": "ACTUAL_APPROVED_PREFIXES", "config_value": "3,4"},

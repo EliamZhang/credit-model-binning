@@ -21,9 +21,9 @@ DATA_DIR = Path("res")
 OUT_DIR = Path("out")
 REPORT_PATH = OUT_DIR / f"binning_strategy_report_{time.strftime('%Y%m%d')}.xlsx"
 
-SAMPLE_FILE = "sample.csv"
-APPLICATION_FILE = "application_info.csv"
-SCORE_FILE = "aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv"
+SAMPLE_FILE = "old_sample.csv"
+APPLICATION_FILE = "old_application_info.csv"
+SCORE_FILE = "old_mlt_score.csv"
 
 RAW_SCORE_COL = "aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score"
 SCORE_COL = "score_mlt"

@@ -15,7 +15,8 @@
 ## 2. 目录与数据位置
 
 ```
-res/        # 输入数据（gitignored）：用户把 CSV 放这里，文件名必须与 configs 一致
+res/        # 输入数据（gitignored）：用户把 CSV 放这里，文件名必须与 configs 一致；
+            #   命名前缀约定：老客 old_*、新客 xinke_*，新数据文件不要与既有文件重名
 out/        # 输出 Excel 与临时文件（gitignored）
 configs/    # datasets.py（样本集）、models.py（模型）——扩展点
 pipeline/   # 核心管线：settings（常量层）/ data_loading / risk_metrics / binning_cnt /
@@ -28,9 +29,9 @@ tests/      # 单元测试（19 例）
 
 标准输入三件套（以老客为例，见 configs/datasets.py）：
 
-1. `sample.csv`：样本底表（已完成申请；含 application_id/user_id/sample_datetime）；
-2. `application_info.csv`：申请信息（申请时间、月份、duedate 标签、principal、审批状态）；
-3. 模型分文件：每行一个申请一条分，列名即模型分数列（如 `aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score`）。
+1. `old_sample.csv`：老客样本底表（已完成申请；含 application_id/user_id/sample_datetime）；
+2. `old_application_info.csv`：老客申请信息（申请时间、月份、duedate 标签、principal、审批状态）；
+3. 模型分文件：每行一个申请一条分，列名即模型分数列（老客 mlt 为 `aus_old_risk_bid_mltmodel_v1_2_v20260325_lgb_score`，文件 `old_mlt_score.csv`；价值模型文件 `old_worthiness_score.csv`）。
 
 运行环境：Python 3.11（Windows），虚拟环境 `.venv`（解释器 `.venv/Scripts/python.exe`）；依赖首次安装用 `.venv/Scripts/python.exe -m pip install -r requirements.txt`。
 

@@ -63,9 +63,9 @@
 ├── scr/              # 数据与核对工具
 ├── tests/            # 单元测试
 ├── res/
-│   ├── sample.csv
-│   ├── application_info.csv
-│   └── aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv
+│   ├── old_sample.csv
+│   ├── old_application_info.csv
+│   └── old_mlt_score.csv
 └── out/
     └── binning_strategy_report_YYYYMMDD.xlsx   # 运行后生成
 ```
@@ -104,9 +104,9 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 
 | 输入文件 | 连接字段 | 当前用途 |
 | --- | --- | --- |
-| `sample.csv` | `application_id`、`user_id` | 分析底表（数据准备阶段已剔除未完成申请，仅保留完成申请；文件仅含 `application_id` / `user_id` / `sample_datetime` 三列），决定最终保留哪些样本 |
-| `application_info.csv` | `application_id`、`user_id` | 补充申请时间、表现标签、本金、审批状态等信息 |
-| `aus_old_risk_bid_mltmodel_v1_2_20260325_lgb_score.csv` | `application_id` | 提供主模型分，重命名为 `score_mlt` |
+| `old_sample.csv` | `application_id`、`user_id` | 分析底表（数据准备阶段已剔除未完成申请，仅保留完成申请；文件仅含 `application_id` / `user_id` / `sample_datetime` 三列），决定最终保留哪些样本 |
+| `old_application_info.csv` | `application_id`、`user_id` | 补充申请时间、表现标签、本金、审批状态等信息 |
+| `old_mlt_score.csv` | `application_id` | 提供主模型分，重命名为 `score_mlt` |
 
 注意：当前脚本已不再读取申请模型分表（`score_apply`）和交易子模型表，只使用主模型分。
 
@@ -116,7 +116,7 @@ out/binning_strategy_report_YYYYMMDD.xlsx
 - 模型分表按 `application_id` 去重（保留第一条）后左连接。
 - `application_month` 缺失时，用 `application_time` 的月份补齐；若仍缺失则该行不进入 Train / OOT，不参与任何分析。
 - **分箱分析只保留存在模型分的样本**；模型分缺失的样本会在总览中单独展示数量和比例。
-- 数据源 `sample.csv` 已在数据准备阶段剔除未完成申请（`application_status` 属于 `0.Incomplete` / `1.In Progress`），分析样本全部为完成进件；代码加载时保留同口径剔除作为防御性检查（正常为 0 笔），原始样本量、剔除量及剔除率在总览中展示。
+- 数据源 `old_sample.csv` 已在数据准备阶段剔除未完成申请（`application_status` 属于 `0.Incomplete` / `1.In Progress`），分析样本全部为完成进件；代码加载时保留同口径剔除作为防御性检查（正常为 0 笔），原始样本量、剔除量及剔除率在总览中展示。
 
 ### 5. 当前必须存在的关键字段
 
@@ -350,7 +350,7 @@ cum_3m30p_amt_bad_rate
 
 报告严格区分两类指标：
 
-- **历史实际审批漏斗（`actual_*`）**：来自 `application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重；未完成申请已在数据源剔除，分析样本全部为完成进件，故完成率恒为 100%。
+- **历史实际审批漏斗（`actual_*`）**：来自 `old_application_info.csv` 的真实申请与审批状态，所有数量按 `application_id` 去重；未完成申请已在数据源剔除，分析样本全部为完成进件，故完成率恒为 100%。
 - **模型策略测算流量（`strategy_estimated_*`）**：按 `score_mlt` 和 Train 确定的策略阈值测算，不代表历史真实审批结果。
 
 历史实际审批漏斗定义：
@@ -404,7 +404,7 @@ score
 
 拼接顺序：
 
-1. 以 `sample` 为底表，用 `application_id + user_id` 左连接 `application_info.csv`（只补充 sample 缺失的字段）。
+1. 以 `sample` 为底表，用 `application_id + user_id` 左连接 `old_application_info.csv`（只补充 sample 缺失的字段）。
 2. 模型分表按 `application_id` 去重（保留第一条），重命名为 `score_mlt` 后左连接。
 3. `application_month` 缺失时用 `application_time` 的月份补齐。
 4. 数值字段统一转为数值类型。

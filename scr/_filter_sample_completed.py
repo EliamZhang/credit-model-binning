@@ -1,6 +1,6 @@
-"""一次性数据清理：把 sample.csv 过滤为仅含完成申请（剔除 0.Incomplete / 1.In Progress）。
+"""一次性数据清理：把 old_sample.csv 过滤为仅含完成申请（剔除 0.Incomplete / 1.In Progress）。
 
-执行前自动备份原始文件到 res/sample_original.csv；幂等，可重复运行。
+执行前自动备份原始文件到 res/old_sample_original.csv；幂等，可重复运行。
 """
 import shutil
 import sys
@@ -12,9 +12,9 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 RES = ROOT / "res"
-SAMPLE = RES / "sample.csv"
-APP_INFO = RES / "application_info.csv"
-BACKUP = RES / "sample_original.csv"
+SAMPLE = RES / "old_sample.csv"
+APP_INFO = RES / "old_application_info.csv"
+BACKUP = RES / "old_sample_original.csv"
 
 INCOMPLETE_STATUSES = ["0.Incomplete", "1.In Progress"]
 

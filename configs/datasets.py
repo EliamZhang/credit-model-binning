@@ -20,21 +20,20 @@ DATASETS = {
     "laoke": {
         "name": "老客",
         "data_dir": "res",
-        "sample_file": "sample.csv",
-        "application_file": "application_info.csv",
+        "sample_file": "old_sample.csv",
+        "application_file": "old_application_info.csv",
         "train_end_month": "2025-10",
         "oot_start_month": "2025-11",
         "incomplete_statuses": ["0.Incomplete", "1.In Progress"],
         "value_semantics": "价值模型分越低 = 价值越高（利息贡献越高），高分 = 高风险（经验验证）",
     },
     "xinke": {
-        # 模板：新客样本接入时填写并取消 TODO 标记。
         "name": "新客",
-        "data_dir": "res",  # TODO: 确认新客数据文件位置
-        "sample_file": "xinke_sample.csv",  # TODO: 按实际文件名填写
-        "application_file": "xinke_application_info.csv",  # TODO: 按实际文件名填写
-        "train_end_month": "2026-01",  # TODO: 按新客样本时间窗口填写
-        "oot_start_month": "2026-02",  # TODO: 按新客样本时间窗口填写
+        "data_dir": "res",
+        "sample_file": "xinke_sample.csv",
+        "application_file": "xinke_application_info.csv",
+        "train_end_month": "2025-10",
+        "oot_start_month": "2025-11",
         "incomplete_statuses": ["0.Incomplete", "1.In Progress"],
         "value_semantics": "新客价值模型口径：分数越低价值越高（见 docs/新客价值模型效果评估文档_0520.html）",
     },
