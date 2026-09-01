@@ -297,6 +297,7 @@ def apply_dataset(dataset_cfg: dict) -> None:
 
 def apply_model(model_cfg: dict) -> None:
     """把模型配置注入 settings（在 _sync_settings 之前调用）。"""
+    prev_score_col = globals()["SCORE_COL"]
     globals()["SCORE_FILE"] = model_cfg["score_file"]
     globals()["RAW_SCORE_COL"] = model_cfg["raw_score_col"]
     globals()["SCORE_COL"] = model_cfg["score_col"]
@@ -305,9 +306,11 @@ def apply_model(model_cfg: dict) -> None:
     globals()["HIGH_SCORE_HIGH_RISK"] = model_cfg["high_score_high_risk"]
     globals()["STRATEGY_CONFIG"] = model_cfg["strategy_config"]
     # RISK_NUMERIC_COLS / REQUIRED_ANALYSIS_COLS 中引用 SCORE_COL 的取值随之更新。
+    # 占位符用上一次的 score_col（重复 apply 时字面量 "score_mlt" 可能已不在列表中，
+    # 如交叉分析一个进程内先后 apply 两个模型）。
     globals()["RISK_NUMERIC_COLS"] = [model_cfg["score_col"]] + RISK_NUMERIC_COLS[1:]
     globals()["REQUIRED_ANALYSIS_COLS"] = [
-        model_cfg["score_col"] if col == "score_mlt" else col
+        model_cfg["score_col"] if col == prev_score_col else col
         for col in REQUIRED_ANALYSIS_COLS
     ]
 

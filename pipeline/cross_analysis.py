@@ -178,6 +178,12 @@ MLT_AUTO_BIN = 3
 MLT_ACCEPT_BIN = 5
 WTH_AUTO_BIN = 2
 WTH_ACCEPT_BIN = 3
+# 新客口径（2026-09-01 两模型分箱最终方案，用户确认）：
+# new_mlt 自动截止 B 档 / 人工上限 C 档；new_worthiness 自动截止 A 档 / 人工上限 C 档。
+NEW_MLT_AUTO_BIN = 2
+NEW_MLT_ACCEPT_BIN = 3
+NEW_WTH_AUTO_BIN = 1
+NEW_WTH_ACCEPT_BIN = 3
 COMBO_MLT_WEIGHT = 0.7
 DISAGREE_RANK_GAP = 3
 MIN_CELL_N_FOR_RATE = 50
@@ -236,7 +242,7 @@ def build_cross_matrix(
     tag_a: str,
     tag_b: str,
 ) -> pd.DataFrame:
-    """某样本组的 7×7 交叉矩阵（含行列边际与 13 组指标）。"""
+    """某样本组的交叉矩阵（行 × 列，含行列边际与 13 组指标）。"""
     group = cross.loc[cross["sample_group"].eq(sample_group)].copy()
     overall = group_overall_rates(group)
     group_total = len(group)
@@ -266,12 +272,12 @@ def build_cross_matrix(
             "actual_deal_rate": funnel["actual_deal_rate"],
         }
 
-    orders = sorted(
-        set(group[f"{tag_a}_bin_order"].dropna().astype(int))
-        & set(group[f"{tag_b}_bin_order"].dropna().astype(int))
-    )
+    # 行用 A 模型档序、列用 B 模型档序（两模型档数可能不同，如 7×6；
+    # 交集会漏掉档数较多的模型多出的档位整行）。
+    orders_a = sorted(set(group[f"{tag_a}_bin_order"].dropna().astype(int)))
+    orders_b = sorted(set(group[f"{tag_b}_bin_order"].dropna().astype(int)))
     rows: List[Dict] = []
-    for mo, wo in product(orders, orders):
+    for mo, wo in product(orders_a, orders_b):
         cell = group.loc[group[f"{tag_a}_bin_order"].eq(mo) & group[f"{tag_b}_bin_order"].eq(wo)]
         rows.append({
             f"{tag_a}_bin_order": mo,
@@ -280,7 +286,7 @@ def build_cross_matrix(
             f"{tag_b}_bin": _label(edges_b, wo),
             **cell_metrics(cell),
         })
-    for mo in orders:
+    for mo in orders_a:
         row_cell = group.loc[group[f"{tag_a}_bin_order"].eq(mo)]
         rows.append({
             f"{tag_a}_bin_order": mo,
@@ -289,7 +295,7 @@ def build_cross_matrix(
             f"{tag_b}_bin": "行边际",
             **cell_metrics(row_cell),
         })
-    for wo in orders:
+    for wo in orders_b:
         col_cell = group.loc[group[f"{tag_b}_bin_order"].eq(wo)]
         rows.append({
             f"{tag_a}_bin_order": 0,
@@ -507,6 +513,10 @@ def _current_thresholds(tag_a: str, tag_b: str):
         return MLT_AUTO_BIN, MLT_ACCEPT_BIN, WTH_AUTO_BIN, WTH_ACCEPT_BIN
     if (tag_a, tag_b) == ("wth", "mlt"):
         return WTH_AUTO_BIN, WTH_ACCEPT_BIN, MLT_AUTO_BIN, MLT_ACCEPT_BIN
+    if (tag_a, tag_b) == ("new_mlt", "new_wth"):
+        return NEW_MLT_AUTO_BIN, NEW_MLT_ACCEPT_BIN, NEW_WTH_AUTO_BIN, NEW_WTH_ACCEPT_BIN
+    if (tag_a, tag_b) == ("new_wth", "new_mlt"):
+        return NEW_WTH_AUTO_BIN, NEW_WTH_ACCEPT_BIN, NEW_MLT_AUTO_BIN, NEW_MLT_ACCEPT_BIN
     raise ValueError(f"未登记 {tag_a} × {tag_b} 的现行阈值档位，请在 pipeline/cross_analysis.py 补充")
 
 
@@ -626,11 +636,16 @@ def run_matrix(
     ])
     print("[7/7] 总览与附录完成")
 
+    def matrix_dim_label(prefix: str, matrix: pd.DataFrame) -> str:
+        rows_n = int(matrix.loc[matrix[f"{tag_a}_bin_order"] > 0, f"{tag_a}_bin_order"].nunique())
+        cols_n = int(matrix.loc[matrix[f"{tag_b}_bin_order"] > 0, f"{tag_b}_bin_order"].nunique())
+        return f"{prefix} {rows_n}×{cols_n} 交叉矩阵（行 = {tag_a} 档，列 = {tag_b} 档）"
+
     wb = Workbook()
     wb.remove(wb.active)
     write_sheet(wb, "01_总览", [("两模型交叉分析总览", None), (None, overview)])
-    write_sheet(wb, "02_交叉矩阵_Train", [(f"Train 7×7 交叉矩阵（行 = {tag_a} 档，列 = {tag_b} 档）", None), (None, train_matrix)])
-    write_sheet(wb, "03_交叉矩阵_OOT", [(f"OOT 7×7 交叉矩阵（行 = {tag_a} 档，列 = {tag_b} 档）", None), (None, oot_matrix)])
+    write_sheet(wb, "02_交叉矩阵_Train", [(matrix_dim_label("Train", train_matrix), None), (None, train_matrix)])
+    write_sheet(wb, "03_交叉矩阵_OOT", [(matrix_dim_label("OOT", oot_matrix), None), (None, oot_matrix)])
     write_sheet(wb, "04_条件增量分析", [("条件增量与分档一致性", None), (None, conditional)])
     write_sheet(wb, "05_组合评分效果", [("单模型分与组合分 AUC / KS 对比", None), (None, score_perf)])
     write_sheet(wb, "06_二维策略模拟", [

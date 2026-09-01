@@ -25,6 +25,8 @@ from pipeline import cross_analysis
 REPORT_PREFIXES = {
     ("laoke", "mlt", "worthiness", "matrix"): "binning_cross_strategy_report",
     ("laoke", "mlt", "worthiness", "cond"): "binning_worthiness_cond_strategy_report",
+    ("new", "new_mlt", "new_worthiness", "matrix"): "binning_new_cross_strategy_report",
+    ("new", "new_mlt", "new_worthiness", "cond"): "binning_new_worthiness_cond_strategy_report",
 }
 
 
