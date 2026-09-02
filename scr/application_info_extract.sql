@@ -7,6 +7,10 @@ SELECT
     application_time,
     application_date,
     application_month,
+    total_income,
+    total_expenses,
+    gross_surplus,
+    net_surplus,
 
     -- 状态（漏斗用）
     status,
