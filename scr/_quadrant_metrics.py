@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """四类客群象限指标重算器：从 res/*.csv 按交叉报告分档重算四象限（双低 / 仅 mlt 低 / 仅 wth 低 / 双高）的
 漏斗、风险、收入指标，先逐格核对 Excel 矩阵（样本量精确一致、比率 2 位小数一致）再输出象限表，
-供 docs/四类客群矩阵_（新客mlt × 新客价值模型）.md 取数（数值纪律同 CLAUDE.md §7：不手抄）。
+供 docs/四类客群矩阵（新客mlt × 新客价值模型）.md 取数（数值纪律同 CLAUDE.md §7：不手抄）。
 
 口径（与 pipeline/cross_analysis.py 及 scr/_gen_new_reports.py 一致）：
 - 双分样本 = mlt 分 ∩ wth 分 ∩ application_info，Train = application_month ≤ 2025-10；
@@ -227,7 +227,7 @@ def verify_vs_report(quad, group_name):
 
 def verify_md(quads):
     """读 docs/四类客群矩阵 md，逐项核对各客群表格数值与重算结果一致。"""
-    text = (ROOT / "docs" / "四类客群矩阵_（新客mlt × 新客价值模型）.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs" / "四类客群矩阵（新客mlt × 新客价值模型）.md").read_text(encoding="utf-8")
     seg2quad = {
         "稳健经营型优质客": "双低",
         "高薪高波动型周转客": "仅 wth 低",
