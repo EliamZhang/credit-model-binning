@@ -1206,8 +1206,8 @@ def render_cross():
     B(f"- **OR 组合无增益**：接纳率 {pct(or_row['train_accept_rate'])}、风险 {pct(or_row['train_accept_3m30p'])}，均不优于 mlt 单模型。")
     B("")
     B("### （二）AND 接纳网格（Train 接纳率 / 接纳 3M30+）\n")
-    B("| new_mlt＼new_wth | " + " | ".join(f"≤{chr(63+i)}（{i+1}）" for i in range(7)) + " |")
-    B("| --- | " + " | ".join("---:" for _ in range(7)) + " |")
+    B("| new_mlt＼new_wth | " + " | ".join(f"≤{chr(64+b)}（{b}）" for b in range(2, 8)) + " |")
+    B("| --- | " + " | ".join("---:" for _ in range(6)) + " |")
     grid = {}
     for r in grid_rows:
         grid[(r["new_mlt_accept_bin"], r["new_wth_accept_bin"])] = r
@@ -1220,7 +1220,7 @@ def render_cross():
             else:
                 mark = "**" if r["is_current_and"] else ""
                 cells.append(f"{mark}{pct(r['train_accept_rate'])} / {pct(r['train_accept_3m30p'])}{mark}")
-        B(f"| **≤{chr(63+a)}（{a}）** | " + " | ".join(cells) + " |")
+        B(f"| **≤{chr(64+a)}（{a}）** | " + " | ".join(cells) + " |")
     B("")
     B("### （三）现行接纳阈值的四象限人群\n")
     B("按 new_mlt 接纳线（≤C）与新客价值模型接纳线（≤C）划分：双低 = 低风险 × 高价值（优先经营）、仅 mlt 低 = 低风险 × 低价值（收益验证）、仅价值低 = 高价值 × 高风险（谨慎经营）、双高 = 高风险 × 低价值（优先风险控制）。")
