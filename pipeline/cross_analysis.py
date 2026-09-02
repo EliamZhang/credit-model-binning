@@ -242,7 +242,7 @@ def build_cross_matrix(
     tag_a: str,
     tag_b: str,
 ) -> pd.DataFrame:
-    """某样本组的交叉矩阵（行 × 列，含行列边际与 13 组指标）。"""
+    """某样本组的交叉矩阵（行 × 列，含行列边际与 14 组指标）。"""
     group = cross.loc[cross["sample_group"].eq(sample_group)].copy()
     overall = group_overall_rates(group)
     group_total = len(group)
@@ -269,6 +269,7 @@ def build_cross_matrix(
             "3m30p_amt_lift": a3 / overall["3m30p_amt_bad_rate"] if overall["3m30p_amt_bad_rate"] else np.nan,
             "principal_pct": principal / group_principal if group_principal else np.nan,
             "actual_approval_rate": funnel["actual_approval_rate"],
+            "actual_auto_approval_rate": funnel["actual_auto_approval_rate"],
             "actual_deal_rate": funnel["actual_deal_rate"],
         }
 

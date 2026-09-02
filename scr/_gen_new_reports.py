@@ -1014,7 +1014,7 @@ def render_cross():
     cond_policy = find_table(wb2["07_二维策略模拟"], "policy")
 
     def matrix_md(rows, group, income_stats):
-        """渲染 13 组 Excel 指标矩阵 + 4 组收入指标矩阵为 md 表格。
+        """渲染 14 组 Excel 指标矩阵 + 4 组收入指标矩阵为 md 表格。
         rows 为 dict 列表（含边际与整体行）；income_stats 为 income_matrix_stats() 输出。"""
         A = []
         label_order = sorted({r["new_wth_bin_order"] for r in rows if isinstance(r["new_wth_bin_order"], int) and r["new_wth_bin_order"] > 0})
@@ -1031,7 +1031,7 @@ def render_cross():
         def cell_metric(r, key, fmt, min_n=100):
             if r is None:
                 return "—"
-            if key in ("1m30p_cnt_bad_rate", "3m30p_cnt_bad_rate", "1m30p_amt_bad_rate", "3m30p_amt_bad_rate", "actual_approval_rate", "actual_deal_rate", "1m30p_cnt_lift", "3m30p_cnt_lift", "1m30p_amt_lift", "3m30p_amt_lift") and r["n"] < min_n:
+            if key in ("1m30p_cnt_bad_rate", "3m30p_cnt_bad_rate", "1m30p_amt_bad_rate", "3m30p_amt_bad_rate", "actual_approval_rate", "actual_auto_approval_rate", "actual_deal_rate", "1m30p_cnt_lift", "3m30p_cnt_lift", "1m30p_amt_lift", "3m30p_amt_lift") and r["n"] < min_n:
                 return "—"
             v = r[key]
             if v is None:
@@ -1083,6 +1083,8 @@ def render_cross():
         A.append(metric_table("本金占比", "principal_pct", fmt_pct))
         A.append("")
         A.append(metric_table("历史实际审批通过率", "actual_approval_rate", fmt_pct))
+        A.append("")
+        A.append(metric_table("历史实际自动审批通过率", "actual_auto_approval_rate", fmt_pct))
         A.append("")
         A.append(metric_table("历史实际成交转化率", "actual_deal_rate", fmt_pct))
 
@@ -1162,7 +1164,7 @@ def render_cross():
     B("- **价值语义**：价值模型分为\"低分 = 高价值\"（分数越低，利息贡献越高，见 docs/新客价值模型效果评估文档_0520.html）。因此价值档 A（最低分）同时是\"高价值 + 低风险\"档；下文\"价值 ≤ C\"即\"价值好（低分）人群\"。")
     B("")
     B("## 三、交叉指标矩阵（Train/OOT）\n")
-    B("以 7×7 矩阵展示全部交叉格（行 = new_mlt 档、列 = new_wth 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（价值边际）= 该价值档全部人群的指标值、总计列（mlt 边际）= 该 mlt 档全部人群的指标值、右下角 = 样本组整体值。每组包含 13 个业务指标矩阵（来自 matrix Excel）与 4 个收入字段中位数矩阵（total_income / total_expenses / gross_surplus / net_surplus，来自 `res/new_application_info.csv` 重算，分档与矩阵逐格核对一致）。")
+    B("以 7×7 矩阵展示全部交叉格（行 = new_mlt 档、列 = new_wth 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（价值边际）= 该价值档全部人群的指标值、总计列（mlt 边际）= 该 mlt 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 4 个收入字段中位数矩阵（total_income / total_expenses / gross_surplus / net_surplus，来自 `res/new_application_info.csv` 重算，分档与矩阵逐格核对一致）。")
     B("")
     B("**Train**：\n")
     B(train_matrix_md)
