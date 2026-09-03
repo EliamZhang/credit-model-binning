@@ -874,6 +874,7 @@ def accept_bin_rank(bin_label: str) -> int:
 
 INCOME_FIELDS = ["total_income", "total_expenses", "gross_surplus", "net_surplus"]
 SURPLUS_FIELDS = ["gross_surplus", "net_surplus"]
+DEAL_STATUSES = {"Active_Account", "Closed", "Blocked"}
 
 # 两模型最终 7 档右边界（与附录一致；区间规则 (left, right]）
 MLT_EDGES = [0.04990757831163817, 0.08716503179896717, 0.1389779549508124,
@@ -914,7 +915,7 @@ def _read_scores():
 
 
 def _read_app_info():
-    """读申请信息：application_id -> (application_month, application_time, 4 收入字段)。"""
+    """读申请信息：application_id -> (application_month, 4 收入字段, 是否成交)。成交 = status ∈ DEAL_STATUSES（与管线漏斗口径一致）。"""
     out = {}
     with open(ROOT / "res/new_application_info.csv", encoding="utf-8-sig") as f:
         r = csv.reader(f)
@@ -922,12 +923,13 @@ def _read_app_info():
         aidx = hdr.index("application_id")
         midx = hdr.index("application_month")
         tix = hdr.index("application_time")
+        six = hdr.index("status")
         fix = [hdr.index(x) for x in INCOME_FIELDS]
         for row in r:
             m = row[midx]
             if not m:
                 m = row[tix][:7] if row[tix] else ""
-            out[row[aidx]] = (m, [row[i] for i in fix])
+            out[row[aidx]] = (m, [row[i] for i in fix], row[six] in DEAL_STATUSES)
     return out
 
 
@@ -955,10 +957,12 @@ def _income_verify_and_cells(rows):
 
 def income_matrix_stats():
     """收入 4 字段在 7×7 矩阵格/边际上的平均数（数值来自 res/*.csv 重算，
-    分档先与矩阵逐格核对一致）。返回 (all_stats, surplus_pos_stats)：
+    分档先与矩阵逐格核对一致）。返回 (all_stats, surplus_pos_stats, deal_stats)：
     all_stats = {(group, kind, idx): {field: mean}}，kind ∈ cell/row/col/all，
     idx ∈ (mlt_bin, wth_bin) / mlt_bin / wth_bin / 0；
-    surplus_pos_stats 仅 gross_surplus/net_surplus，口径为剔除 <0 样本后的平均数（key 结构同上）。"""
+    surplus_pos_stats 仅 gross_surplus/net_surplus，口径为剔除 <0 样本后的平均数；
+    deal_stats 仅 gross_surplus/net_surplus，口径为成交样本（status ∈ DEAL_STATUSES）的平均数
+    （后两者 key 结构同 all_stats）。"""
     mlt, wth = _read_scores()
     app = _read_app_info()
     common = set(mlt) & set(wth) & set(app)
@@ -969,9 +973,10 @@ def income_matrix_stats():
             rows[aid] = (_bin_of(mlt[aid], MLT_EDGES), _bin_of(wth[aid], WTH_EDGES), m <= "2025-10")
     _income_verify_and_cells(rows)
 
-    acc, pos_acc = {}, {}
+    acc, pos_acc, deal_acc = {}, {}, {}
     for aid, (ma, wa, tr) in rows.items():
         g = 1 if tr else 0
+        is_deal = app[aid][2]
         for key in [(g, "cell", (ma, wa)), (g, "row", ma), (g, "col", wa), (g, "all", 0)]:
             d = acc.setdefault(key, {f: [] for f in INCOME_FIELDS})
             pd = pos_acc.setdefault(key, {f: [] for f in SURPLUS_FIELDS})
@@ -982,9 +987,18 @@ def income_matrix_stats():
                     d[f].append(fv)
                     if f in SURPLUS_FIELDS and fv >= 0:
                         pd[f].append(fv)
+            if is_deal:
+                dd = deal_acc.setdefault(key, {f: [] for f in SURPLUS_FIELDS})
+                for fi, f in enumerate(INCOME_FIELDS):
+                    if f not in SURPLUS_FIELDS:
+                        continue
+                    v = app[aid][1][fi]
+                    if v not in ("null", "", "None"):
+                        dd[f].append(float(v))
     all_stats = {key: {f: _mean(vals) if vals else None for f, vals in d.items()} for key, d in acc.items()}
     pos_stats = {key: {f: _mean(vals) if vals else None for f, vals in d.items()} for key, d in pos_acc.items()}
-    return all_stats, pos_stats
+    deal_stats = {key: {f: _mean(vals) if vals else None for f, vals in d.items()} for key, d in deal_acc.items()}
+    return all_stats, pos_stats, deal_stats
 
 
 # ---------- 交叉报告渲染 ----------
@@ -1020,7 +1034,7 @@ def render_cross():
     disc = find_table(wb2["06_区分度对比"], "sample_group")
     cond_policy = find_table(wb2["07_二维策略模拟"], "policy")
 
-    def matrix_md(rows, group, income_stats, pos_stats):
+    def matrix_md(rows, group, income_stats, pos_stats, deal_stats):
         """渲染 14 组 Excel 指标矩阵 + 4 组收入指标矩阵为 md 表格。
         rows 为 dict 列表（含边际与整体行）；income_stats 为 income_matrix_stats() 输出。"""
         A = []
@@ -1114,11 +1128,14 @@ def render_cross():
         for fname in SURPLUS_FIELDS:
             A.append(income_table(f"{fname} 平均数（剔除 <0 样本，元）", fname, pos_stats))
             A.append("")
+        for fname in SURPLUS_FIELDS:
+            A.append(income_table(f"{fname} 平均数（成交样本，元）", fname, deal_stats))
+            A.append("")
         return "\n".join(A)
 
-    income_stats, surplus_pos_stats = income_matrix_stats()
-    train_matrix_md = matrix_md(mtr, "Train", income_stats, surplus_pos_stats)
-    oot_matrix_md = matrix_md(moo, "OOT", income_stats, surplus_pos_stats)
+    income_stats, surplus_pos_stats, deal_stats = income_matrix_stats()
+    train_matrix_md = matrix_md(mtr, "Train", income_stats, surplus_pos_stats, deal_stats)
+    oot_matrix_md = matrix_md(moo, "OOT", income_stats, surplus_pos_stats, deal_stats)
 
     # 策略表
     pol = {r["policy"]: r for r in policy_rows}
@@ -1145,7 +1162,7 @@ def render_cross():
     L = []
     B = L.append
     B("# 两模型交叉效果评估报告（新客 mlt × 新客价值模型）\n")
-    B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{CROSS_XLSX.name}`（matrix）与 `{COND_XLSX.name}`（cond）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后的平均数口径），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
+    B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{CROSS_XLSX.name}`（matrix）与 `{COND_XLSX.name}`（cond）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
     B(">")
     B(f"> 分析样本为同时存在两个模型分的完成申请 {num(n_all)} 笔（占 579,100 笔完成申请的 {pct(n_all/579100)}），按 Train（2024-01—2025-10）/ OOT（2025-11—2026-05）切分，OOT 仅用于验证。两模型分数缺失口径：mlt 缺失 42,575 笔（7.35%，含无银行交易数据人群的 −1.0 兜底分置空，2026-09-01 用户确认）、价值模型缺失 40,974 笔（7.08%，无银行交易数据人群），双分样本即两模型分数交集。")
     B(">")
@@ -1175,7 +1192,7 @@ def render_cross():
     B("- **价值语义**：价值模型分为\"低分 = 高价值\"（分数越低，利息贡献越高，见 docs/新客价值模型效果评估文档_0520.html）。因此价值档 A（最低分）同时是\"高价值 + 低风险\"档；下文\"价值 ≤ C\"即\"价值好（低分）人群\"。")
     B("")
     B("## 三、交叉指标矩阵（Train/OOT）\n")
-    B("以 7×7 矩阵展示全部交叉格（行 = new_mlt 档、列 = new_wth 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（价值边际）= 该价值档全部人群的指标值、总计列（mlt 边际）= 该 mlt 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 6 张收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张 + gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均），均来自 `res/new_application_info.csv` 重算，分档与矩阵逐格核对一致）。")
+    B("以 7×7 矩阵展示全部交叉格（行 = new_mlt 档、列 = new_wth 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（价值边际）= 该价值档全部人群的指标值、总计列（mlt 边际）= 该 mlt 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 8 张收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/new_application_info.csv` 重算，分档与矩阵逐格核对一致）。")
     B("")
     B("**Train**：\n")
     B(train_matrix_md)
