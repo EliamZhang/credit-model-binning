@@ -21,7 +21,7 @@ out/        # 输出 Excel 与临时文件（gitignored）
 configs/    # datasets.py（样本集）、models.py（模型）——扩展点
 pipeline/   # 核心管线：settings（常量层）/ data_loading / risk_metrics / binning_cnt /
             #   strategy / monthly / reporting / orchestration / bin_amt / cross_analysis
-scripts/    # 入口：bin_model.py、cross_models.py + 4 个快捷壳
+scripts/    # 入口：bin_model.py、cross_models.py、check_data.py + 4 个快捷壳
 docs/       # 全部报告 md 与参考文档
 scr/        # 数据准备与核对工具
 tests/      # 单元测试（19 例）
@@ -57,9 +57,21 @@ tests/      # 单元测试（19 例）
 ## 2.2 Excel 取数地图（写报告时按此找数）
 
 - **单模型分箱 Excel**（6 sheets）：`01_总览`（方案/阈值/PSI/AUC/KS/漏斗速览）→ `02_分箱详情`（合箱过程/候选/步骤）→ `03_最终分箱统计`（Train/OOT 分箱大表，含 CI 与 Lift）→ `04_策略方案`（历史漏斗/测算流量/阈值选择/敏感性/分段）→ `05_模型验证`（对比/AUC/KS/PSI/单调性/月度）→ `06_附录`（配置/上线规则/指标字典）；
-- **交叉 matrix Excel**（7 sheets）：`01_总览`（相关性与方案）→ `02/03_交叉矩阵_Train/OOT`（7×7 每格 14 指标，含历史实际自动审批通过率）→ `04_条件增量分析` → `05_组合评分效果` → `06_二维策略模拟`（策略对照/AND 网格/四象限）→ `07_附录`。
+- **交叉 matrix Excel**（7 sheets）：`01_总览`（相关性与方案）→ `02/03_交叉矩阵_Train/OOT`（7×7 每格 14 指标，含历史实际自动审批通过率列——老客自 20260904 重跑版起才有）→ `04_条件增量分析` → `05_组合评分效果` → `06_二维策略模拟`（策略对照/AND 网格/四象限）→ `07_附录`。收入矩阵只存在于报告 md（Excel 无收入列），写数时按脚本重算口径（见下）。
 
 取数一律用 openpyxl 读值（`data_only=True`），不要从控制台输出抄数。
+
+**docs/ 报告地图**（改动/核对前先定位数值来源与维护方式，完整清单见 README.md 十一.6）：
+
+| 报告（docs/） | 数值锚 | 维护方式 |
+| --- | --- | --- |
+| 分箱方法论与结果说明报告（mlt 笔数口径 / mlt 金额口径 / 价值模型笔数口径）.md | 老客单模型 Excel（页头锚定日期版本） | 手工维护；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py` / `_verify_report_sync_mlt_amt.py` 兜底核对 |
+| 两模型交叉效果评估报告（mlt × 价值模型）.md | 老客交叉 Excel + res/old_*.csv 重算 | 手工维护；章三收入/自动审批矩阵逐格独立核对 |
+| 分箱方法论与结果说明报告（新客mlt笔数口径 / 新客价值模型笔数口径）.md | binning_new_*_strategy_report | `scr/_gen_new_reports.py` 生成（改文案改生成器，重跑后 git diff 仅目标行） |
+| 两模型交叉效果评估报告（新客mlt × 新客价值模型）.md | binning_new_cross_strategy_report | 同上 |
+| 四类客群矩阵（新客mlt × 新客价值模型）.md | 交叉 Excel 02/03/06 + res/new_* | `scr/_quadrant_metrics.py` 重算核对（Excel 逐格 + md 数值逐项） |
+
+口径提醒：交叉报告（老/新客）收入矩阵为**平均数**三口径；四类客群矩阵收入/盈余为**中位数**口径，跨文档比对注意区分。
 
 ## 2.3 新数据质量检查与交互协议（数据入库后的第一道工序）
 
@@ -90,6 +102,7 @@ python scripts/check_data.py --dataset <d> --model <m>
 python scripts/bin_model.py --dataset laoke --model mlt --metric cnt     # mlt 笔数口径
 python scripts/bin_model.py --dataset laoke --model mlt --metric amt     # mlt 金额口径
 python scripts/bin_model.py --dataset laoke --model worthiness --metric cnt  # 价值模型
+python scripts/bin_model.py --dataset new --model mlt --metric cnt       # 新客（新样本集参照此例）
 # 快捷壳（等价命令）
 python scripts/bin_mlt_cnt.py
 python scripts/bin_mlt_amt.py
@@ -103,6 +116,7 @@ python scripts/check_data.py --dataset <d> --model <m>   # 新数据质量检查
 python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 后必跑
 python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
 python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生成三份新客报告（数值从 Excel 读）
+python scr/_quadrant_metrics.py             # 四类客群矩阵重算核对（Excel 逐格 + md 逐项；改象限 md 后必跑）
 ```
 
 输出文件名规则：`out/<model.report_prefix>_YYYYMMDD.xlsx`；交叉用 `REPORT_PREFIXES`（scripts/cross_models.py）登记的历史前缀，新组合默认 `binning_cross_<a>_<b>_strategy_report`。
@@ -149,6 +163,7 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 - [ ] `python -m unittest discover tests` 全绿
 - [ ] 动过 mlt 管线 → cnt 核对 961 单元 + amt 核对 940 单元通过
 - [ ] 动过价值模型/交叉 → 关键值与第 8 节基准一致（不一致要说明原因，且经用户确认）
+- [ ] 动过新客生成器（scr/_gen_new_reports.py）→ 重跑后三份新客 md git diff 仅目标行；动过象限 md → `scr/_quadrant_metrics.py` 4 段全绿
 - [ ] 报告 md 数值与 Excel 逐项一致（新报告按 7.1 模板与格式）
 - [ ] `git status` 无遗漏文件；提交信息中文、含验证结果
 - [ ] 推送前已征得用户明确同意（推送纪律）
@@ -168,6 +183,8 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 ## 五、方案稳健性验证（单调性/PSI/AUC/KS/月度/分段）
 ## 六、附录：核心配置参数
 ```
+
+交叉报告章三为 **22 组矩阵 × Train/OOT**：14 个业务指标矩阵（7×7 每格 n 精确一致；自动审批通过率 n<100 显示 "—"；数值读 Excel 02/03 sheet）+ 8 张收入口径矩阵（**平均数**口径：全样本 4 字段 + gross/net 剔除 <0 样本 + gross/net 成交样本，成交 = status 属 Active_Account/Closed/Blocked；收入无 Excel 列，数值由 res 重算并断言分档计数与 Excel 每格 n 一致）。四类客群象限文档惯例：页头 3 行 blockquote（文档定位 + 象限定义含两模型 C 档右边界 + **中位数**口径声明区别于交叉报告平均数）。
 
 数值格式约定：逾期率 2 位小数百分比（含 CI 写 `1.73% [1.48%, 2.01%]`）；阈值全精度原文；AUC/KS/PSI/相关性 4 位小数；样本量千分位；Lift 2~4 位（与同表其余列一致）；pp 差写 `+0.0014` 式四位数。所有表格列名与 Excel 一致，不缩写含义。
 
@@ -189,6 +206,8 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 | 价值模型 cnt | 7 档 `[(1,1),(2,4),(5,8),(9,13),(14,16),(17,19),(20,20)]`，自动 0.1362170673263007，接纳 0.1863252117841281，PSI 0.0084，缺失 21,914 笔（6.68%） |
 | 交叉 matrix | Pearson 0.5938；AND（mlt ≤ E 且 wth ≤ C）接纳 37.54% / 风险 5.74%；四象限：双低 37.54%、仅 mlt 低 37.86%、仅价值低 2.46%（22.74%）、双高 22.14% |
 
+> 新客（new）关键值不冻结在本表，由生成器与核对脚本内建断言保证：分档边界（MLT_EDGES/WTH_EDGES，交叉报告附录 C 行即两模型 C 档右边界 mlt 0.1389779549508124 / 价值 0.1933179021763764）、双分样本量 Train 407,134 / OOT 129,382（总 536,516）。
+
 ## 9. 关键业务口径提醒
 
 - **风险方向**：两模型均为高分高风险（`high_score_high_risk=True`）；低分=低风险，A 档 = 最安全；
@@ -204,4 +223,7 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 - **pipeline 的 settings 注入机制**：动态常量（SCORE_COL 等）由 `settings.sync()` 刷入各模块全局；新增函数若使用这些常量，写裸引用即可，但**不要**在函数默认参数里引用动态常量（import 时会被冻结），需要时用 `None + 函数体内解析` 模式（参考 risk_metrics.calc_bin_stats）；
 - **等频初分可能不足 20 箱**：分数唯一值不足时 qcut duplicates=drop，少于 6 箱会报错——遇此情况先与用户确认分数分布；
 - **金额口径与笔数口径不可混用**：bin_amt 的 21 个差异函数按调用传递闭包保留，新增差异函数时注意其内部裸调用的归属模块；
+- **收入口径跨文档区分**：老/新客交叉报告收入矩阵为**平均数**三口径（res 重算，无 Excel 列）；四类客群矩阵为**中位数**口径（右偏分布下中位数 < 平均数，比较或引用时注明）；
+- **新客 md 由生成器维护**：scr/_gen_new_reports.py 生成的 md 不要手工改数值/格式——改生成器再重跑，提交前确认 git diff 仅目标行（生成器对未改动段落 byte 稳定）；象限 md（四类客群矩阵）为手工维护但由 scr/_quadrant_metrics.py 逐项兜底核对，改动后必跑；
+- **Excel 日期锚**：md 页头锚定具体日期版本 Excel（如 20260901）；重跑管线产出新日期文件后，需先做新旧两版逐格零漂移证明（openpyxl data_only 逐格比较）再更新 md 锚，不能直接换锚；
 - **报告里不写未经验证的结论**：所有结论必须有对应数值支撑，来源注明（Train/OOT、笔数/金额口径）。

@@ -1,8 +1,10 @@
 # 模型分数分箱与策略阈值方法及操作指南
 
-> 本文档是本项目统一的方法论与操作说明（人读）；AI 维护请读 [CLAUDE.md](CLAUDE.md)（操作手册）。，与当前管线（pipeline/，入口 scripts/bin_model.py）的实际执行逻辑对应，涵盖样本设计、指标口径、分箱与阈值方法、方案验证、运行方式和结果解读。
+> 本文档是本项目统一的方法论与操作说明（人读）；AI 维护请读 [CLAUDE.md](CLAUDE.md)（操作手册），与当前管线（pipeline/，入口 `scripts/bin_model.py`，配置驱动）的实际执行逻辑对应，涵盖样本设计、指标口径、分箱与阈值方法、方案验证、运行方式和结果解读。
 >
-> 当前脚本的核心目标是：以 `score_mlt` 为主模型分，在完整 Train 上建立稳定风险等级，并划分自动通过、人工审核和拒绝阈值，最终生成 `out/binning_strategy_report_YYYYMMDD.xlsx`。
+> 仓库以同一管线支撑多数据集 × 多模型 × 多口径：老客/新客样本集（configs/datasets.py），mlt 主风险模型、价值模型与两模型交叉（configs/models.py），笔数（cnt）与金额（amt）口径。本文以 mlt 笔数口径为主线展开方法论，其余场景在第九、十节与第十一节报告清单中说明运行与核对方式。
+>
+> 核心目标以 `score_mlt` 为例：在完整 Train 上建立稳定风险等级，并划分自动通过、人工审核和拒绝阈值，最终生成 `out/binning_strategy_report_YYYYMMDD.xlsx`。
 
 ---
 
@@ -56,18 +58,19 @@
 
 ```text
 项目目录/
-├── configs/          # 数据集与模型注册表（新增样本/模型只改这里）
-├── pipeline/         # 核心管线（单一实现，配置驱动）
-├── scripts/          # 入口脚本（CLI + 快捷壳）
-├── docs/             # 方法论与结果报告
-├── scr/              # 数据与核对工具
-├── tests/            # 单元测试
-├── res/
-│   ├── old_sample.csv
-│   ├── old_application_info.csv
-│   └── old_mlt_score.csv
-└── out/
-    └── binning_strategy_report_YYYYMMDD.xlsx   # 运行后生成
+├── .venv/           # Python 3.11 虚拟环境（解释器 .venv/Scripts/python.exe）
+├── configs/         # 数据集与模型注册表（datasets.py / models.py）
+├── pipeline/        # 核心管线（settings / data_loading / risk_metrics / binning_cnt /
+│                    #   strategy / monthly / reporting / orchestration / bin_amt / cross_analysis）
+├── scripts/         # 入口脚本（bin_model.py / cross_models.py / check_data.py + 快捷壳）
+├── docs/            # 全部报告 md 与参考文档（报告清单见第十一节）
+├── scr/             # 数据准备、报告生成与核对工具（_gen_new_reports.py / _quadrant_metrics.py 等）
+├── tests/           # 单元测试（19 例）
+├── res/             # 输入数据（gitignored）：老客 old_* 与 新客 new_* 同构三件套
+│   ├── old_sample.csv / old_application_info.csv
+│   ├── old_mlt_score.csv / old_worthiness_score.csv     # 老客两模型分
+│   └── new_sample.csv / new_application_info.csv / new_mlt_score.csv / new_worthiness_score.csv
+└── out/             # 输出 Excel 与临时文件（gitignored，运行后自动生成）
 ```
 
 `out` 文件夹不需要提前创建，代码会自动创建。
@@ -75,13 +78,13 @@
 ### 2. 安装依赖
 
 ```bash
-"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" -m pip install -r requirements.txt
+.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
 默认使用的 Python 解释器为：
 
 ```text
-C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe
+.venv/Scripts/python.exe
 ```
 
 当前脚本核心依赖 pandas / numpy / openpyxl；`requirements.txt` 中还包含了数据分析时常用的 scipy / statsmodels / matplotlib / jupyter。
@@ -89,24 +92,25 @@ C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe
 ### 3. 运行方式
 
 ```bash
-"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" binning.py
+.venv/Scripts/python.exe scripts/bin_mlt_cnt.py                 # mlt 笔数口径（等价：bin_model.py --dataset laoke --model mlt --metric cnt）
+.venv/Scripts/python.exe scripts/bin_mlt_amt.py                 # mlt 金额口径
+.venv/Scripts/python.exe scripts/bin_worthiness_cnt.py          # 老客价值模型（笔数口径）
+.venv/Scripts/python.exe scripts/cross_mlt_wth.py               # 老客 mlt × 价值模型交叉（matrix）
+.venv/Scripts/python.exe scripts/bin_model.py --dataset new --model mlt --metric cnt   # 新客样本集同理
 ```
 
-脚本运行完成后会输出：
-
-```text
-out/binning_strategy_report_YYYYMMDD.xlsx
-```
-
-文件名中的日期为运行当天。当前代码不会输出 CSV、PNG 或其他单独的中间文件。
+脚本运行完成后会在 `out/` 输出当日日期的 Excel（`binning_strategy_report_YYYYMMDD.xlsx` / `binning_amt_strategy_report_YYYYMMDD.xlsx` / `binning_worthiness_strategy_report_YYYYMMDD.xlsx` / `binning_cross_strategy_report_YYYYMMDD.xlsx`，交叉含新客 `binning_new_cross_strategy_report_*`），并在 `docs/` 对应报告 md 的页头登记数值锚。文件名中的日期为运行当天。管线运行只输出 Excel（日志走控制台，Windows 下可能 GBK 乱码、不影响结果）；`check_data.py` 额外在 `out/` 写检查报告 txt（见 CLAUDE.md 2.3）。
 
 ### 4. 输入文件及作用
 
 | 输入文件 | 连接字段 | 当前用途 |
 | --- | --- | --- |
-| `old_sample.csv` | `application_id`、`user_id` | 分析底表（数据准备阶段已剔除未完成申请，仅保留完成申请；文件仅含 `application_id` / `user_id` / `sample_datetime` 三列），决定最终保留哪些样本 |
-| `old_application_info.csv` | `application_id`、`user_id` | 补充申请时间、表现标签、本金、审批状态等信息 |
-| `old_mlt_score.csv` | `application_id` | 提供主模型分，重命名为 `score_mlt` |
+| `old_sample.csv` | `application_id`、`user_id` | 老客分析底表（数据准备阶段已剔除未完成申请，仅保留完成申请；文件仅含 `application_id` / `user_id` / `sample_datetime` 三列），决定最终保留哪些样本 |
+| `old_application_info.csv` | `application_id`、`user_id` | 补充申请时间、表现标签、本金、审批状态、收入/盈余字段等信息 |
+| `old_mlt_score.csv` | `application_id` | 提供 mlt 主风险模型分，重命名为 `score_mlt` |
+| `old_worthiness_score.csv` | `application_id` | 提供老客价值模型分（重命名 `score_worthiness`；价值语义为低分 = 高价值，与 mlt 交叉时按高分高风险参与） |
+
+新客样本集（`configs/datasets.py` 的 `new` 配置）为同构三件套：`new_sample.csv` / `new_application_info.csv` / `new_mlt_score.csv` / `new_worthiness_score.csv`（两模型分文件）。
 
 注意：当前脚本已不再读取申请模型分表（`score_apply`）和交易子模型表，只使用主模型分。
 
@@ -1349,7 +1353,7 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 ### 1. 运行方式
 
 ```bash
-"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" binning_amount.py
+.venv/Scripts/python.exe scripts/bin_mlt_amt.py    # 等价：scripts/bin_model.py --dataset laoke --model mlt --metric amt
 ```
 
 脚本运行完成后输出：
@@ -1387,7 +1391,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 价值模型分箱以价值模型分（`aus_new_worthiness_bid_3rdmodel_v1_0_20260429`，重命名为 `score_worthiness`）替换 mlt 主风险模型分，管线与笔数口径完全一致（笔数违约合箱、同一套策略风险约束），仅通过 configs/models.py 注册即可独立运行。价值模型分经数据验证为高分高风险（初始 20 箱 3M30+ 笔数逾期率随分数单调上升）。
 
 ```bash
-"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" scripts/bin_worthiness_cnt.py
+.venv/Scripts/python.exe scripts/bin_worthiness_cnt.py
 ```
 
 输出 `out/binning_worthiness_strategy_report_YYYYMMDD.xlsx`；报告文档为 `分箱方法论与结果说明报告（价值模型笔数口径）.md`。注意：价值模型分覆盖 306,149 笔（93.32%），缺失 21,914 笔均为无银行交易数据的申请（按拒绝处理）；同一套风险约束下其通过率明显低于 mlt（自动通过 20.00% / 总接纳 40.00%），区分能力与月度稳定性弱于 mlt，详见其报告。
@@ -1397,10 +1401,12 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 交叉分析复用两个模型管线生成各自 7 档最终分档，按 `application_id` 内连接出 306,149 笔双分样本，做 7×7 交叉矩阵、条件增量、组合评分（z 平均 / 7:3 加权 / 档位平均 / 档位取大）与二维策略模拟（AND / OR 组合、接纳网格、四象限）。任意两模型组合通过 scripts/cross_models.py 的参数指定。
 
 ```bash
-"C:\Users\zhangyuliang02\Desktop\Project.venv\Scripts\python.exe" scripts/cross_mlt_wth.py
+.venv/Scripts/python.exe scripts/cross_mlt_wth.py
 ```
 
-输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`；报告文档为 `两模型交叉效果评估报告（mlt × 价值模型）.md`。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
+输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `两模型交叉效果评估报告（mlt × 价值模型）.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），数值由 `res/old_application_info.csv` 重算并与 Excel 逐格核对。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
+
+新客（`new` 数据集）同构交叉输出 `binning_new_cross_strategy_report_YYYYMMDD.xlsx`，报告为 `两模型交叉效果评估报告（新客mlt × 新客价值模型）.md`；其四象限客群画像见 `四类客群矩阵（新客mlt × 新客价值模型）.md`（收入/盈余为中位数口径，与交叉报告平均数口径区分，两文档对比时注意）。
 
 ---
 
@@ -1434,15 +1440,31 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 ### 4. 新增报告
 
-1. 跑完脚本生成 Excel 后，参照 `docs/` 下既有报告撰写 md（结构与口径保持一致）；
-2. 数值必须与 Excel 一致：优先用 `scr/` 下的核对脚本（现有 mlt 笔数/金额两套），新场景可用 `scr/_dump_excel_report_mlt_cnt.py` 的方式做脚本化比对；
-3. 报告 md 放 `docs/`，命名沿用 `<报告名>（<模型><口径>）.md` 约定。
+1. 跑完脚本生成 Excel 后，参照 `docs/` 下既有报告撰写 md（结构与口径保持一致，骨架见 CLAUDE.md 7.1）；
+2. 数值必须与 Excel 一致（openpyxl `data_only=True` 读值或脚本重算，禁止手抄）；撰写/修改后与 Excel 逐项核对；
+3. 老客场景优先复用核对脚本：mlt 笔数 / 金额口径分别为 `scr/_verify_report_sync_mlt_cnt.py`（961 个数值单元）与 `scr/_verify_report_sync_mlt_amt.py`（940 个）；交叉矩阵的收入/自动审批率部分用 pandas 重算或读 Excel 逐格比对（一次性核对脚本放 `out/`，gitignored）；
+4. 新客三份报告与老客不同：数值统一由 `scr/_gen_new_reports.py` 从 Excel/res 生成，**改文案只改生成器再重跑**（重跑后 git diff 应只含目标行，出现多余 diff 说明生成器漂移，停下排查）；
+5. 报告 md 放 `docs/`，命名沿用 `<报告名>（<模型><口径>）.md` 约定。
 
 ### 5. 修改管线逻辑时的纪律
 
 - 函数级改动只发生在 `pipeline/` 对应模块；
-- 任何改动后必须跑：`python -m unittest discover tests`，并用 `scripts/bin_mlt_cnt.py` 重跑 + `scr/_verify_report_sync_mlt_cnt.py` 核对（961 个数值单元全对才算通过）；
-- 涉及金额口径的改动，需同时用 `scr/_verify_report_sync_mlt_amt.py` 核对。
+- 任何改动后必须跑：`python -m unittest discover tests`（19 例全绿）；
+- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（961 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（940 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py` 并核对 git diff；四类客群 → 重跑 `scr/_quadrant_metrics.py`（4 段全绿）。
+
+### 6. docs/ 报告清单（数值锚与维护方式）
+
+| 报告（docs/） | 数值来源 Excel（out/，日期=重跑当天，md 页头锚定具体版本） | 维护 / 核对方式 |
+| --- | --- | --- |
+| 分箱方法论与结果说明报告（mlt 笔数口径）.md | `binning_strategy_report_*.xlsx`（6 sheets） | 老客手工维护（AI 编辑，数值 openpyxl 读 Excel）；`scr/_verify_report_sync_mlt_cnt.py` 兜底 |
+| 分箱方法论与结果说明报告（mlt 金额口径）.md | `binning_amt_strategy_report_*.xlsx` | 同上；`scr/_verify_report_sync_mlt_amt.py` 兜底 |
+| 分箱方法论与结果说明报告（价值模型笔数口径）.md | `binning_worthiness_strategy_report_*.xlsx` | 同上（重锚新 Excel 前先逐格零漂移比较两版） |
+| 两模型交叉效果评估报告（mlt × 价值模型）.md | `binning_cross_strategy_report_*.xlsx`（20260904 起 02/03 含自动审批率列） | 章三收入/自动审批矩阵数值 res 重算或读 Excel，逐格独立核对 |
+| 分箱方法论与结果说明报告（新客mlt笔数口径）.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（重跑新客管线后重跑） |
+| 分箱方法论与结果说明报告（新客价值模型笔数口径）.md | `binning_new_worthiness_strategy_report_*.xlsx` | 同上 |
+| 两模型交叉效果评估报告（新客mlt × 新客价值模型）.md | `binning_new_cross_strategy_report_*.xlsx` | 同上 |
+| 四类客群矩阵（新客mlt × 新客价值模型）.md | 交叉 Excel 02/03/06 + `res/new_*` | `scr/_quadrant_metrics.py` 重算并逐项核对（Excel 逐格 + md 数值） |
+| 新客价值模型效果评估文档_0520.html | —（外部参考文档，价值标签口径引用） | 不改 |
 
 
 ## 十二、一句话总结
