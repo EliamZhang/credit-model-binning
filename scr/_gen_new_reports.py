@@ -13,6 +13,7 @@ res/*.csv 重算（交叉报告三章矩阵内收入 4 指标：total_income/tot
 import csv
 import re
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -214,6 +215,7 @@ def render_single_model(
     dist_note: str = "",
     steps_note: str = "",
     cand_note: str = "",
+    include_y_cols: bool = False,
 ):
     wb = load(xlsx)
     ov = overview(wb["01_总览"])
@@ -264,6 +266,26 @@ def render_single_model(
     oo_rows = [r for r in final_rows if r["sample_group"] == "OOT"]
     tr_rows.sort(key=lambda r: r["bin_order"])
     oo_rows.sort(key=lambda r: r["bin_order"])
+
+    # 价值标签两列（y_interest_income_3m）：res 重算 + 与 Excel 03 逐档断言（仅价值模型报告开启）
+    y_interest_stats = y_interest_overall = None
+    if include_y_cols:
+        assert model_key == "new_worthiness", "include_y_cols 仅用于新客价值模型报告"
+        expect_n = {}
+        for g, rows in (("Train", tr_rows), ("OOT", oo_rows)):
+            for r in rows:
+                expect_n[(g, int(r["bin_order"]))] = int(r["n"])
+        for r in tr_rows:
+            o = int(r["bin_order"])
+            sr = r.get("score_right")
+            if o < 7 and (not isinstance(sr, float) or abs(sr - WTH_EDGES[o - 1]) > 1e-12):
+                raise ValueError(f"价值标签分档边界与 Excel 03 不一致：档{o} 右边界 {sr!r} vs {WTH_EDGES[o - 1]}")
+        y_interest_stats, y_interest_overall = worthiness_interest_stats(expect_n)
+        for g, rows in (("Train", tr_rows), ("OOT", oo_rows)):
+            for r in rows:
+                _n, mean, _y1r, lift = y_interest_stats[(g, int(r["bin_order"]))]
+                r["_yirr_mean"] = mean
+                r["_yirr_y1_lift"] = lift
 
     # 05 模型验证
     perf = find_table(wb["05_模型验证"], "sample_group")
@@ -366,6 +388,8 @@ def render_single_model(
 
     A(f"# 新客{model_cn}分数分箱与策略阈值设定报告（笔数口径）\n")
     A(f"> 本报告说明新客{model_cn}（`{raw_score_col}`）分数分箱、样本外验证及策略阈值设定结果，由 `scr/_gen_new_reports.py` 从 `out/{xlsx.name}` 读取数值生成，与 Excel 逐项一致。管线沿用笔数违约合箱口径：完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 仅用于最终验证。")
+    if include_y_cols:
+        A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/new_worthiness_score.csv` 与 `res/new_application_info.csv` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
     A(">")
     A(f"> 数据范围：数据源 `new_sample.csv` 已在数据准备阶段剔除未完成申请（原始 {num(n_prep_raw)} 笔中 `0.Incomplete` / `1.In Progress` {num(n_prep_removed)} 笔、占 {pct(n_prep_removed/n_prep_raw)}），分析样本 {num(n_prep_cur)} 笔全部为完成进件；按月样本时间范围为 2024-01—2026-05，其中 2026-05 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**：check_data 十分位 3M30+ 笔数逾期率由最低分位 {decile.split('→')[0].strip()} 单调升至最高分位 {decile.split('→')[1].strip()}（倒挂 0 处，`HIGH_SCORE_HIGH_RISK=True`）。")
     A("")
@@ -422,6 +446,12 @@ def render_single_model(
             ("3M30+整体KS", None, None),
             ("整体PSI", None, None),
         ]
+        if include_y_cols:
+            i = next(i for i, c in enumerate(cols) if c[0] == "累计1M30+笔数逾期率")
+            cols[i:i] = [
+                ("3M实付利息均值（元）", "_yirr_mean", "yuan1"),
+                ("3M实付利息<160占比Lift", "_yirr_y1_lift", "r4"),
+            ]
         out = ["| " + " | ".join(c[0] for c in cols) + " |",
                "| " + " | ".join("---:" for _ in cols) + " |"]
         for r in rows:
@@ -432,9 +462,11 @@ def render_single_model(
                 elif fmt == "pct":
                     cells.append(pct(r[key]))
                 elif fmt == "r4":
-                    cells.append(rate4(r[key]))
+                    cells.append(rate4(r[key]) if r[key] is not None else "—")
                 elif fmt == "num":
                     cells.append(num(r[key]))
+                elif fmt == "yuan1":
+                    cells.append(f"{r[key]:,.1f}" if r[key] is not None else "—")
                 elif fmt == "bound":
                     cells.append({"-inf": "−∞", "inf": "+∞"}.get(str(r[key]), str(r[key])))
                 else:
@@ -455,6 +487,11 @@ def render_single_model(
             elif label in ("累计1M30+笔数逾期率", "累计1M30+金额逾期率", "累计3M30+笔数逾期率", "累计3M30+金额逾期率"):
                 cells.append(f"**{pct(last[key])}**")
             elif label in ("1M30+笔数Lift", "1M30+金额Lift", "3M30+笔数Lift", "3M30+金额Lift"):
+                cells.append("**1.0000**")
+            elif include_y_cols and label == "3M实付利息均值（元）":
+                _g_n, g_mean, _g_y1 = y_interest_overall[group]
+                cells.append(f"**{g_mean:,.1f}**" if g_mean is not None else "**—**")
+            elif include_y_cols and label == "3M实付利息<160占比Lift":
                 cells.append("**1.0000**")
             elif label in ("1M30+ IV分项", "3M30+ IV分项"):
                 cells.append(f"**{rate4(iv1 if '1M30' in label else iv3)}**")
@@ -491,6 +528,10 @@ def render_single_model(
     A(big_table_md(oo_rows, "OOT", n_oot))
     A("")
     A("> 口径说明：所有指标均独立成列。箱级行展示实际审批转化、四项风险率及对应 Lift、IV 分项、KS 曲线值和 PSI 分项；Lift = 档位逾期率 ÷ 该样本组整体逾期率，衡量单箱风险相对整体的倍数，整体行恒为 1.0000（基准）；四项累计逾期率按 bin_order 从低风险向高风险逐箱累加（累计至最后一档即等于样本组整体逾期率，故整体行与整体率一致）；模型策略整体转化率、AUC、整体 KS 与整体 PSI 仅在同一分箱表的\"整体\"行展示，避免将整体指标误解为单箱指标。Train 整体 IV 分项为 1M30+ / 3M30+ 笔数口径合计。")
+    if include_y_cols:
+        _tr_irr_n, _tr_irr_mean, _tr_irr_y1 = y_interest_overall["Train"]
+        _oo_irr_n, _oo_irr_mean, _oo_irr_y1 = y_interest_overall["OOT"]
+        A(f"> 表末两列（仅价值模型报告展示）为价值标签统计：3M 实付利息 = `raw_interest_income_3m`，即建模标签 `y_interest_income_3m` 的底层金额（标签 y=1 ⇔ 3 个月实付利息 < 160 元，即\"价值较弱\"，与标签列逐笔一致率核验 100%）；覆盖样本为成交且有 3 个月利息观察的申请——Train {num(_tr_irr_n)} 笔（占该组 {pct(_tr_irr_n / n_train)}）、OOT {num(_oo_irr_n)} 笔（占该组 {pct(_oo_irr_n / n_oot)}），利息缺失样本不计入两列。均值 = 档内全部非缺失实付利息的平均（元，含 0 元与冲销负值样本，负值占比 <0.2%）；<160 占比 Lift = 档内 y=1 占比 ÷ 该样本组整体 y=1 占比（基准 Train {pct(_tr_irr_y1)}、OOT {pct(_oo_irr_y1)}），整体行恒为 1.0000。各档利息样本覆盖随分数档位升高而明显下降（成交集中于低分档，如 Train A 档覆盖率约 32%、G 档约 1.5%），比较档级数值时注意样本量差异。")
     A("")
     A("**核心结论**：\n")
 
@@ -1000,6 +1041,97 @@ def income_matrix_stats():
     return all_stats, pos_stats, deal_stats
 
 
+# ---------- 新客价值模型 y 标签（3M 实付利息）档级统计（数据来自 res/*.csv，非 Excel） ----------
+
+# 建模标签 y_interest_income_3m 的判定阈值：3 个月实付利息 < 160 元 → y=1（价值较弱）。
+# 判定必须用精确十进制文本（见 worthiness_interest_stats），不能用 float(raw) < 160.0：
+# CSV 含 '159.999999999999988' 类文本，float() 会舍入成 160.0 而把 y=1 漏判为 y=0。
+Y1_THRESHOLD = Decimal("160")
+
+
+def _read_wth_interest():
+    """读新客价值模型分与申请信息：application_id -> (score, application_month, raw3m_str)。
+    分数空值/非数值剔除；月份缺失回退 application_time[:7]。"""
+    with open(ROOT / "res/new_worthiness_score.csv", encoding="utf-8-sig") as f:
+        r = csv.reader(f)
+        hdr = next(r)
+        aidx, sidx = hdr.index("application_id"), hdr.index(WTH_SCORE_COL)
+        scores = {}
+        for row in r:
+            v = row[sidx]
+            if v:
+                try:
+                    scores[row[aidx]] = float(v)
+                except ValueError:
+                    pass
+    out = {}
+    with open(ROOT / "res/new_application_info.csv", encoding="utf-8-sig") as f:
+        r = csv.reader(f)
+        hdr = next(r)
+        aidx = hdr.index("application_id")
+        midx = hdr.index("application_month")
+        tix = hdr.index("application_time")
+        rix = hdr.index("raw_interest_income_3m")
+        for row in r:
+            aid = row[aidx]
+            if aid not in scores:
+                continue
+            m = row[midx]
+            if not m:
+                m = row[tix][:7] if row[tix] else ""
+            out[aid] = (scores[aid], m, row[rix])
+    return out
+
+
+def worthiness_interest_stats(expect_n):
+    """价值标签档级统计（数值来自 res/*.csv 重算）：
+    - 分档：分数按 WTH_EDGES 绝对边界划 7 档（区间规则同分箱口径），Train/OOT 按月份切分；
+    - 利息：raw_interest_income_3m 非缺失样本（3M 实付利息，建模标签 y_interest_income_3m 的底层金额，
+      y=1 ⇔ 利息 <160，两者逐笔一致率已核验 100%）；均值 = 档内全部非缺失利息的平均（含 0 元与冲销负值）；
+    - Lift = 档内 y=1 占比 ÷ 该样本组整体 y=1 占比。
+    返回 (bin_stats, group_overall)：
+    bin_stats[(group, bin_order)] = (n_irr, mean, y1_rate, y1_lift)（group ∈ Train/OOT；无利息样本档为 (0, None, None, None)）；
+    group_overall[group] = (n_irr, overall_mean, overall_y1_rate)。
+    断言：res 分档计数（全部有分样本）与 expect_n 逐档一致（expect_n 由调用方从 Excel 03 传入），不一致抛 ValueError。"""
+    data = _read_wth_interest()
+    by_key = {}
+    irr = {}
+    for aid, (score, m, raw) in data.items():
+        if not m:
+            continue
+        g = "Train" if m <= "2025-10" else "OOT"
+        k = (g, _bin_of(score, WTH_EDGES))
+        by_key[k] = by_key.get(k, 0) + 1
+        if raw:
+            try:
+                irr.setdefault(k, []).append((float(raw), Decimal(raw)))
+            except (ValueError, InvalidOperation):
+                pass
+    for g in ("Train", "OOT"):
+        for o in range(1, 8):
+            mine = by_key.get((g, o), 0)
+            ex = expect_n[(g, o)]
+            if mine != ex:
+                raise ValueError(f"价值标签分档与 Excel 03 不一致：{g} 档{o} 重算={mine} Excel={ex}")
+    bin_stats, group_overall = {}, {}
+    for g in ("Train", "OOT"):
+        vals_all = [v for o in range(1, 8) for v in irr.get((g, o), [])]
+        n_all = len(vals_all)
+        mean_all = sum(f for f, _d in vals_all) / n_all if n_all else None
+        y1_all = sum(1 for _f, d in vals_all if d < Y1_THRESHOLD) / n_all if n_all else None
+        group_overall[g] = (n_all, mean_all, y1_all)
+        for o in range(1, 8):
+            vals = irr.get((g, o), [])
+            n = len(vals)
+            if n:
+                mean = sum(f for f, _d in vals) / n
+                y1r = sum(1 for _f, d in vals if d < Y1_THRESHOLD) / n
+                bin_stats[(g, o)] = (n, mean, y1r, y1r / y1_all)
+            else:
+                bin_stats[(g, o)] = (0, None, None, None)
+    return bin_stats, group_overall
+
+
 # ---------- 交叉报告渲染 ----------
 
 def render_cross():
@@ -1306,6 +1438,7 @@ if __name__ == "__main__":
         dist_note="自动 6 档方案的 E 档（B10–B19）50.00% 超限更严重且无可行拆分点；最终手动 7 档方案已按用户确认采用（详见三（四））",
         steps_note="第 1 步为小箱清理（合并 B18+B19）；第 2–12 步为档位压缩（19 档 → 8 档），主指标倒挂由初始 7 处降至 1 处、箱级约束违规由初始 10 项降至 2 项；第 13–14 步为候选生成，产出 7 档与 6 档候选。自动合箱全过程未跨越极端箱边界（最终手动方案的边界 19 跨越另见三（二））。7/8 档候选残留 1 处主指标倒挂（该结构均含最坏极端箱 B20 单箱，见候选表 ranges 列）、6 档候选无倒挂（详见三（四））；最终方案按用户确认的手动 7 档执行，将 (10,19) 拆为 (10,12)+(13,16) 并与 (17,20) 合并，消除 B20 单箱倒挂（详见三（二））。",
         cand_note="该口径下自动合箱的 6–8 档候选均未完全满足硬约束（7/8 档候选主指标倒挂 1 处、6 档候选无倒挂；箱级约束违规 1–2 项，含 C 档占比 4.9998% 略低于中间箱 5% 下限），自动选中综合得分最高的 6 档方案（倒挂 0 处、违规 2 项）。经评审改为手动 7 档方案（模型配置 final_bin_ranges）：将 (10,19) 拆为 (10,12)+(13,16) 并与 (17,20) 合并，消除 B20 单箱倒挂、违规降至 1 项（C 档同性质，2026-09-01 用户确认，详见三（二））。",
+        include_y_cols=True,
     )
     render_single_model(
         "new_mlt",
