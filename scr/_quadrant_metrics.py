@@ -13,6 +13,7 @@
   自动 = 含 "Auto Approved"、人工 = 含 "Manual Approved"；成交率 = status ∈ {Active_Account,Closed,Blocked} / 通过。
 """
 import csv
+import statistics
 import sys
 from pathlib import Path
 
@@ -145,7 +146,7 @@ def income_medians(sub):
             v = to_float(r[f])
             if v is not None:
                 acc[f].append(v)
-    return {f: gen._median(vals) if vals else None for f, vals in acc.items()}
+    return {f: statistics.median(vals) if vals else None for f, vals in acc.items()}
 
 
 def cell_key(rows, g, mb, wb):
@@ -269,17 +270,9 @@ def main():
     ntr = sum(1 for r in rows if r[3])
     print(f"Train={ntr} OOT={len(rows) - ntr}")
     verify_vs_excel(rows)
-    # 收入中位数单元格级与生成器一致（生成器已逐格核对并发布）
-    inc = gen.income_matrix_stats()
-    for g, gname in [(1, "Train"), (0, "OOT")]:
-        for mb in range(1, 8):
-            for wb2 in range(1, 8):
-                mine = income_medians([r[4] for r in cell_key(rows, g, mb, wb2)])
-                for f in gen.INCOME_FIELDS:
-                    a, b = mine[f], inc.get((g, "cell", (mb, wb2)), {}).get(f)
-                    if a != b:
-                        print(f"[FAIL] 收入 {gname} 格({mb},{wb2}) {f} 重算={a} 生成器={b}")
-
+    # 原"单元格收入中位数与生成器交叉核对"块已删：生成器自 bd14323 起收入改平均数口径且不再导出
+    # 中位数（income_matrix_stats 返回三口径均值），象限文档收入中位数为本文件单源计算，
+    # 由下方 verify_md 对 md 已发布数值兜底核对
     quads = {}
     for g, gname in [(1, "train"), (0, "oot")]:
         quad, total = quadrant_stats(rows, g)
