@@ -31,7 +31,6 @@ class ConfigCompletenessTests(unittest.TestCase):
         from scripts.cross_models import REPORT_PREFIXES
 
         self.assertIn(("laoke", "mlt", "worthiness", "matrix"), REPORT_PREFIXES)
-        self.assertIn(("laoke", "mlt", "worthiness", "cond"), REPORT_PREFIXES)
 
 
 if __name__ == "__main__":

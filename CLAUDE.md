@@ -9,7 +9,7 @@
 
 - 把模型分（高分高风险方向）在 Train 上 20 等频初分 → 自动合箱为 6~8 档（目标 7 档）→ OOT 验证 → 阈值策略 → 输出 Excel 报告；
 - 支持笔数口径（cnt，主口径）与金额口径（amt）；
-- 支持两模型交叉分析（matrix 全局交叉 / cond 条件子箱）；
+- 支持两模型交叉分析（matrix 全局交叉）；
 - **新样本/新模型/新交叉 = 只改 configs/，不改 pipeline/**（除非用户明确要求改管线逻辑）。
 
 ## 2. 目录与数据位置
@@ -57,8 +57,7 @@ tests/      # 单元测试（19 例）
 ## 2.2 Excel 取数地图（写报告时按此找数）
 
 - **单模型分箱 Excel**（6 sheets）：`01_总览`（方案/阈值/PSI/AUC/KS/漏斗速览）→ `02_分箱详情`（合箱过程/候选/步骤）→ `03_最终分箱统计`（Train/OOT 分箱大表，含 CI 与 Lift）→ `04_策略方案`（历史漏斗/测算流量/阈值选择/敏感性/分段）→ `05_模型验证`（对比/AUC/KS/PSI/单调性/月度）→ `06_附录`（配置/上线规则/指标字典）；
-- **交叉 matrix Excel**（7 sheets）：`01_总览`（相关性与方案）→ `02/03_交叉矩阵_Train/OOT`（7×7 每格 14 指标，含历史实际自动审批通过率）→ `04_条件增量分析` → `05_组合评分效果` → `06_二维策略模拟`（策略对照/AND 网格/四象限）→ `07_附录`；
-- **交叉 cond Excel**（8 sheets）：`01_总览` → `02_条件分箱边界` → `03/04_组合格统计_Train/OOT`（21 格）→ `05_档内子箱与头尾评估` → `06_区分度对比`（含策略分段再分层）→ `07_二维策略模拟` → `08_附录`。
+- **交叉 matrix Excel**（7 sheets）：`01_总览`（相关性与方案）→ `02/03_交叉矩阵_Train/OOT`（7×7 每格 14 指标，含历史实际自动审批通过率）→ `04_条件增量分析` → `05_组合评分效果` → `06_二维策略模拟`（策略对照/AND 网格/四象限）→ `07_附录`。
 
 取数一律用 openpyxl 读值（`data_only=True`），不要从控制台输出抄数。
 
@@ -97,7 +96,6 @@ python scripts/bin_mlt_amt.py
 python scripts/bin_worthiness_cnt.py
 # 交叉分析
 python scripts/cross_models.py --dataset laoke --model-a mlt --model-b worthiness --mode matrix
-python scripts/cross_models.py --dataset laoke --model-a mlt --model-b worthiness --mode cond
 python scripts/cross_mlt_wth.py   # 快捷壳（matrix）
 # 测试与核对
 python -m unittest discover tests
@@ -133,7 +131,7 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 
 ## 6. 新增交叉组合操作步骤
 
-1. `python scripts/cross_models.py --dataset <d> --model-a <a> --model-b <b> --mode matrix|cond`；
+1. `python scripts/cross_models.py --dataset <d> --model-a <a> --model-b <b> --mode matrix`；
 2. 现行阈值档位在 `pipeline/cross_analysis.py` 的 `_current_thresholds` 登记（老客 mlt×worthiness 已登记）；
 3. 输出前缀按第 3 节规则登记到 `scripts/cross_models.py` 的 `REPORT_PREFIXES`；
 4. 数值解读前先确认两模型方向一致（都按高分高风险参与交叉）。
@@ -190,15 +188,13 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 | mlt amt | 7 档 `[(1,1),(2,4),(5,10),(11,13),(14,17),(18,19),(20,20)]`，自动 0.0494555109039948，接纳 0.1411377275703105，PSI 0.0061 |
 | 价值模型 cnt | 7 档 `[(1,1),(2,4),(5,8),(9,13),(14,16),(17,19),(20,20)]`，自动 0.1362170673263007，接纳 0.1863252117841281，PSI 0.0084，缺失 21,914 笔（6.68%） |
 | 交叉 matrix | Pearson 0.5938；AND（mlt ≤ E 且 wth ≤ C）接纳 37.54% / 风险 5.74%；四象限：双低 37.54%、仅 mlt 低 37.86%、仅价值低 2.46%（22.74%）、双高 22.14% |
-| 交叉 cond | 21 格 A1–G3；G 档内子箱 35.09% / 39.60% / 45.87%；组合分布 PSI 0.0098；IV 0.6993 → 0.7017 |
 
 ## 9. 关键业务口径提醒
 
 - **风险方向**：两模型均为高分高风险（`high_score_high_risk=True`）；低分=低风险，A 档 = 最安全；
 - **价值语义**：价值模型"低分 = 高价值"（低分 = 高收入/高利息贡献，老客验证 corr 约 −0.42/−0.37）；A 档同时是"低风险 + 高价值"；价值 ≤ C 但 mlt > E 的 2.46% 人群是"价值好 & 风险差"错配客群（风险 22.74%），价值模型不可单独上线；
 - **缺失分**：价值模型缺失 21,914 笔（无银行交易数据），按拒绝处理；mlt 缺失 0 笔；
-- **提额场景**：走双低象限（mlt ≤ E 且 wth ≤ C），风险由 mlt 把关、额度由价值（收入代理）支撑；头部子箱风险拉不开但价值维度显著；
-- **条件子箱**：分层能力只在 mlt 高风险档/拒绝段；沿子箱轴收紧接纳只丢流量不降险（7.26%→7.24%→7.23%），正确用途是拒绝段处置排序；
+- **提额场景**：走双低象限（mlt ≤ E 且 wth ≤ C），风险由 mlt 把关、额度由价值（收入代理）支撑；
 - **区间规则**：(left, right]，阈值不取整，线上缺失分按拒绝。
 
 ## 10. 常见坑

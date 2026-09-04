@@ -26,7 +26,6 @@ TODAY = "20260901"
 WTH_XLSX = ROOT / "out" / f"binning_new_worthiness_strategy_report_{TODAY}.xlsx"
 MLT_XLSX = ROOT / "out" / f"binning_new_mlt_strategy_report_{TODAY}.xlsx"
 CROSS_XLSX = ROOT / "out" / f"binning_new_cross_strategy_report_{TODAY}.xlsx"
-COND_XLSX = ROOT / "out" / f"binning_new_worthiness_cond_strategy_report_{TODAY}.xlsx"
 
 
 # ---------- 通用工具 ----------
@@ -1022,18 +1021,6 @@ def render_cross():
     grid_rows = find_table(wb["06_二维策略模拟"], "new_mlt_accept_bin")
     quad_rows = find_table(wb["06_二维策略模拟"], "sample_group")
 
-    # cond Excel
-    wb2 = load(COND_XLSX)
-    ov2 = overview(wb2["01_总览"])
-    cond_psi = float(ov2[("设计", "组合分布 Train/OOT PSI")])
-    cond_cells = int(ov2[("设计", "组合格数量")])
-    sub_edges = find_table(wb2["02_条件分箱边界"], "mlt_bin_order")
-    ctr = find_table(wb2["03_组合格统计_Train"], "combined_order")
-    coo = find_table(wb2["04_组合格统计_OOT"], "combined_order")
-    sub_eval = find_table(wb2["05_档内子箱与头尾评估"], "mlt_bin")
-    disc = find_table(wb2["06_区分度对比"], "sample_group")
-    cond_policy = find_table(wb2["07_二维策略模拟"], "policy")
-
     def matrix_md(rows, group, income_stats, pos_stats, deal_stats):
         """渲染 14 组 Excel 指标矩阵 + 4 组收入指标矩阵为 md 表格。
         rows 为 dict 列表（含边际与整体行）；income_stats 为 income_matrix_stats() 输出。"""
@@ -1153,16 +1140,10 @@ def render_cross():
                     "仅wth低" if r["quadrant"].startswith("仅 new_wth") else "双高"))
             quad[(r["sample_group"], key)] = r
 
-    # cond 区分度
-    disc_rows = {}
-    for r in disc:
-        key = (r["sample_group"], r["scheme"], r["label"])
-        disc_rows[key] = r
-
     L = []
     B = L.append
     B("# 两模型交叉效果评估报告（新客 mlt × 新客价值模型）\n")
-    B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{CROSS_XLSX.name}`（matrix）与 `{COND_XLSX.name}`（cond）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
+    B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{CROSS_XLSX.name}`（matrix）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
     B(">")
     B(f"> 分析样本为同时存在两个模型分的完成申请 {num(n_all)} 笔（占 579,100 笔完成申请的 {pct(n_all/579100)}），按 Train（2024-01—2025-10）/ OOT（2025-11—2026-05）切分，OOT 仅用于验证。两模型分数缺失口径：mlt 缺失 42,575 笔（7.35%，含无银行交易数据人群的 −1.0 兜底分置空，2026-09-01 用户确认）、价值模型缺失 40,974 笔（7.08%，无银行交易数据人群），双分样本即两模型分数交集。")
     B(">")
@@ -1266,30 +1247,7 @@ def render_cross():
     B("- **仅 mlt 低象限**是 AND 组合相对 mlt 单模型多剔除的人群，风险高于双低象限、低于双高象限——AND 正是把这批\"mlt 看着还行、价值看着差\"的人转拒，换来接纳风险的下降；")
     B("- **仅价值低象限**即\"价值好 & 风险差\"错配客群：价值模型单独决策会把它们放进接纳段，是其单模型策略最危险的部分，mlt 恰好能拦住；该象限适合\"谨慎经营\"（短期、小额产品）而非直接提额。")
     B("")
-    B("## 七、条件子箱分析（cond 模式）\n")
-    B(f"在 new_mlt 各档内对价值分做 3 等频条件子箱（Train 学习、OOT 复用），共 {cond_cells} 格（7 档 × 3 子箱），组合分布 Train/OOT PSI {rate4(cond_psi)}。")
-    B("")
-    B("### （一）档内子箱风险与相邻显著性（Train）\n")
-    B("| mlt 档 | 子箱 1 样本量 | 子箱 1 3M30+ | 子箱 2 样本量 | 子箱 2 3M30+ | 子箱 3 样本量 | 子箱 3 3M30+ |")
-    B("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-    for r in sub_eval:
-        if r["mlt_bin_order"] is not None:
-            B(f"| {r['mlt_bin']} | {num(r['sub1_n'])} | {pct(r['sub1_3m30p'])} | {num(r['sub2_n'])} | {pct(r['sub2_3m30p'])} | {num(r['sub3_n'])} | {pct(r['sub3_3m30p'])} |")
-    B("")
-    B("### （二）区分度对比（序数 AUC / KS）\n")
-    B("| 样本组 | 方案 | 标签 | AUC | KS | 成熟样本量 | 坏样本量 |")
-    B("| --- | --- | --- | ---: | ---: | ---: | ---: |")
-    for r in disc:
-        if r["label"] in ("1M30+", "3M30+"):
-            B(f"| {r['sample_group']} | {r['scheme']} | {r['label']} | {rate4(r['auc'])} | {rate4(r['ks'])} | {num(r['mature'])} | {num(r['bad'])} |")
-    B("")
-    B("### （三）子箱维度策略模拟\n")
-    B("| 策略 | Train 自动通过率 | Train 总接纳率 | Train 接纳 3M30+ | OOT 总接纳率 | OOT 接纳 3M30+ |")
-    B("| --- | ---: | ---: | ---: | ---: | ---: |")
-    for r in cond_policy:
-        B(f"| {r['policy']} | {pct(r['train_auto_rate'])} | {pct(r['train_accept_rate'])} | {pct(r['train_accept_3m30p'])} | {pct(r['oot_accept_rate'])} | {pct(r['oot_accept_3m30p'])} |")
-    B("")
-    B("## 八、落地建议\n")
+    B("## 七、落地建议\n")
     B("1. **不做分数融合**：价值模型不以\"提升打分能力\"的理由并入 mlt 分数，以规则方式使用。")
     B(f"2. **降险优先选 AND 组合**：接纳风险 {pct(a_row['train_accept_3m30p'])} → {pct(and_row['train_accept_3m30p'])}（OOT {pct(and_row['oot_accept_3m30p'])}），接纳率 {pct(and_row['train_accept_rate'])}；业务需先确认流量代价是否可接受，再在 AND 网格（六（二））中按风险目标选点。")
     B("3. **流量敏感场景优先评估边界档加严**：mlt 现行策略整体不动，仅对 mlt 边界档（如 C 档）内价值 ≥ D 档的人群转人工审核，用较小流量代价获取大部分降险收益。")
@@ -1319,7 +1277,6 @@ def render_cross():
     B("| 组合分 | z 平均 / 7:3 加权 / 档位平均 / 档位取大 | z 用 Train 均值标准差，复用到 OOT |")
     B("| 强分歧定义 | 两模型档位差 ≥ 3 | 用于分歧人群汇总 |")
     B("| 矩阵格展示阈值 | 样本量 ≥ 100 | 不足只展示样本量 |")
-    B("| cond 子箱 | 每档 3 等频 | Train 学习边界、OOT 复用 |")
     B("")
 
     md_path = DOCS / "两模型交叉效果评估报告（新客mlt × 新客价值模型）.md"
