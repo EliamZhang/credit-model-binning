@@ -1305,7 +1305,7 @@ def render_cross():
     B("- **价值语义**：价值模型分为\"低分 = 高价值\"（分数越低，利息贡献越高，见 docs/新客价值模型效果评估文档_0520.html）。因此价值档 A（最低分）同时是\"高价值 + 低风险\"档；下文\"价值 ≤ C\"即\"价值好（低分）人群\"。")
     B("")
     B("## 三、交叉指标矩阵（Train/OOT）\n")
-    B("以 7×7 矩阵展示全部交叉格（行 = new_mlt 档、列 = new_wth 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（价值边际）= 该价值档全部人群的指标值、总计列（mlt 边际）= 该 mlt 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 8 张收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/new_application_info.csv` 重算，分档与矩阵逐格核对一致）。")
+    B("以 7×7 矩阵展示全部交叉格（行 = new_mlt 档、列 = new_wth 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（价值边际）= 该价值档全部人群的指标值、总计列（mlt 边际）= 该 mlt 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 8 张收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/new_application_info.csv` 重算，分档与矩阵逐格核对一致。")
     B("")
     B("**Train**：\n")
     B(train_matrix_md)
