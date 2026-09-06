@@ -165,32 +165,15 @@ def bin_label(v):
     return s
 
 
-# ---------- 数据准备口径（来自 *_original.csv 行数） ----------
-
-def prep_stats():
-    """剔除未完成申请的行数统计（数据准备阶段，来自 *_original.csv）。"""
-    import csv
-    out = {}
-    for key, base in [("sample", "new_sample"), ("mlt", "new_mlt_score")]:
-        orig = ROOT / "res" / f"{base}_original.csv"
-        cur = ROOT / "res" / f"{base}.csv"
-        for path in (orig, cur):
-            n = None
-            for enc in ("utf-8-sig", "gbk"):
-                try:
-                    with open(path, encoding=enc, newline="") as f:
-                        n = sum(1 for _ in csv.reader(f)) - 1
-                    break
-                except (UnicodeDecodeError, UnicodeError):
-                    continue
-            if n is None:
-                raise ValueError(f"无法读取 {path}")
-            if path == orig:
-                n_orig = n
-            else:
-                n_cur = n
-        out[key] = (n_orig, n_cur)
-    return out
+def count_csv_rows(path: Path) -> int:
+    """统计 CSV 行数（不含表头）；编码 utf-8-sig 优先、失败回退 gbk。"""
+    for enc in ("utf-8-sig", "gbk"):
+        try:
+            with open(path, encoding=enc, newline="") as f:
+                return sum(1 for _ in csv.reader(f)) - 1
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    raise ValueError(f"无法读取 {path}")
 
 
 # ---------- 单模型报告渲染 ----------
@@ -209,7 +192,6 @@ def render_single_model(
     accept_bin: str,
     missing_note: str,
     merge_note: str,
-    prep: dict,
     manual: bool = False,
     value_semantics: bool = False,
     dist_note: str = "",
@@ -340,10 +322,6 @@ def render_single_model(
     def seg_rows(group):
         return [r for r in seg if r["sample_group"] == group]
 
-    # 数据准备统计
-    n_prep_raw, n_prep_cur = prep["sample"]
-    n_prep_removed = n_prep_raw - n_prep_cur
-
     # 时间范围
     tr_range = "2024-01—2025-10"
     oo_range = "2025-11—2026-05"
@@ -391,7 +369,7 @@ def render_single_model(
     if include_y_cols:
         A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/new_worthiness_score.csv` 与 `res/new_application_info.csv` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
     A(">")
-    A(f"> 数据范围：数据源 `new_sample.csv` 已在数据准备阶段剔除未完成申请（原始 {num(n_prep_raw)} 笔中 `0.Incomplete` / `1.In Progress` {num(n_prep_removed)} 笔、占 {pct(n_prep_removed/n_prep_raw)}），分析样本 {num(n_prep_cur)} 笔全部为完成进件；按月样本时间范围为 2024-01—2026-05，其中 2026-05 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**：check_data 十分位 3M30+ 笔数逾期率由最低分位 {decile.split('→')[0].strip()} 单调升至最高分位 {decile.split('→')[1].strip()}（倒挂 0 处，`HIGH_SCORE_HIGH_RISK=True`）。")
+    A(f"> 数据范围：数据源 `new_sample.csv` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；按月样本时间范围为 2024-01—2026-05，其中 2026-05 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**：check_data 十分位 3M30+ 笔数逾期率由最低分位 {decile.split('→')[0].strip()} 单调升至最高分位 {decile.split('→')[1].strip()}（倒挂 0 处，`HIGH_SCORE_HIGH_RISK=True`）。")
     A("")
     A("## 一、结论摘要\n")
 
@@ -596,7 +574,7 @@ def render_single_model(
     A("| --- | --- | --- |")
     flow = [
         ("①", "数据加载与清洗",
-         f"数据源`new_sample.csv` 已剔除未完成申请（原始 {num(n_prep_raw)} 笔中 `0.Incomplete` / `1.In Progress` {num(n_prep_removed)} 笔），有效样本 {num(n_prep_cur)} 笔；{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）不进入分析"),
+         f"数据源`new_sample.csv` 为完成申请样本（未完成申请已在数据准备阶段剔除），有效样本 {num(n_raw)} 笔；{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）不进入分析"),
         ("②", "样本切分",
          f"按申请月份切分：Train 2024-01—2025-10（{num(n_train)}）用于分箱与决策；OOT 2025-11—2026-05-20（{num(n_oot)}）仅用于最终验证"),
         ("③", "初始分箱",
@@ -629,7 +607,7 @@ def render_single_model(
     A(f"| OOT | {oo_range}（截至 2026-05-20，其中 2026-05 {num(oot_last_month_n)} 笔且 3M30+ 未成熟） | {num(n_oot)} | 独立样本外验证，不参与分箱设计、候选选择或阈值设定 |")
     A("")
     A(f"- Train 截止月份为 2025-10，OOT 自 2025-11 起；")
-    A(f"- 数据源已在数据准备阶段剔除未完成申请（原始 {num(n_prep_raw)} 笔中剔除 {num(n_prep_removed)} 笔、占 {pct(n_prep_removed/n_prep_raw)}），分析样本 {num(n_prep_cur)} 笔全部为完成进件；")
+    A(f"- 数据源 `new_sample.csv` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；")
     A(f"- {model_cn}分缺失 {num(n_missing)} 笔（占 {pct(n_missing/n_raw)}）{missing_note}，分箱与策略测算仅使用存在模型分的 {num(n_valid)} 笔（Train {num(n_train)} + OOT {num(n_oot)}）；缺失样本不进入分箱统计，线上按拒绝处理；")
     A(f"- 新客 Train 3M30+ 标签成熟率约 10.71%（成交样本才有 duedate 表现标签，新客完成申请成交率约 12%，属结构性口径，2026-09-01 已与用户确认记录在案）；")
     A("- 历史实际审批漏斗独立于模型分，基于完整完成申请核算。")
@@ -1144,6 +1122,9 @@ def render_cross():
     plan_b = ov[("分档方案", "new_wth 最终方案")]
     n_all = int(ov[("样本", "双分样本量")])
     train_oot = ov[("样本", "Train / OOT 样本量")]
+    n_apply = count_csv_rows(ROOT / "res" / "new_sample.csv")
+    n_miss_a = int(overview(load(MLT_XLSX)["01_总览"])[("样本", "模型分缺失量")])
+    n_miss_b = int(overview(load(WTH_XLSX)["01_总览"])[("样本", "模型分缺失量")])
 
     mtr = find_table(wb["02_交叉矩阵_Train"], "new_mlt_bin_order")
     moo = find_table(wb["03_交叉矩阵_OOT"], "new_mlt_bin_order")
@@ -1277,7 +1258,7 @@ def render_cross():
     B("# 两模型交叉效果评估报告（新客 mlt × 新客价值模型）\n")
     B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{CROSS_XLSX.name}`（matrix）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
     B(">")
-    B(f"> 分析样本为同时存在两个模型分的完成申请 {num(n_all)} 笔（占 579,100 笔完成申请的 {pct(n_all/579100)}），按 Train（2024-01—2025-10）/ OOT（2025-11—2026-05）切分，OOT 仅用于验证。两模型分数缺失口径：mlt 缺失 42,575 笔（7.35%，含无银行交易数据人群的 −1.0 兜底分置空，2026-09-01 用户确认）、价值模型缺失 40,974 笔（7.08%，无银行交易数据人群），双分样本即两模型分数交集。")
+    B(f"> 分析样本为同时存在两个模型分的完成申请 {num(n_all)} 笔（占 {num(n_apply)} 笔完成申请的 {pct(n_all/n_apply)}），按 Train（2024-01—2025-10）/ OOT（2025-11—2026-05）切分，OOT 仅用于验证。两模型分数缺失口径：mlt 缺失 {num(n_miss_a)} 笔（{pct(n_miss_a/n_apply)}，含无银行交易数据人群的 −1.0 兜底分置空，2026-09-01 用户确认）、价值模型缺失 {num(n_miss_b)} 笔（{pct(n_miss_b/n_apply)}，无银行交易数据人群），双分样本即两模型分数交集。")
     B(">")
     B(f"> **一句话结论：不做分数融合；价值模型的正确用法是二维规则——AND 组合（mlt ≤ C 档且价值 ≤ C 档）可把接纳风险从 {pct(and_row['train_accept_3m30p'])} 进一步压低（当前组合点接纳率 {pct(and_row['train_accept_rate'])}），而\"仅价值低\"的错配客群（Train {pct(quad[('train','仅wth低')]['sample_pct'])}、3M30+ {pct(quad[('train','仅wth低')]['3m30p_cnt_bad_rate'])}）必须由 mlt 把关拦截。**")
     B("")
@@ -1298,7 +1279,7 @@ def render_cross():
     B(f"| 现行策略（双分样本重算） | OOT 总接纳率 / 接纳 3M30+ | {pct(a_row['oot_accept_rate'])} / {pct(a_row['oot_accept_3m30p'])} | {pct(b_row['oot_accept_rate'])} / {pct(b_row['oot_accept_3m30p'])} | {pct(and_row['oot_accept_rate'])} / {pct(and_row['oot_accept_3m30p'])}（AND） |")
     B("")
     B("## 二、数据与口径\n")
-    B(f"- **样本**：完成申请 579,100 笔中同时存在两个模型分的 {num(n_all)} 笔（{pct(n_all/579100)}）；mlt 分缺失 42,575 笔（7.35%）、价值分缺失 40,974 笔（7.08%），双分样本即两模型分数交集。")
+    B(f"- **样本**：完成申请 {num(n_apply)} 笔中同时存在两个模型分的 {num(n_all)} 笔（{pct(n_all/n_apply)}）；mlt 分缺失 {num(n_miss_a)} 笔（{pct(n_miss_a/n_apply)}）、价值分缺失 {num(n_miss_b)} 笔（{pct(n_miss_b/n_apply)}），双分样本即两模型分数交集。")
     B(f"- **切分**：双分样本 {train_oot}。两模型单模型策略通过率在双分口径下重算，与各自分箱报告略有差异（剔除对方模型缺失分样本所致）。")
     B("- **分档**：两模型均使用各自报告已评审的 7 档方案（见附录边界）。档位序 1–7 对应风险从低到高。")
     B("- **风险指标**：沿用笔数违约口径，1M30+/3M30+ 笔数逾期率为主要观察指标，金额逾期率同步输出；矩阵格的 Lift = 格逾期率 ÷ 该样本组整体逾期率；样本量不足 100 的格风险类指标显示 —。")
@@ -1417,7 +1398,6 @@ def render_cross():
 
 
 if __name__ == "__main__":
-    prep = prep_stats()
     render_single_model(
         "new_worthiness",
         WTH_XLSX,
@@ -1432,7 +1412,6 @@ if __name__ == "__main__":
         "C",
         "（均为无银行交易数据人群，与老客价值模型缺失口径一致，2026-09-01 用户确认）",
         "手动指定（模型配置 final_bin_ranges，2026-09-01 用户确认）：自动合箱在该口径下选中 6 档 [(1,1),(2,3),(4,4),(5,9),(10,19),(20,20)]（Train 主指标与全指标倒挂 0 处、箱级约束违规 2 项）；经评审改为手动 7 档，将 (10,19) 拆为 (10,12)+(13,16) 并与 (17,20) 合并，消除 7/8 档候选残留的 B20 单箱倒挂——校验结果 Train 主指标倒挂 0 处、极端边界跨越 1 处（边界 19，经用户确认）、箱级约束违规 1 项（C 档占比 4.9998% 略低于中间箱 5% 下限，与自动 6 档方案同性质），A/B/C 三档边界与阈值不受影响。",
-        prep,
         manual=True,
         value_semantics=True,
         dist_note="自动 6 档方案的 E 档（B10–B19）50.00% 超限更严重且无可行拆分点；最终手动 7 档方案已按用户确认采用（详见三（四））",
@@ -1454,7 +1433,6 @@ if __name__ == "__main__":
         "C",
         "（4,588 笔为文件本身缺失，其余 37,987 笔为无银行交易数据人群的 −1.0 兜底分、按缺失分置空处理，2026-09-01 用户确认）",
         "自动合箱：小箱清理 → 单调合并 → 档位压缩 → 候选生成，最终选中 7 档方案（详见三（二））。",
-        prep,
         manual=False,
         value_semantics=False,
         dist_note="分布整形拆分后可得到合规子箱（5.00% / 20.00%），但合回 7 档的唯一不超限合并 (1,1)+(2,4) 跨越极端箱边界 B01（默认禁止），其余相邻对合并后占比均重新超限，整形失败、原候选保留（详见三（四））",
