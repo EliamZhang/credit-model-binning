@@ -241,12 +241,13 @@ def resolve_xlsx(prefix: str, date: str | None, out_dir: Path | None = None) -> 
 
 
 def resolve_cross_prefix(dataset_key: str, model_a: str, model_b: str) -> str:
-    """交叉 Excel 输出前缀：复用 scripts/cross_models.py 的历史登记，未登记走通用命名。"""
+    """交叉 Excel 输出前缀：复用 scripts/cross_models.py 的历史登记（双向查询），未登记走通用命名。"""
     from scripts.cross_models import REPORT_PREFIXES
 
-    return REPORT_PREFIXES.get(
-        (dataset_key, model_a, model_b, "matrix"),
-        f"binning_cross_{model_a}_{model_b}_strategy_report")
+    return (
+        REPORT_PREFIXES.get((dataset_key, model_a, model_b, "matrix"))
+        or REPORT_PREFIXES.get((dataset_key, model_b, model_a, "matrix"))
+        or f"binning_cross_{model_a}_{model_b}_strategy_report")
 
 
 def model_report_prefix(model_cfg: dict, metric: str) -> str:
@@ -518,9 +519,13 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(f"# {ds_name}{model_cn}分数分箱与策略阈值设定报告（笔数口径）\n")
     A(f"> 本报告说明{ds_name}{model_cn}（`{raw_score_col}`）分数分箱、样本外验证及策略阈值设定结果，由 `scr/_gen_new_reports.py` 从 `out/{xlsx.name}` 读取数值生成，与 Excel 逐项一致。管线沿用笔数违约合箱口径：完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 仅用于最终验证。")
     if include_y_cols:
-        A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/{ctx.model_b_cfg['score_file']}` 与 `res/{ctx.dataset_cfg['application_file']}` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
+        A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/{cfg['score_file']}` 与 `res/{ctx.dataset_cfg['application_file']}` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
     A(">")
-    A(f"> 数据范围：数据源 `{sample_file}` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；按月样本时间范围为 {tr_range.split('—')[0]}—{oo_range.split('—')[1]}，其中 {oot_last_month} 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**：check_data 十分位 3M30+ 笔数逾期率由最低分位 {decile.split('→')[0].strip()} 单调升至最高分位 {decile.split('→')[1].strip()}（{notes.get('decile_inversion', '倒挂 0 处')}，`HIGH_SCORE_HIGH_RISK=True`）。")
+    dec_parts = decile.split("→") if decile and "→" in decile else None
+    dir_clause = ""
+    if dec_parts:
+        dir_clause = f"check_data 十分位 3M30+ 笔数逾期率由最低分位 {dec_parts[0].strip()} 单调升至最高分位 {dec_parts[1].strip()}（{notes.get('decile_inversion', '倒挂 0 处')}，`HIGH_SCORE_HIGH_RISK=True`）"
+    A(f"> 数据范围：数据源 `{sample_file}` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；按月样本时间范围为 {tr_range.split('—')[0]}—{oo_range.split('—')[1]}，其中 {oot_last_month} 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**{'：' + dir_clause + '。' if dir_clause else '。'}")
     A("")
     A("## 一、结论摘要\n")
 
@@ -773,7 +778,10 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(f"总体风险水平：Train 的 1M30+、3M30+ 笔数逾期率分别为 {pct(train_bad1)} 和 {pct(train_bad3)}；OOT 分别为 {pct(oot_bad1)} 和 {pct(oot_bad3)}。合箱同时以 1M30+、3M30+ 笔数逾期率作为单调性主指标；单箱成熟量、显著性检验和 IV 等统计环节以 3M30+ 为锚定口径。分箱结果表的各档风险率旁同步展示对应 Lift（某箱逾期率 ÷ 该样本组整体逾期率），衡量单箱风险相对整体水平的倍数：Lift < 1 表示低于整体，> 1 表示高于整体；另附四项累计逾期率（按 bin_order 从低风险向高风险逐箱累加），用于观察\"截止到某档为止\"的累计风险水平，累计至最后一档即等于样本组整体逾期率。")
     A("")
     A("### （三）模型分方向验证")
-    A(f"check_data 十分位验证（完整 Train，按 {score_col} 分位数）：3M30+ 笔数逾期率由最低分位的 {decile.split('→')[0].strip()} 单调升至最高分位的 {decile.split('→')[1].strip()}，{notes.get('decile_inversion', '倒挂 0 处')}，沿用 `HIGH_SCORE_HIGH_RISK=True`。")
+    if dec_parts:
+        A(f"check_data 十分位验证（完整 Train，按 {score_col} 分位数）：3M30+ 笔数逾期率由最低分位的 {dec_parts[0].strip()} 单调升至最高分位的 {dec_parts[1].strip()}，{notes.get('decile_inversion', '倒挂 0 处')}，沿用 `HIGH_SCORE_HIGH_RISK=True`。")
+    else:
+        A(f"沿用 `HIGH_SCORE_HIGH_RISK=True`（模型配置方向）；check_data 十分位结果未登记（report_notes.decile 缺失）。")
     if value_semantics:
         A("")
         A(ds_notes.get("value_note_single", "").format(pearson=rate4(pearson_cross)))
@@ -1615,16 +1623,43 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    md_dir = Path(args.out_dir) if args.out_dir else DOCS
-    # 参数化改造分阶段进行：渲染函数尚未接入 ctx，暂只放行默认 new 场景。
-    if args.dataset != "new" or args.model_a or args.model_b or args.metric != "cnt" or md_dir != DOCS:
-        raise SystemExit(
-            "生成器参数化改造进行中：当前仅支持默认 new 数据集笔数口径渲染"
-            "（--dataset/--model-a/--model-b/--metric/--out-dir 将在阶段 5 后启用）")
-    ctx = build_context("new", "new_mlt", "new_worthiness", date=args.date, md_dir=md_dir)
-    render_single_model(ctx, "b")
-    render_single_model(ctx, "a")
-    render_cross(ctx)
+    md_dir = (Path(args.out_dir) if args.out_dir else DOCS).resolve()
+    md_dir.mkdir(parents=True, exist_ok=True)
+    dataset_cfg = DATASETS[args.dataset]
+    meta = dataset_cfg.get("report_meta")
+
+    if args.model_a and args.model_b:
+        # 显式组合：单模型 a、b（按各自 metric） + 交叉
+        ctx = build_context(args.dataset, args.model_a, args.model_b, date=args.date, md_dir=md_dir, metric=args.metric)
+        render_single_model(ctx, "a")
+        render_single_model(ctx, "b")
+        if args.metric == "cnt":
+            render_cross(ctx)
+        print("全部生成完成。")
+        return
+
+    if meta is None:
+        parser.error(
+            f"数据集 {args.dataset} 未登记 report_meta："
+            "必须显式指定 --model-a 与 --model-b（并将 --out-dir 指向临时目录防覆盖手工报告）")
+
+    # 渲染清单驱动：report_meta.models（笔数）+ amt_models（金额）+ cross_pairs（交叉）
+    for model_key in meta.get("models", []):
+        partner = None
+        if MODELS[model_key].get("report_meta", {}).get("value_model"):
+            for pair in meta.get("cross_pairs", []):
+                if model_key in pair:
+                    partner = pair[1] if pair[0] == model_key else pair[0]
+                    break
+        ctx = build_context(args.dataset, model_key, partner, date=args.date, md_dir=md_dir, metric="cnt")
+        render_single_model(ctx, "a")
+    for model_key in meta.get("amt_models", []):
+        ctx = build_context(args.dataset, model_key, date=args.date, md_dir=md_dir, metric="amt")
+        render_single_model(ctx, "a")
+    if meta.get("cross_pairs"):
+        for pair in meta["cross_pairs"]:
+            ctx = build_context(args.dataset, pair[0], pair[1], date=args.date, md_dir=md_dir, metric="cnt")
+            render_cross(ctx)
     print("全部生成完成。")
 
 
