@@ -688,8 +688,10 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     shares = " / ".join(pct(r["sample_pct"]) for r in tr_rows)
     if manual:
         A(f"2. **{n_bins} 档方案经手动指定（模型配置 final_bin_ranges，2026-09-01 用户确认）**：自动合箱在该口径下选中 6 档（保留最坏极端箱 B20 单箱），经评审改为手动 {n_bins} 档 {plan} 消除 7/8 档候选的 B20 单箱倒挂（详见三（二））；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限：{dist_note}；")
-    else:
+    elif maxbin["sample_pct"] > settings.MAX_FINAL_BIN_SHARE:
         A(f"2. **{n_bins} 档方案经自动合箱选中，Train 主指标倒挂 0 处**：{plan}；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限：{dist_note}；")
+    else:
+        A(f"2. **{n_bins} 档方案经自动合箱选中，Train 主指标倒挂 0 处**：{plan}；Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，未超过 {share_cap_pct} 的人数分布上限{'：' + dist_note if dist_note else ''}；")
 
     # 结论 3：OOT 主指标
     viol = [r for r in mono_bad if r["sample_group"] == "oot" and r["metric"] == "1m30p_cnt_bad_rate"]
@@ -1258,9 +1260,11 @@ def income_matrix_stats(ctx: ReportContext):
 
 def _read_wth_interest(ctx: ReportContext, role: str):
     """读价值模型分与申请信息：application_id -> (score, application_month, raw3m_str)。
-    分数空值/非数值剔除；月份缺失回退 application_time[:7]。"""
+    分数空值/非数值剔除；月份缺失回退 application_time[:7]。
+    raw3m_str 列按 report_meta.y_interest.raw_col_source 从申请信息表（默认）或分数文件读取。"""
     cfg = ctx.model_a_cfg if role == "a" else ctx.model_b_cfg
     meta = cfg["report_meta"]
+    y = meta["y_interest"]
     with open(ROOT / ctx.dataset_cfg["data_dir"] / cfg["score_file"], encoding="utf-8-sig") as f:
         r = csv.reader(f)
         hdr = next(r)
@@ -1273,22 +1277,32 @@ def _read_wth_interest(ctx: ReportContext, role: str):
                     scores[row[aidx]] = float(v)
                 except ValueError:
                     pass
-    out = {}
+    source_file = y.get("raw_col_source", "application_file")
+    raw_path = ROOT / ctx.dataset_cfg["data_dir"] / (
+        cfg["score_file"] if source_file == "score_file" else ctx.dataset_cfg["application_file"])
+    months = {}
     with open(ROOT / ctx.dataset_cfg["data_dir"] / ctx.dataset_cfg["application_file"], encoding="utf-8-sig") as f:
         r = csv.reader(f)
         hdr = next(r)
         aidx = hdr.index("application_id")
         midx = hdr.index("application_month")
         tix = hdr.index("application_time")
-        rix = hdr.index(meta["y_interest"]["raw_col"])
+        for row in r:
+            m = row[midx]
+            if not m:
+                m = row[tix][:7] if row[tix] else ""
+            months[row[aidx]] = m
+    out = {}
+    with open(raw_path, encoding="utf-8-sig") as f:
+        r = csv.reader(f)
+        hdr = next(r)
+        aidx = hdr.index("application_id")
+        rix = hdr.index(y["raw_col"])
         for row in r:
             aid = row[aidx]
             if aid not in scores:
                 continue
-            m = row[midx]
-            if not m:
-                m = row[tix][:7] if row[tix] else ""
-            out[aid] = (scores[aid], m, row[rix])
+            out[aid] = (scores[aid], months.get(aid, ""), row[rix])
     return out
 
 
