@@ -64,7 +64,7 @@
 │                    #   strategy / monthly / reporting / orchestration / bin_amt / cross_analysis）
 ├── scripts/         # 入口脚本（bin_model.py / cross_models.py / check_data.py + 快捷壳）
 ├── docs/            # 全部报告 md 与参考文档（报告清单见第十一节）
-├── scr/             # 数据准备、报告生成与核对工具（_gen_new_reports.py / _quadrant_metrics.py 等）
+├── scr/             # 数据准备、报告生成与核对工具（_gen_new_reports.py / _verify_report_sync_*.py 等）
 ├── tests/           # 单元测试（19 例）
 ├── 单变量分析/      # 拒付规则（BR05）策略迭代与收益/损失回测文档（dishonour_rule_report + BR05_gain_loss_analysis）
 ├── res/             # 输入数据（gitignored）：老客 old_* 与 新客 new_* 同构三件套
@@ -1407,7 +1407,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `交叉_老客_mlt_价值.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），数值由 `res/old_application_info.csv` 重算并与 Excel 逐格核对。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
 
-新客（`new` 数据集）同构交叉输出 `binning_new_cross_strategy_report_YYYYMMDD.xlsx`，报告为 `交叉_新客_mlt_价值.md`；其四象限客群画像见 `四象限_新客_mlt_价值.md`（收入/盈余为中位数口径，与交叉报告平均数口径区分，两文档对比时注意）。
+新客（`new` 数据集）同构交叉输出 `binning_new_cross_strategy_report_YYYYMMDD.xlsx`，报告为 `交叉_新客_mlt_价值.md`。
 
 ---
 
@@ -1451,7 +1451,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 - 函数级改动只发生在 `pipeline/` 对应模块；
 - 任何改动后必须跑：`python -m unittest discover tests`（19 例全绿）；
-- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（961 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（940 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py` 并核对 git diff；四类客群 → 重跑 `scr/_quadrant_metrics.py`（4 段全绿）。
+- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（961 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（940 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py` 并核对 git diff。
 
 ### 6. docs/ 报告清单（数值锚与维护方式）
 
@@ -1464,7 +1464,6 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 | 分箱_新客_mlt_笔数.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（重跑新客管线后重跑） |
 | 分箱_新客_价值_笔数.md | `binning_new_worthiness_strategy_report_*.xlsx` | 同上 |
 | 交叉_新客_mlt_价值.md | `binning_new_cross_strategy_report_*.xlsx` | 同上 |
-| 四象限_新客_mlt_价值.md | 交叉 Excel 02/03/06 + `res/new_*` | `scr/_quadrant_metrics.py` 重算并逐项核对（Excel 逐格 + md 数值） |
 | 价值评估_新客_0520.html | —（外部参考文档，价值标签口径引用） | 不改 |
 
 

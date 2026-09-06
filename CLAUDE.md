@@ -70,9 +70,8 @@ tests/      # 单元测试（19 例）
 | 交叉_老客_mlt_价值.md | 老客交叉 Excel + res/old_*.csv 重算 | 手工维护；章三收入/自动审批矩阵逐格独立核对 |
 | 分箱_新客_mlt_笔数.md / 分箱_新客_价值_笔数.md | binning_new_*_strategy_report | `scr/_gen_new_reports.py` 生成（改文案改生成器，重跑后 git diff 仅目标行） |
 | 交叉_新客_mlt_价值.md | binning_new_cross_strategy_report | 同上 |
-| 四象限_新客_mlt_价值.md | 交叉 Excel 02/03/06 + res/new_* | `scr/_quadrant_metrics.py` 重算核对（Excel 逐格 + md 数值逐项） |
 
-口径提醒：交叉报告（老/新客）收入矩阵为**平均数**三口径；四类客群矩阵收入/盈余为**中位数**口径，跨文档比对注意区分。
+口径提醒：交叉报告（老/新客）收入矩阵为**平均数**三口径。
 
 ## 2.3 新数据质量检查与交互协议（数据入库后的第一道工序）
 
@@ -117,7 +116,6 @@ python scripts/check_data.py --dataset <d> --model <m>   # 新数据质量检查
 python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 后必跑
 python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
 python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生成三份新客报告（数值从 Excel 读）
-python scr/_quadrant_metrics.py             # 四类客群矩阵重算核对（Excel 逐格 + md 逐项；改象限 md 后必跑）
 ```
 
 输出文件名规则：`out/<model.report_prefix>_YYYYMMDD.xlsx`；交叉用 `REPORT_PREFIXES`（scripts/cross_models.py）登记的历史前缀，新组合默认 `binning_cross_<a>_<b>_strategy_report`。
@@ -164,7 +162,7 @@ python scr/_quadrant_metrics.py             # 四类客群矩阵重算核对（E
 - [ ] `python -m unittest discover tests` 全绿
 - [ ] 动过 mlt 管线 → cnt 核对 961 单元 + amt 核对 940 单元通过
 - [ ] 动过价值模型/交叉 → 关键值与第 8 节基准一致（不一致要说明原因，且经用户确认）
-- [ ] 动过新客生成器（scr/_gen_new_reports.py）→ 重跑后三份新客 md git diff 仅目标行；动过象限 md → `scr/_quadrant_metrics.py` 4 段全绿
+- [ ] 动过新客生成器（scr/_gen_new_reports.py）→ 重跑后三份新客 md git diff 仅目标行
 - [ ] 报告 md 数值与 Excel 逐项一致（新报告按 7.1 模板与格式）
 - [ ] `git status` 无遗漏文件；提交信息中文、含验证结果
 - [ ] 推送前已征得用户明确同意（推送纪律）
@@ -185,7 +183,7 @@ python scr/_quadrant_metrics.py             # 四类客群矩阵重算核对（E
 ## 六、附录：核心配置参数
 ```
 
-交叉报告章三为 **22 组矩阵 × Train/OOT**：14 个业务指标矩阵（7×7 每格 n 精确一致；自动审批通过率 n<100 显示 "—"；数值读 Excel 02/03 sheet）+ 8 张收入口径矩阵（**平均数**口径：全样本 4 字段 + gross/net 剔除 <0 样本 + gross/net 成交样本，成交 = status 属 Active_Account/Closed/Blocked；收入无 Excel 列，数值由 res 重算并断言分档计数与 Excel 每格 n 一致）。四类客群象限文档惯例：页头 3 行 blockquote（文档定位 + 象限定义含两模型 C 档右边界 + **中位数**口径声明区别于交叉报告平均数）。
+交叉报告章三为 **22 组矩阵 × Train/OOT**：14 个业务指标矩阵（7×7 每格 n 精确一致；自动审批通过率 n<100 显示 "—"；数值读 Excel 02/03 sheet）+ 8 张收入口径矩阵（**平均数**口径：全样本 4 字段 + gross/net 剔除 <0 样本 + gross/net 成交样本，成交 = status 属 Active_Account/Closed/Blocked；收入无 Excel 列，数值由 res 重算并断言分档计数与 Excel 每格 n 一致）。
 
 数值格式约定：逾期率 2 位小数百分比（含 CI 写 `1.73% [1.48%, 2.01%]`）；阈值全精度原文；AUC/KS/PSI/相关性 4 位小数；样本量千分位；Lift 2~4 位（与同表其余列一致）；pp 差写 `+0.0014` 式四位数。所有表格列名与 Excel 一致，不缩写含义。
 
@@ -224,7 +222,7 @@ python scr/_quadrant_metrics.py             # 四类客群矩阵重算核对（E
 - **pipeline 的 settings 注入机制**：动态常量（SCORE_COL 等）由 `settings.sync()` 刷入各模块全局；新增函数若使用这些常量，写裸引用即可，但**不要**在函数默认参数里引用动态常量（import 时会被冻结），需要时用 `None + 函数体内解析` 模式（参考 risk_metrics.calc_bin_stats）；
 - **等频初分可能不足 20 箱**：分数唯一值不足时 qcut duplicates=drop，少于 6 箱会报错——遇此情况先与用户确认分数分布；
 - **金额口径与笔数口径不可混用**：bin_amt 的 21 个差异函数按调用传递闭包保留，新增差异函数时注意其内部裸调用的归属模块；
-- **收入口径跨文档区分**：老/新客交叉报告收入矩阵为**平均数**三口径（res 重算，无 Excel 列）；四类客群矩阵为**中位数**口径（右偏分布下中位数 < 平均数，比较或引用时注明）；
-- **新客 md 由生成器维护**：scr/_gen_new_reports.py 生成的 md 不要手工改数值/格式——改生成器再重跑，提交前确认 git diff 仅目标行（生成器对未改动段落 byte 稳定）；象限 md（四类客群矩阵）为手工维护但由 scr/_quadrant_metrics.py 逐项兜底核对，改动后必跑；
+- **收入口径跨文档区分**：老/新客交叉报告收入矩阵为**平均数**三口径（res 重算，无 Excel 列）；
+- **新客 md 由生成器维护**：scr/_gen_new_reports.py 生成的 md 不要手工改数值/格式——改生成器再重跑，提交前确认 git diff 仅目标行（生成器对未改动段落 byte 稳定）；
 - **Excel 日期锚**：md 页头锚定具体日期版本 Excel（如 20260901）；重跑管线产出新日期文件后，需先做新旧两版逐格零漂移证明（openpyxl data_only 逐格比较）再更新 md 锚，不能直接换锚；
 - **报告里不写未经验证的结论**：所有结论必须有对应数值支撑，来源注明（Train/OOT、笔数/金额口径）。
