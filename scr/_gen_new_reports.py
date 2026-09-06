@@ -16,6 +16,7 @@ import re
 import sys
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -28,6 +29,7 @@ DOCS = ROOT / "docs"
 sys.path.insert(0, str(ROOT))
 from configs.datasets import DATASETS  # noqa: E402
 from configs.models import MODELS  # noqa: E402
+from pipeline import settings  # noqa: E402  （只读常量值，不做 sync）
 
 
 # ---------- 通用工具 ----------
@@ -164,6 +166,29 @@ def bin_label(v):
     if s.isdigit():
         return f"B{int(s):02d}"
     return s
+
+
+def data_as_of(ctx: "ReportContext") -> str:
+    """数据截至日：report_notes.data_as_of 优先；否则扫 res 申请表 application_time 最大非空值（取日期部分）。"""
+    note = ctx.dataset_cfg.get("report_notes", {}).get("data_as_of")
+    if note:
+        return note
+    path = ROOT / ctx.dataset_cfg["data_dir"] / ctx.dataset_cfg["application_file"]
+    return _data_as_of_from_file(str(path))
+
+
+@lru_cache(maxsize=None)
+def _data_as_of_from_file(path: str) -> str:
+    best = ""
+    with open(path, encoding="utf-8-sig") as f:
+        r = csv.reader(f)
+        hdr = next(r)
+        tix = hdr.index("application_time")
+        for row in r:
+            v = row[tix]
+            if v and v > best:
+                best = v
+    return best[:10]
 
 
 def count_csv_rows(path: Path) -> int:
@@ -309,6 +334,18 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     auto_bin = str(O("模型策略阈值", "自动通过截止风险档"))
     accept_bin = str(O("模型策略阈值", "人工审核截止风险档"))
 
+    # 配置/常量驱动的渲染变量（全部来自 configs 或 pipeline.settings，无固化值）
+    ds_name = ctx.dataset_cfg["name"]
+    ds_notes = ctx.dataset_cfg.get("report_notes", {})
+    sample_file = ctx.dataset_cfg["sample_file"]
+    sc = cfg["strategy_config"]
+    auto_c = sc["auto_constraints"]
+    acc_c = sc["accept_constraints"]
+    share_cap_pct = f"{settings.MAX_FINAL_BIN_SHARE*100:.0f}%"
+    init_bins = settings.INITIAL_BIN_COUNT
+    inv_tol_pp = f"{settings.MONTHLY_INVERSION_TOLERANCE*100:.1f}pp"
+    as_of = data_as_of(ctx)
+
     n_raw = int(O("样本", "原始样本量"))
     n_removed = int(O("样本", "剔除未完成申请量"))
     n_valid = int(O("样本", "有效模型分样本量"))
@@ -428,9 +465,18 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         return [r for r in seg if r["sample_group"] == group]
 
     # 时间范围
-    tr_range = "2024-01—2025-10"
-    oo_range = "2025-11—2026-05"
-    oot_last_month_n = max((int(r["n"]) for r in monthly_rows if r["sample_group"] == "oot" and r["application_month"] == "2026-05"), default=0)
+    tr_range = month_range(monthly_rows, "train")
+    oo_range = month_range(monthly_rows, "oot")
+    oo_months = sorted({r["application_month"] for r in monthly_rows if r["sample_group"] == "oot"})
+    oot_last_month = oo_months[-1]
+    oot_last_month_n = max((int(r["n"]) for r in monthly_rows if r["sample_group"] == "oot" and r["application_month"] == oot_last_month), default=0)
+    oo_mature = {r["application_month"]: int(r.get("mature_count", 0)) for r in monthly_rows if r["sample_group"] == "oot"}
+    immature_start = None
+    for m in reversed(oo_months):
+        if oo_mature.get(m, 0) == 0:
+            immature_start = m
+        else:
+            break
 
     # 单调性明细（OOT 倒挂档位）
     mono_bad = [r for r in mono_rows if not bool(r["is_monotonic_non_decreasing"])]
@@ -469,12 +515,12 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     lines = []
     A = lines.append
 
-    A(f"# 新客{model_cn}分数分箱与策略阈值设定报告（笔数口径）\n")
-    A(f"> 本报告说明新客{model_cn}（`{raw_score_col}`）分数分箱、样本外验证及策略阈值设定结果，由 `scr/_gen_new_reports.py` 从 `out/{xlsx.name}` 读取数值生成，与 Excel 逐项一致。管线沿用笔数违约合箱口径：完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 仅用于最终验证。")
+    A(f"# {ds_name}{model_cn}分数分箱与策略阈值设定报告（笔数口径）\n")
+    A(f"> 本报告说明{ds_name}{model_cn}（`{raw_score_col}`）分数分箱、样本外验证及策略阈值设定结果，由 `scr/_gen_new_reports.py` 从 `out/{xlsx.name}` 读取数值生成，与 Excel 逐项一致。管线沿用笔数违约合箱口径：完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 仅用于最终验证。")
     if include_y_cols:
         A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/new_worthiness_score.csv` 与 `res/new_application_info.csv` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
     A(">")
-    A(f"> 数据范围：数据源 `new_sample.csv` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；按月样本时间范围为 2024-01—2026-05，其中 2026-05 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**：check_data 十分位 3M30+ 笔数逾期率由最低分位 {decile.split('→')[0].strip()} 单调升至最高分位 {decile.split('→')[1].strip()}（倒挂 0 处，`HIGH_SCORE_HIGH_RISK=True`）。")
+    A(f"> 数据范围：数据源 `{sample_file}` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；按月样本时间范围为 {tr_range.split('—')[0]}—{oo_range.split('—')[1]}，其中 {oot_last_month} 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**：check_data 十分位 3M30+ 笔数逾期率由最低分位 {decile.split('→')[0].strip()} 单调升至最高分位 {decile.split('→')[1].strip()}（{notes.get('decile_inversion', '倒挂 0 处')}，`HIGH_SCORE_HIGH_RISK=True`）。")
     A("")
     A("## 一、结论摘要\n")
 
@@ -614,20 +660,23 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     if include_y_cols:
         _tr_irr_n, _tr_irr_mean, _tr_irr_y1 = y_interest_overall["Train"]
         _oo_irr_n, _oo_irr_mean, _oo_irr_y1 = y_interest_overall["OOT"]
-        A(f"> 表末两列（仅价值模型报告展示）为价值标签统计：3M 实付利息 = `raw_interest_income_3m`，即建模标签 `y_interest_income_3m` 的底层金额（标签 y=1 ⇔ 3 个月实付利息 < 160 元，即\"价值较弱\"，与标签列逐笔一致率核验 100%）；覆盖样本为成交且有 3 个月利息观察的申请——Train {num(_tr_irr_n)} 笔（占该组 {pct(_tr_irr_n / n_train)}）、OOT {num(_oo_irr_n)} 笔（占该组 {pct(_oo_irr_n / n_oot)}），利息缺失样本不计入两列。均值 = 档内全部非缺失实付利息的平均（元，含 0 元与冲销负值样本，负值占比 <0.2%）；<160 占比 Lift = 档内 y=1 占比 ÷ 该样本组整体 y=1 占比（基准 Train {pct(_tr_irr_y1)}、OOT {pct(_oo_irr_y1)}），整体行恒为 1.0000。各档利息样本覆盖随分数档位升高而明显下降（成交集中于低分档，如 Train A 档覆盖率约 32%、G 档约 1.5%），比较档级数值时注意样本量差异。")
+        y_th = meta["y_interest"]["threshold"]
+        cov_first = y_interest_stats[("Train", int(tr_rows[0]["bin_order"]))][0] / int(tr_rows[0]["n"])
+        cov_last = y_interest_stats[("Train", int(tr_rows[-1]["bin_order"]))][0] / int(tr_rows[-1]["n"])
+        A(f"> 表末两列（仅价值模型报告展示）为价值标签统计：3M 实付利息 = `raw_interest_income_3m`，即建模标签 `y_interest_income_3m` 的底层金额（标签 y=1 ⇔ 3 个月实付利息 < {y_th} 元，即\"价值较弱\"，与标签列逐笔一致率核验 100%）；覆盖样本为成交且有 3 个月利息观察的申请——Train {num(_tr_irr_n)} 笔（占该组 {pct(_tr_irr_n / n_train)}）、OOT {num(_oo_irr_n)} 笔（占该组 {pct(_oo_irr_n / n_oot)}），利息缺失样本不计入两列。均值 = 档内全部非缺失实付利息的平均（元，含 0 元与冲销负值样本，负值占比 <0.2%）；<{y_th} 占比 Lift = 档内 y=1 占比 ÷ 该样本组整体 y=1 占比（基准 Train {pct(_tr_irr_y1)}、OOT {pct(_oo_irr_y1)}），整体行恒为 1.0000。各档利息样本覆盖随分数档位升高而明显下降（成交集中于低分档，如 Train {tr_rows[0][bin_col]} 档覆盖率约 {cov_first*100:.0f}%、{tr_rows[-1][bin_col]} 档约 {cov_last*100:.1f}%），比较档级数值时注意样本量差异。")
     A("")
     A("**核心结论**：\n")
 
     # 结论 1：Train 风险分层
-    A(f"1. **Train 风险分层成立**：1M30+、3M30+ 的笔数和金额逾期率均随风险档位单调上升，3M30+ 笔数逾期率由 A 档的 {pct(tr_rows[0]['3m30p_cnt_bad_rate'])} 升至 {tr_rows[-1][bin_col]} 档的 {pct(tr_rows[-1]['3m30p_cnt_bad_rate'])}；")
+    A(f"1. **Train 风险分层成立**：1M30+、3M30+ 的笔数和金额逾期率均随风险档位单调上升，3M30+ 笔数逾期率由 {tr_rows[0][bin_col]} 档的 {pct(tr_rows[0]['3m30p_cnt_bad_rate'])} 升至 {tr_rows[-1][bin_col]} 档的 {pct(tr_rows[-1]['3m30p_cnt_bad_rate'])}；")
 
     # 结论 2：方案与人数分布
     maxbin = max(tr_rows, key=lambda r: r["sample_pct"])
     shares = " / ".join(pct(r["sample_pct"]) for r in tr_rows)
     if manual:
-        A(f"2. **{n_bins} 档方案经手动指定（模型配置 final_bin_ranges，2026-09-01 用户确认）**：自动合箱在该口径下选中 6 档（保留最坏极端箱 B20 单箱），经评审改为手动 {n_bins} 档 {plan} 消除 7/8 档候选的 B20 单箱倒挂（详见三（二））；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 21% 的人数分布上限：{dist_note}；")
+        A(f"2. **{n_bins} 档方案经手动指定（模型配置 final_bin_ranges，2026-09-01 用户确认）**：自动合箱在该口径下选中 6 档（保留最坏极端箱 B20 单箱），经评审改为手动 {n_bins} 档 {plan} 消除 7/8 档候选的 B20 单箱倒挂（详见三（二））；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限：{dist_note}；")
     else:
-        A(f"2. **{n_bins} 档方案经自动合箱选中，Train 主指标倒挂 0 处**：{plan}；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 21% 的人数分布上限：{dist_note}；")
+        A(f"2. **{n_bins} 档方案经自动合箱选中，Train 主指标倒挂 0 处**：{plan}；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限：{dist_note}；")
 
     # 结论 3：OOT 主指标
     viol = [r for r in mono_bad if r["sample_group"] == "oot" and r["metric"] == "1m30p_cnt_bad_rate"]
@@ -642,7 +691,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     else:
         vrow = prev = None
         inv_txt = ""
-    A(f"3. **OOT 主指标基本稳定**：3M30+ 笔数逾期率 OOT 由 A 档 {pct(oo_rows[0]['3m30p_cnt_bad_rate'])} 升至 {oo_rows[-1][bin_col]} 档 {pct(oo_rows[-1]['3m30p_cnt_bad_rate'])}，1M30+ / 3M30+ 金额口径在 OOT 全部单调{inv_txt}；")
+    A(f"3. **OOT 主指标基本稳定**：3M30+ 笔数逾期率 OOT 由 {oo_rows[0][bin_col]} 档 {pct(oo_rows[0]['3m30p_cnt_bad_rate'])} 升至 {oo_rows[-1][bin_col]} 档 {pct(oo_rows[-1]['3m30p_cnt_bad_rate'])}，1M30+ / 3M30+ 金额口径在 OOT 全部单调{inv_txt}；")
 
     # 结论 4：历史实际 vs 模型测算
     A(f"4. **历史实际与模型测算差异显著**：Train 历史实际审批通过率 {pct(F('Train','审批通过率'))}、自动审批通过率 {pct(F('Train','自动审批通过率'))}，模型策略测算 Train 自动通过率 {pct(S('Train','测算自动通过率'))}、总接纳率 {pct(S('Train','测算总接纳率'))}；OOT 实际审批通过率 {pct(F('OOT','审批通过率'))}、自动审批通过率 {pct(F('OOT','自动审批通过率'))}，测算自动通过率、总接纳率分别为 {pct(S('OOT','测算自动通过率'))}、{pct(S('OOT','测算总接纳率'))}，需结合现行业务规则评估策略落地影响；")
@@ -654,9 +703,9 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(f"5. **跨期分布稳定**：Train/OOT PSI 为 {rate4(psi)}；OOT 测算自动通过率、总接纳率分别为 {pct(S('OOT','测算自动通过率'))}、{pct(S('OOT','测算总接纳率'))}，较 Train 高 {pp_delta('测算自动通过率'):.2f}、{pp_delta('测算总接纳率'):.2f} 个百分点；")
 
     # 结论 6：阈值与 CI 余量
-    auto_hi_note = "略超" if auto_cum3_hi > 0.055 else "贴近"
-    acc_hi_note = "略超" if acc_cum3_hi > 0.075 else "贴近"
-    A(f"6. **策略阈值点估计满足默认约束、CI 余量有限**：自动通过阈值 {auto_th}（{auto_bin} 档右边界，Train 自动通过率 {pct(S('Train','测算自动通过率'))}），总接纳阈值 {accept_th}（{accept_bin} 档右边界，Train 总接纳率 {pct(S('Train','测算总接纳率'))}）；接纳人群 3M30+ {pct(acc_rate)}、最后接纳档边际 3M30+ {pct(marginal)}。自动通过累计 3M30+ CI 上界 {pct(auto_cum3_hi)}（{auto_hi_note} 5.50% 上限）、总接纳累计 3M30+ CI 上界 {pct(acc_cum3_hi)}（{acc_hi_note} 7.50% 上限），实施后需按约束口径持续监测；")
+    auto_hi_note = "略超" if auto_cum3_hi > auto_c["max_cum_3m30p_cnt_bad_rate"] else "贴近"
+    acc_hi_note = "略超" if acc_cum3_hi > acc_c["max_cum_3m30p_cnt_bad_rate"] else "贴近"
+    A(f"6. **策略阈值点估计满足默认约束、CI 余量有限**：自动通过阈值 {auto_th}（{auto_bin} 档右边界，Train 自动通过率 {pct(S('Train','测算自动通过率'))}），总接纳阈值 {accept_th}（{accept_bin} 档右边界，Train 总接纳率 {pct(S('Train','测算总接纳率'))}）；接纳人群 3M30+ {pct(acc_rate)}、最后接纳档边际 3M30+ {pct(marginal)}。自动通过累计 3M30+ CI 上界 {pct(auto_cum3_hi)}（{auto_hi_note} {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 上限）、总接纳累计 3M30+ CI 上界 {pct(acc_cum3_hi)}（{acc_hi_note} {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限），实施后需按约束口径持续监测；")
 
     # 结论 7：样本外衰减与月度稳定
     oo_max_drop = max((r["max_primary_rate_drop"] for r in oo_month_bad), default=None)
@@ -679,16 +728,16 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("| --- | --- | --- |")
     flow = [
         ("①", "数据加载与清洗",
-         f"数据源`new_sample.csv` 为完成申请样本（未完成申请已在数据准备阶段剔除），有效样本 {num(n_raw)} 笔；{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）不进入分析"),
+         f"数据源`{sample_file}` 为完成申请样本（未完成申请已在数据准备阶段剔除），有效样本 {num(n_raw)} 笔；{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）不进入分析"),
         ("②", "样本切分",
-         f"按申请月份切分：Train 2024-01—2025-10（{num(n_train)}）用于分箱与决策；OOT 2025-11—2026-05-20（{num(n_oot)}）仅用于最终验证"),
+         f"按申请月份切分：Train {tr_range}（{num(n_train)}）用于分箱与决策；OOT {oo_range.split('—')[0]}—{as_of}（{num(n_oot)}）仅用于最终验证"),
         ("③", "初始分箱",
-         f"Train 上按`{score_col}` 分位数等频初分为 20 箱（B01–B20，左开右闭、首尾 ±∞），边界固定后原样复用至 OOT"),
+         f"Train 上按`{score_col}` 分位数等频初分为 {init_bins} 箱（B01–B{init_bins:02d}，左开右闭、首尾 ±∞），边界固定后原样复用至 OOT"),
         ("④", "自动合箱（Train）",
          "四阶段递进：小箱清理（消除单箱硬约束违反）→ 单调合并（PAVA 风格消除主指标倒挂）→ 档位压缩（≤ 8 档）→ 候选生成（8/7/6 档）" if not manual else
          "四阶段递进：小箱清理（1 步）→ 单调合并（本次无独立步骤）→ 档位压缩 → 候选生成（8/7/6 档）；7/8 档候选残留主指标倒挂 1 处、6 档候选无倒挂（箱级违规 2 项）"),
         ("⑤", "候选评估与选择",
-         "硬约束筛选（6–8 档、无倒挂、单箱约束满足、不跨极端箱边界）→ 对单箱 Train 占比超过 21% 上限的候选做\"均衡拆分 + 相邻再合并\"整形（share_balancing）→ 按倒挂数、IV 保留率、最小相邻差距、档位偏离综合评分 → 选中 7 档方案" if not manual else
+         f"硬约束筛选（6–8 档、无倒挂、单箱约束满足、不跨极端箱边界）→ 对单箱 Train 占比超过 {share_cap_pct} 上限的候选做\"均衡拆分 + 相邻再合并\"整形（share_balancing）→ 按倒挂数、IV 保留率、最小相邻差距、档位偏离综合评分 → 选中 7 档方案" if not manual else
          "硬约束筛选（该口径下 6–8 档候选均未完全满足）→ 自动选中 6 档方案，经评审改为手动 7 档（模型配置 final_bin_ranges，2026-09-01 用户确认）"),
         ("⑥", "样本外验证",
          "Train/OOT 对照验证：风险单调性、分布稳定性（PSI）、区分能力（AUC/KS）、月度稳定性、测算分段风险梯度"),
@@ -709,12 +758,13 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("| 数据集 | 时间范围 | 样本量（有效模型分） | 用途 |")
     A("| --- | --- | ---: | --- |")
     A(f"| Train | {tr_range} | {num(n_train)} | 学习初始边界、执行合箱、选择方案并确定策略阈值 |")
-    A(f"| OOT | {oo_range}（截至 2026-05-20，其中 2026-05 {num(oot_last_month_n)} 笔且 3M30+ 未成熟） | {num(n_oot)} | 独立样本外验证，不参与分箱设计、候选选择或阈值设定 |")
+    A(f"| OOT | {oo_range}（截至 {as_of}，其中 {oot_last_month} {num(oot_last_month_n)} 笔且 3M30+ 未成熟） | {num(n_oot)} | 独立样本外验证，不参与分箱设计、候选选择或阈值设定 |")
     A("")
-    A(f"- Train 截止月份为 2025-10，OOT 自 2025-11 起；")
-    A(f"- 数据源 `new_sample.csv` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；")
+    A(f"- Train 截止月份为 {ctx.dataset_cfg['train_end_month']}，OOT 自 {ctx.dataset_cfg['oot_start_month']} 起；")
+    A(f"- 数据源 `{sample_file}` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；")
     A(f"- {model_cn}分缺失 {num(n_missing)} 笔（占 {pct(n_missing/n_raw)}）{missing_note}，分箱与策略测算仅使用存在模型分的 {num(n_valid)} 笔（Train {num(n_train)} + OOT {num(n_oot)}）；缺失样本不进入分箱统计，线上按拒绝处理；")
-    A(f"- 新客 Train 3M30+ 标签成熟率约 10.71%（成交样本才有 duedate 表现标签，新客完成申请成交率约 12%，属结构性口径，2026-09-01 已与用户确认记录在案）；")
+    if ds_notes.get("maturity_note"):
+        A(f"- {ds_notes['maturity_note']}；")
     A("- 历史实际审批漏斗独立于模型分，基于完整完成申请核算。")
     A("")
     A("### （二）风险指标")
@@ -723,14 +773,14 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(f"总体风险水平：Train 的 1M30+、3M30+ 笔数逾期率分别为 {pct(train_bad1)} 和 {pct(train_bad3)}；OOT 分别为 {pct(oot_bad1)} 和 {pct(oot_bad3)}。合箱同时以 1M30+、3M30+ 笔数逾期率作为单调性主指标；单箱成熟量、显著性检验和 IV 等统计环节以 3M30+ 为锚定口径。分箱结果表的各档风险率旁同步展示对应 Lift（某箱逾期率 ÷ 该样本组整体逾期率），衡量单箱风险相对整体水平的倍数：Lift < 1 表示低于整体，> 1 表示高于整体；另附四项累计逾期率（按 bin_order 从低风险向高风险逐箱累加），用于观察\"截止到某档为止\"的累计风险水平，累计至最后一档即等于样本组整体逾期率。")
     A("")
     A("### （三）模型分方向验证")
-    A(f"check_data 十分位验证（完整 Train，按 {score_col} 分位数）：3M30+ 笔数逾期率由最低分位的 {decile.split('→')[0].strip()} 单调升至最高分位的 {decile.split('→')[1].strip()}，倒挂 0 处，沿用 `HIGH_SCORE_HIGH_RISK=True`。")
+    A(f"check_data 十分位验证（完整 Train，按 {score_col} 分位数）：3M30+ 笔数逾期率由最低分位的 {decile.split('→')[0].strip()} 单调升至最高分位的 {decile.split('→')[1].strip()}，{notes.get('decile_inversion', '倒挂 0 处')}，沿用 `HIGH_SCORE_HIGH_RISK=True`。")
     if value_semantics:
         A("")
-        A(f"价值语义说明：价值模型的本义为\"低分 = 高价值\"（新客价值模型文档口径：分数越低，利息贡献越高，见 docs/价值评估_新客_0520.html）；价值模型分与 mlt 主模型分在双分样本上的 Pearson 相关为 {rate4(pearson_cross)}（见《两模型交叉效果评估报告（新客mlt × 新客价值模型）》）。因此本报告的 A 档（最低分）同时是\"高价值 + 低风险\"档，G 档（最高分）同时是\"高风险 + 低价值\"档；风险类结论不受该语义影响，经营/提额类场景（优先经营象限、额度分层）需结合该语义使用。")
+        A(ds_notes.get("value_note_single", "").format(pearson=rate4(pearson_cross)))
     A("")
     A("## 三、分箱方案设计与结果\n")
     A("### （一）初始分箱")
-    A(f"在完整 Train 上按 {score_col} 分位数构建 20 个等频初始箱（B01–B20，按分数升序排列）。区间采用左开右闭形式 (left, right]，首尾边界扩展为 ±∞；后续仅合并相邻箱。")
+    A(f"在完整 Train 上按 {score_col} 分位数构建 {init_bins} 个等频初始箱（B01–B{init_bins:02d}，按分数升序排列）。区间采用左开右闭形式 (left, right]，首尾边界扩展为 ±∞；后续仅合并相邻箱。")
     A("")
     A("### （二）合箱流程与约束")
     A(merge_note)
@@ -739,15 +789,15 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("| --- | --- | --- |")
     A("| ① 约束修正 | 存在违反单箱硬约束的箱 | 优先处理违反程度最高的箱，仅允许与相邻箱合并 |")
     A("| ② 单调合并（PAVA 风格） | 主指标存在相邻倒挂 | 优先合并倒挂幅度最大的相邻对，直至主指标无倒挂 |")
-    A("| ③ 档位压缩 | 档位数多于 8 档 | 反复合并综合代价最低的相邻对 |")
-    A("| ④ 候选生成 | 档位数多于 6 档 | 继续生成 8、7、6 档候选，并基于 Train 综合评分 |")
+    A(f"| ③ 档位压缩 | 档位数多于 {settings.MAX_FINAL_BIN_COUNT} 档 | 反复合并综合代价最低的相邻对 |")
+    A(f"| ④ 候选生成 | 档位数多于 {settings.MIN_FINAL_BIN_COUNT} 档 | 继续生成 {settings.MAX_FINAL_BIN_COUNT}、{settings.TARGET_FINAL_BIN_COUNT}、{settings.MIN_FINAL_BIN_COUNT} 档候选，并基于 Train 综合评分 |")
     A("| ⑤ 分布整形（share_balancing） | 某档 Train 样本占比超过上限 | 从低风险侧取第一个可行拆点将超限箱一分为二（两个子箱均不超限），再合并综合代价最低的相邻对回到原档数，整形候选与原候选一同评分 |")
     A("")
-    A("**单箱硬约束**：Train 上中间箱样本占比须 ≥ 5%，首尾箱须 ≥ 2.5%；主指标成熟样本量须 ≥ 1,000，坏样本量须 ≥ 20，好样本量须 ≥ 200；最低和最高风险初始箱标记为极端箱（成熟样本量下限 500），默认禁止跨越极端箱边界合并。")
+    A(f"**单箱硬约束**：Train 上中间箱样本占比须 ≥ {settings.MIN_MIDDLE_BIN_SAMPLE_PCT*100:.0f}%，首尾箱须 ≥ {settings.MIN_TAIL_BIN_SAMPLE_PCT*100:.1f}%；主指标成熟样本量须 ≥ {settings.MIN_FINAL_BIN_MATURE_COUNT:,}，坏样本量须 ≥ {settings.MIN_FINAL_BIN_BAD_COUNT}，好样本量须 ≥ {settings.MIN_FINAL_BIN_GOOD_COUNT}；最低和最高风险初始箱标记为极端箱（成熟样本量下限 {settings.MIN_EXTREME_BIN_MATURE_COUNT}），默认禁止跨越极端箱边界合并。")
     A("")
-    A("**保护边界**：优先保留策略风险边界、最大风险跃升边界和极端箱边界。跨越普通保护边界的合并代价增加 100；极端箱边界的合并代价增加 10,000，且默认禁止跨越。")
+    A(f"**保护边界**：优先保留策略风险边界、最大风险跃升边界和极端箱边界。跨越普通保护边界的合并代价增加 {settings.PROTECTED_BOUNDARY_PENALTY:,.0f}；极端箱边界的合并代价增加 {settings.EXTREME_BOUNDARY_PENALTY:,.0f}，且默认禁止跨越。")
     A("")
-    A("**人数分布上限**：最终任意一档的 Train 样本占比不得超过 `MAX_FINAL_BIN_SHARE = 21%`。超过上限的候选方案在评分前先做分布整形：将超限箱沿低风险侧优先的可行拆点拆为两个合规子箱，若档数超出目标则合并综合代价最低的相邻对回到原档数；拆不开或合不回去时放弃整形、原候选保留。该机制不改变合并代价本身，仅控制最终人数分布。")
+    A(f"**人数分布上限**：最终任意一档的 Train 样本占比不得超过 `MAX_FINAL_BIN_SHARE = {share_cap_pct}`。超过上限的候选方案在评分前先做分布整形：将超限箱沿低风险侧优先的可行拆点拆为两个合规子箱，若档数超出目标则合并综合代价最低的相邻对回到原档数；拆不开或合不回去时放弃整形、原候选保留。该机制不改变合并代价本身，仅控制最终人数分布。")
     A("")
     A("**合并代价**：由相邻箱风险差距、两比例 Z 检验、IV 损失及保护边界惩罚共同确定。风险差距越大、统计差异越显著、IV 损失越高或涉及保护边界，合并优先级越低。")
     A("")
@@ -798,9 +848,9 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         parts = []
         for bl, sp, is_tail, floor in fails:
             parts.append(f"{bl} 档占比 {sp*100:.4f}% 略低于{'首尾箱' if is_tail else '中间箱'} {floor*100:.1f}% 下限")
-        A(f"单箱约束不满足项：{'；'.join(parts)}；其余各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束。最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，超过 21% 的人数分布上限（见三（四））。")
+        A(f"单箱约束不满足项：{'；'.join(parts)}；其余各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束。最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限（见三（四））。")
     else:
-        A(f"各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束，无需依赖极端箱放宽；最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，超过 21% 的人数分布上限（见三（四））。")
+        A(f"各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束，无需依赖极端箱放宽；最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限（见三（四））。")
     A("")
     A("### （六）最终分箱统计\n")
     A("**Train**：\n")
@@ -809,7 +859,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     for r in tr_rows:
         A(f"| {r[bin_col]} | {num(r['n'])} | {pct(r['sample_pct'])} | {pct_ci(r['1m30p_cnt_bad_rate'], r['1m30p_cnt_bad_rate_ci_low'], r['1m30p_cnt_bad_rate_ci_high'])} | {pct_ci(r['3m30p_cnt_bad_rate'], r['3m30p_cnt_bad_rate_ci_low'], r['3m30p_cnt_bad_rate_ci_high'])} | {pct(r['3m30p_amt_bad_rate'])} | {pct(r['cum_3m30p_cnt_bad_rate'])} |")
     A("")
-    A(f"Train 的四类风险率均随档位单调递增。3M30+ 笔数逾期率由 A 档的 {pct(tr_rows[0]['3m30p_cnt_bad_rate'])} 升至 {tr_rows[-1][bin_col]} 档的 {pct(tr_rows[-1]['3m30p_cnt_bad_rate'])}，高风险尾部保持明显分离。")
+    A(f"Train 的四类风险率均随档位单调递增。3M30+ 笔数逾期率由 {tr_rows[0][bin_col]} 档的 {pct(tr_rows[0]['3m30p_cnt_bad_rate'])} 升至 {tr_rows[-1][bin_col]} 档的 {pct(tr_rows[-1]['3m30p_cnt_bad_rate'])}，高风险尾部保持明显分离。")
     A("")
     A("**OOT**（沿用 Train 分箱边界）：\n")
     A("| 档位 | 样本量 | 占比 | 1M30+ 笔数逾期率 [95% CI] | 3M30+ 笔数逾期率 [95% CI] | 3M30+ 金额逾期率 | 累计 3M30+ 笔数逾期率 |")
@@ -836,15 +886,15 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     for r in funnel_rows:
         A(f"| {r['sample_group']} | {pct(r['actual_approval_rate'])} | {pct(r['actual_auto_approval_rate'])} | {pct(r['actual_manual_approval_rate'])} | {pct(r['actual_auto_approval_share'])} | {pct(r['actual_manual_approval_share'])} | {pct(r['actual_deal_rate'])} |")
     A("")
-    A("计算定义：未完成申请（`application_status` 属于 `0.Incomplete`、`1.In Progress`）已在数据准备阶段从 `new_sample.csv` 中剔除，不进入历史漏斗、分箱与策略测算，故分析样本全部为完成进件、完成率恒为 100%；审批通过按状态首字符属于 3/4 判定；自动/人工审批通过还须分别包含 `Auto Approved` / `Manual Approved`；成交为 `status` 属于 `Active_Account`、`Closed`、`Blocked`。")
+    A(f"计算定义：未完成申请（`application_status` 属于 `0.Incomplete`、`1.In Progress`）已在数据准备阶段从 `{sample_file}` 中剔除，不进入历史漏斗、分箱与策略测算，故分析样本全部为完成进件、完成率恒为 100%；审批通过按状态首字符属于 3/4 判定；自动/人工审批通过还须分别包含 `Auto Approved` / `Manual Approved`；成交为 `status` 属于 `Active_Account`、`Closed`、`Blocked`。")
     A("")
     A("### （二）模型策略阈值设定原则")
     A("自动通过和总接纳阈值均设在最终分箱边界上。在完整 Train 上按风险由低至高逐档放宽阈值，同时计算累计指标和新增档位的边际指标，并在满足风险上限的候选中选择通过率最高者。风险约束（默认策略，与老客一致）：")
     A("")
     A("| 约束阶段 | 累计 1M30+ 笔数逾期率 | 累计 3M30+ 笔数逾期率 | 边际 3M30+ 笔数逾期率 |")
     A("| --- | --- | --- | --- |")
-    A("| 自动通过 | ≤ 0.90% | ≤ 5.50% | ≤ 9.00% |")
-    A("| 总接纳（自动 + 人工） | ≤ 1.30% | ≤ 7.50% | ≤ 17.00% |")
+    A(f"| 自动通过 | ≤ {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} | ≤ {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} | ≤ {pct(auto_c['max_marginal_3m30p_cnt_bad_rate'])} |")
+    A(f"| 总接纳（自动 + 人工） | ≤ {pct(acc_c['max_cum_1m30p_cnt_bad_rate'])} | ≤ {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} | ≤ {pct(acc_c['max_marginal_3m30p_cnt_bad_rate'])} |")
     A("")
     A("### （三）模型策略阈值选择过程\n")
     A("| 候选 | 阈值 | 档位 | 累计通过率 | 累计 1M30+ | 累计 3M30+ [CI 上界] | 边际 3M30+ [CI 上界] | 自动约束 | 接纳约束 |")
@@ -865,7 +915,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     nxt_acc = tr_rows[accept_bin_rank(accept_bin)]
     A(f"- 自动通过阈值为 {auto_bin} 档右边界 {auto_th}，累计通过率 {pct(S('Train','测算自动通过率'))}；总接纳阈值为 {accept_bin} 档右边界 {accept_th}，累计接纳率 {pct(S('Train','测算总接纳率'))}；")
     A(f"- 约束核对：自动通过档累计 1M30+ {pct(auto_cum1)}、累计 3M30+ {pct(auto_cum3)}（CI 上界 {pct(auto_cum3_hi)}），边际 {pct(auto_cum['3m30p_cnt_bad_rate'])}；总接纳档累计 1M30+ {pct(acc_cum1)}（CI 上界 {pct(acc_cum1_hi)}）、累计 3M30+ {pct(acc_cum3)}（CI 上界 {pct(acc_cum3_hi)}）、边际 3M30+ {pct(acc_cum['3m30p_cnt_bad_rate'])}（CI 上界 {pct(marg3_hi)}）；")
-    A(f"- 放宽至下一档后约束均不再满足：{auto_bin}→{nxt_auto[bin_col]} 后累计 1M30+ {pct(nxt_auto['cum_1m30p_cnt_bad_rate'])} 超 0.90% 上限、累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 5.50% 上限，故自动通过止于 {auto_bin}；{accept_bin}→{nxt_acc[bin_col]} 后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 7.50% 上限，故总接纳止于 {accept_bin}。选中档位的累计及边际 3M30+ CI 上界（{pct(auto_cum3_hi)} / {pct(auto_cum['3m30p_cnt_bad_rate_ci_high'])}、{pct(acc_cum3_hi)} / {pct(marg3_hi)}）中，累计上界已达或超过对应上限（5.50% / 7.50%），CI 层面余量有限，实施后需按约束口径持续监测。")
+    A(f"- 放宽至下一档后约束均不再满足：{auto_bin}→{nxt_auto[bin_col]} 后累计 1M30+ {pct(nxt_auto['cum_1m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} 上限、累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故自动通过止于 {auto_bin}；{accept_bin}→{nxt_acc[bin_col]} 后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故总接纳止于 {accept_bin}。选中档位的累计及边际 3M30+ CI 上界（{pct(auto_cum3_hi)} / {pct(auto_cum['3m30p_cnt_bad_rate_ci_high'])}、{pct(acc_cum3_hi)} / {pct(marg3_hi)}）中，累计上界已达或超过对应上限（{pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} / {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])}），CI 层面余量有限，实施后需按约束口径持续监测。")
     A("")
     A("### （四）模型策略测算流量与分段风险\n")
     A("```text")
@@ -890,9 +940,9 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("")
     tight = sens_row("自动通过阈值", "收严一档")
     if tight is not None and tight["threshold"] is not None:
-        A(f"自动通过阈值收紧一档后通过率降至 {pct(tight['strategy_estimated_auto_pass_rate'])}；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 5.50% 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 7.50% 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
+        A(f"自动通过阈值收紧一档后通过率降至 {pct(tight['strategy_estimated_auto_pass_rate'])}；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
     else:
-        A(f"自动通过阈值已为最低档 {auto_bin}（无收严一档）；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 5.50% 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 7.50% 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
+        A(f"自动通过阈值已为最低档 {auto_bin}（无收严一档）；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
     A("")
     A("### （六）上线实施规范\n")
     A("| 类别 | 项目 | 规则 |")
@@ -931,9 +981,10 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         A(f"| {r['sample_group']} | {r['label']} | {num(r['n'])} | {num(r['bad_cnt'])} | {pct(r['bad_rate'])} | {rate4(r['auc'])} | {rate4(r['ks'])} |")
     A("")
     A("### （四）月度稳定性\n")
-    A(f"- **Train**：{len(tr_months_all)} 个月中有 {len(tr_month_bad)} 个月出现超过 0.3pp 容忍度的主指标倒挂（" + "；".join(f"{r['application_month']} {r['primary_inversion_count']} 次 {diff_pp(r['max_primary_rate_drop'], 0)}" for r in tr_month_bad) + "）；")
+    A(f"- **Train**：{len(tr_months_all)} 个月中有 {len(tr_month_bad)} 个月出现超过 {inv_tol_pp} 容忍度的主指标倒挂（" + "；".join(f"{r['application_month']} {r['primary_inversion_count']} 次 {diff_pp(r['max_primary_rate_drop'], 0)}" for r in tr_month_bad) + "）；")
     A(f"- **OOT**：{len(oo_month_bad)} 个月出现超过容忍度的倒挂（" + "；".join(f"{r['application_month']} {r['primary_inversion_count']} 次 {diff_pp(r['max_primary_rate_drop'], 0)}" for r in oo_month_bad) + "）；")
-    A("- **未成熟月份**：2026-03 起 OOT 月份 3M30+ 成熟样本量为 0，不参与成熟风险判断。")
+    if immature_start:
+        A(f"- **未成熟月份**：{immature_start} 起 OOT 月份 3M30+ 成熟样本量为 0，不参与成熟风险判断。")
     A("")
     if oo_max_drop is not None:
         oo_max_txt = "，OOT 单月最大 " + diff_pp(oo_max_drop, 0)
