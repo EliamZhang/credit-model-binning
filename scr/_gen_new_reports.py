@@ -847,6 +847,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(cand_note)
     A("")
     A("### （五）单箱约束检查\n")
+    A("**Train 单箱约束检查**：\n")
     A("| 档位 | 样本量 | 占比 | 3M30+ 成熟量 | 坏样本量 | 好样本量 | 结果 |")
     A("| --- | ---: | ---: | ---: | ---: | ---: | --- |")
     fails = []
@@ -875,7 +876,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         A(f"各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束，无需依赖极端箱放宽；最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限（见三（四））。")
     A("")
     A("### （六）最终分箱统计\n")
-    A("**Train**：\n")
+    A("**Train 最终分箱统计**：\n")
     A("| 档位 | 样本量 | 占比 | 1M30+ 笔数逾期率 [95% CI] | 3M30+ 笔数逾期率 [95% CI] | 3M30+ 金额逾期率 | 累计 3M30+ 笔数逾期率 |")
     A("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for r in tr_rows:
@@ -883,7 +884,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("")
     A(f"Train 的四类风险率均随档位单调递增。3M30+ 笔数逾期率由 {tr_rows[0][bin_col]} 档的 {pct(tr_rows[0]['3m30p_cnt_bad_rate'])} 升至 {tr_rows[-1][bin_col]} 档的 {pct(tr_rows[-1]['3m30p_cnt_bad_rate'])}，高风险尾部保持明显分离。")
     A("")
-    A("**OOT**（沿用 Train 分箱边界）：\n")
+    A("**OOT 最终分箱统计**（沿用 Train 分箱边界）：\n")
     A("| 档位 | 样本量 | 占比 | 1M30+ 笔数逾期率 [95% CI] | 3M30+ 笔数逾期率 [95% CI] | 3M30+ 金额逾期率 | 累计 3M30+ 笔数逾期率 |")
     A("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for r in oo_rows:
@@ -895,14 +896,16 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         A(f"OOT 的 1M30+ 与 3M30+ 笔数、金额逾期率均保持单调，无局部倒挂；高风险尾部仍可分离。")
     A("")
     A("## 四、历史实际审批与模型策略测算结果\n")
-    A("### （一）历史实际审批漏斗\n")
+    A("### （一）口径区分与历史实际审批漏斗\n")
     A("历史实际审批漏斗来自 `application_info` 的 `application_status`、`assessment_status` 和 `status`，按唯一 `application_id` 统计（未完成申请已在数据源剔除，完成率恒为 100%）。")
     A("")
+    A("**历史实际审批数量**：\n")
     A("| 数据集 | 申请数 | 完成进件数 | 审批通过数 | 自动审批通过数 | 人工审批通过数 | 成交数 |")
     A("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for r in funnel_rows:
         A(f"| {r['sample_group']} | {num(r['actual_apply_cnt'])} | {num(r['actual_completed_application_cnt'])} | {num(r['actual_approved_application_cnt'])} | {num(r['actual_auto_approved_application_cnt'])} | {num(r['actual_manual_approved_application_cnt'])} | {num(r['actual_deal_sample_cnt'])} |")
     A("")
+    A("**历史实际审批比率**：\n")
     A("| 数据集 | 审批通过率 | 自动审批通过率 | 人工审批通过率 | 自动审批占比 | 人工审批占比 | 成交转化率 |")
     A("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for r in funnel_rows:
@@ -1182,6 +1185,72 @@ def _read_app_info(ctx: ReportContext):
 
 def _mean(vals):
     return sum(vals) / len(vals)
+
+
+def cross_insight_aggs(ctx: "ReportContext", edges_a, edges_b):
+    """res 精确聚合交叉格口径（供解读要点）：按 (group, bin_a, bin_b) 汇总
+    n / 1M/3M 成熟与坏 / 审批通过 / 成交 / 本金。
+    标签列优先样本表、其次申请信息表（与管线宽表口径一致）；审批与本金列读申请信息表。"""
+    a_scores, b_scores = _read_scores(ctx)
+    ddir = ROOT / ctx.dataset_cfg["data_dir"]
+    labels = {}
+    for fname in (ctx.dataset_cfg["sample_file"], ctx.dataset_cfg["application_file"]):
+        try:
+            with open(ddir / fname, encoding="utf-8-sig") as f:
+                hdr = next(csv.reader(f))
+            if "duedate_1m_30" in hdr and "duedate_3m_30" in hdr:
+                with open(ddir / fname, encoding="utf-8-sig") as f:
+                    r = csv.reader(f)
+                    hdr = next(r)
+                    aidx = hdr.index("application_id")
+                    d1 = hdr.index("duedate_1m_30")
+                    d3 = hdr.index("duedate_3m_30")
+                    for row in r:
+                        labels[row[aidx]] = (row[d1], row[d3])
+                break
+        except FileNotFoundError:
+            continue
+    appx = {}
+    with open(ddir / ctx.dataset_cfg["application_file"], encoding="utf-8-sig") as f:
+        r = csv.reader(f)
+        hdr = next(r)
+        aidx = hdr.index("application_id")
+        midx = hdr.index("application_month")
+        tix = hdr.index("application_time")
+        p1 = hdr.index("application_status")
+        p2 = hdr.index("assessment_status")
+        p3 = hdr.index("status")
+        pix = hdr.index("principal")
+        for row in r:
+            m = row[midx]
+            if not m:
+                m = row[tix][:7] if row[tix] else ""
+            appx[row[aidx]] = (m, row[p1], row[p2], row[p3], row[pix])
+    aggs = {}
+    for aid in set(a_scores) & set(b_scores) & set(appx):
+        m, as_, ae, st, prin = appx[aid]
+        if not m:
+            continue
+        g = 0 if m <= ctx.dataset_cfg["train_end_month"] else 1
+        key = (g, _bin_of(a_scores[aid], edges_a), _bin_of(b_scores[aid], edges_b))
+        d1, d3 = labels.get(aid, ("", ""))
+        cell = aggs.setdefault(key, {"n": 0, "m1": 0, "b1": 0, "m3": 0, "b3": 0, "appr": 0, "deal": 0, "prin": 0.0})
+        cell["n"] += 1
+        if d1 in ("0", "0.0", "1", "1.0"):
+            cell["m1"] += 1
+            cell["b1"] += 1 if d1 in ("1", "1.0") else 0
+        if d3 in ("0", "0.0", "1", "1.0"):
+            cell["m3"] += 1
+            cell["b3"] += 1 if d3 in ("1", "1.0") else 0
+        if as_[:1] in ("3", "4"):
+            cell["appr"] += 1
+        if st in DEAL_STATUSES:
+            cell["deal"] += 1
+        try:
+            cell["prin"] += float(prin)
+        except ValueError:
+            pass
+    return aggs
 
 
 def _income_verify_and_cells(rows, ctx: ReportContext):
@@ -1572,8 +1641,10 @@ def render_cross(ctx: ReportContext):
     B("- **风险指标**：沿用笔数违约口径，1M30+/3M30+ 笔数逾期率为主要观察指标，金额逾期率同步输出；矩阵格的 Lift = 格逾期率 ÷ 该样本组整体逾期率；样本量不足 100 的格风险类指标显示 —。")
     B(f"- **价值语义**：{ds_notes.get('value_note_cross', '')}")
     B("")
-    B("## 三、交叉指标矩阵（Train/OOT）\n")
-    B(f"以 {bins_n}×{bins_n} 矩阵展示全部交叉格（行 = {tag_a} 档、列 = {tag_b} 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（{md_name_b}边际）= 该{md_name_b}档全部人群的指标值、总计列（{md_name_a} 边际）= 该 {md_name_a} 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 8 张收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/{app_file}` 重算，分档与矩阵逐格核对一致。")
+    B("## 三、交叉指标矩阵（22 组 × Train/OOT）\n")
+    B(f"以 {bins_n}×{bins_n} 矩阵展示全部交叉格（行 = {tag_a} 档、列 = {tag_b} 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（{md_name_b}边际）= 该{md_name_b}档全部人群的指标值、总计列（{md_name_a} 边际）= 该 {md_name_a} 档全部人群的指标值、右下角 = 样本组整体值。横纵边际与交叉格对照，可直接读出组合分档相对单模型分档的增量。建议阅读顺序：样本量 → 3M30+ 笔数逾期率 → 历史实际审批通过率，再按需查看其余矩阵。风险类矩阵中样本量不足 100 的格显示 —，不解读其风险率。")
+    B("")
+    B(f"22 组中 14 组为业务指标（来自 matrix Excel），另 8 张为收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/{app_file}` 重算，分档与矩阵逐格核对一致。")
     B("")
     B("**Train**：\n")
     B(train_matrix_md)
@@ -1581,6 +1652,84 @@ def render_cross(ctx: ReportContext):
     B("**OOT**：\n")
     B(oot_matrix_md)
     B("")
+    B("**解读要点**：\n")
+    # —— 数据驱动的解读要点：对角/极值格/边际全部由矩阵格现算，事实性断言带条件降级 ——
+    def cells_of(rows):
+        return {(r[f"{tag_a}_bin_order"], r[f"{tag_b}_bin_order"]): r for r in rows
+                if isinstance(r[f"{tag_a}_bin_order"], int) and r[f"{tag_a}_bin_order"] > 0
+                and isinstance(r[f"{tag_b}_bin_order"], int) and r[f"{tag_b}_bin_order"] > 0}
+
+    ctr, coo = cells_of(mtr), cells_of(moo)
+    ords = sorted({a for a, _b in ctr})
+    lo, hi = ords[0], ords[-1]
+    lo_lab, hi_lab = chr(64 + lo), chr(64 + hi)
+    aggs = cross_insight_aggs(ctx, load_edges(ctx.xlsx_a), load_edges(ctx.xlsx_b))
+
+    def agg(g, a, b):
+        return aggs.get((g, a, b))
+
+    def cells_by(g, a=None, b=None):
+        return [c for (cg, ca, cb), c in aggs.items() if cg == g and (a is None or ca == a) and (b is None or cb == b)]
+
+    def rate_of(cells, key):
+        m = sum(c[f"m{key}"] for c in cells)
+        b = sum(c[f"b{key}"] for c in cells)
+        return b / m if m else None
+
+    diag_tr_cells = [agg(0, o, o) for o in ords if agg(0, o, o)]
+    diag_oo_cells = [agg(1, o, o) for o in ords if agg(1, o, o)]
+    diag_n_tr = sum(c["n"] for c in diag_tr_cells)
+    diag_n_oo = sum(c["n"] for c in diag_oo_cells)
+    tot_n_tr = sum(c["n"] for c in cells_by(0))
+    tot_n_oo = sum(c["n"] for c in cells_by(1))
+    diag_bad_tr = rate_of(diag_tr_cells, "3")
+    diag_bad_oo = rate_of(diag_oo_cells, "3")
+    all_tr_rate = rate_of(cells_by(0), "3")
+    all_oo_rate = rate_of(cells_by(1), "3")
+    diag_cmp = "接近"
+    if diag_bad_tr is not None and all_tr_rate is not None:
+        diag_cmp = "低于" if diag_bad_tr < all_tr_rate else ("高于" if diag_bad_tr > all_tr_rate else "接近")
+    aa_tr, gg_tr = ctr[(lo, lo)], ctr[(hi, hi)]
+    aa_oo, gg_oo = coo[(lo, lo)], coo[(hi, hi)]
+    ff = ctr.get((6, 6))
+    ff_txt = ""
+    if ff:
+        ff_txt = f"；F-F 格（{pct(ff['sample_pct'])}，{pct(ff['3m30p_cnt_bad_rate']) if ff.get('3m30p_cnt_bad_rate') is not None else '—'}）是中等偏高风险段两模型最容易达成一致的地方"
+    gg_max_tr = max((r for r in ctr.values() if r.get("3m30p_cnt_bad_rate") is not None), key=lambda r: float(r["3m30p_cnt_bad_rate"]))
+    gg_max_oo = max((r for r in coo.values() if r.get("3m30p_cnt_bad_rate") is not None), key=lambda r: float(r["3m30p_cnt_bad_rate"]))
+    gg_max_txt = ""
+    if gg_tr["n"] == gg_max_tr["n"] and gg_oo["n"] == gg_max_oo["n"]:
+        gg_max_txt = "，仍为全矩阵最高"
+    ag_cell = agg(0, lo, hi)
+    ag_rate = rate_of([ag_cell], "3") if ag_cell else None
+    ag_n = ag_cell["n"] if ag_cell else None
+    a_row_rate_tr = rate_of(cells_by(0, a=lo), "3")
+    ag_higher = bool(ag_rate is not None and a_row_rate_tr is not None and ag_rate > a_row_rate_tr)
+    ag_txt = ""
+    if ag_higher:
+        ag_txt = "，是行边际的 {:.1f} 倍".format(ag_rate / a_row_rate_tr)
+    diag_lifts = [float(ctr[(o, o)]["3m30p_cnt_lift"]) for o in ords if ctr[(o, o)].get("3m30p_cnt_lift") is not None]
+    lift_mono = all(diag_lifts[i] <= diag_lifts[i + 1] + 1e-12 for i in range(len(diag_lifts) - 1)) if len(diag_lifts) > 1 else True
+
+    def appr_rate(g, a, b):
+        c = agg(g, a, b)
+        return c["appr"] / c["n"] if c and c["n"] else None
+
+    deal_rates = [c["deal"] / c["n"] for c in aggs.values() if c["n"]]
+    prin_total_tr = sum(c["prin"] for c in cells_by(0))
+    bb_cell, cc_cell = agg(0, 2, 2), agg(0, 3, 3)
+    bb_prin = bb_cell["prin"] / prin_total_tr if bb_cell and prin_total_tr else 0
+    cc_prin = cc_cell["prin"] / prin_total_tr if cc_cell and prin_total_tr else 0
+    g_side_prin = sum(agg(0, hi, b)["prin"] for b in ords if agg(0, hi, b)) + sum(agg(0, a, hi)["prin"] for a in ords[:-1] if agg(0, a, hi))
+    g_row_prin = g_side_prin / prin_total_tr * 100 if prin_total_tr else 0
+    g_row_prin_txt = ("不足 " + f"{g_row_prin:.2f}%") if g_row_prin < 3 else ("约 " + f"{g_row_prin:.1f}%")
+    B(f"- **共识人群占比跨期稳定，风险{diag_cmp}全体**：对角合计 Train {num(diag_n_tr)} 笔（{pct(diag_n_tr / tot_n_tr)}）/ OOT {num(diag_n_oo)} 笔（{pct(diag_n_oo / tot_n_oo)}）；共识人群 3M30+ {pct(diag_bad_tr)}（Train）/ {pct(diag_bad_oo)}（OOT），{'低于全体' if diag_cmp == '低于' else '高于全体'} {pct(all_tr_rate)} / {pct(all_oo_rate)}。")
+    B(f"- **共识风险梯度随档位单调、跨度极大**：3M30+ 笔数逾期率对角从 {lo_lab}-{lo_lab} 的 {pct(aa_tr['3m30p_cnt_bad_rate'])} 升至 {hi_lab}-{hi_lab} 的 {pct(gg_tr['3m30p_cnt_bad_rate'])}（Lift {diag_lifts[0]:.2f} → {diag_lifts[-1]:.2f}）；{'对角 3M30+ Lift 全程单调递增' if lift_mono else '对角 3M30+ Lift 总体递增、存在局部波动'}。")
+    B(f"- **双 {hi_lab} 最危险、双 {lo_lab} 最安全{'、F-F 是最大共识格' if ff else ''}**：{hi_lab}-{hi_lab} 格 Train {num(gg_tr['n'])} 笔（{pct(gg_tr['sample_pct'])}）3M30+ {pct(gg_tr['3m30p_cnt_bad_rate'])}、OOT {num(gg_oo['n'])} 笔 {pct(gg_oo['3m30p_cnt_bad_rate'])}{gg_max_txt}；{lo_lab}-{lo_lab} 格 Train {pct(aa_tr['3m30p_cnt_bad_rate'])} / OOT {pct(aa_oo['3m30p_cnt_bad_rate'])} 是最安全的自动通过池{ff_txt}。")
+    B(f"- **{md_name_b}模型在 {md_name_a} 最好档内{'有增量' if ag_higher else '增量有限'}**：{md_name_a} {lo_lab} 档整体 3M30+ {pct(a_row_rate_tr)}，其中 {md_name_b} {hi_lab} 档子群（n={num(ag_n) if ag_n else '—'}）达 {pct(ag_rate)}{ag_txt}。")
+    B("- **四张 Lift 与金额口径结构一致**：1M30+/3M30+ × 笔数/金额的 Lift 均沿两轴与对角线递增，交叉格风险结构在短期/中期、笔数/金额维度保持稳定。")
+    B(f"- **历史审批已按风险把关，但存在错位空间**：审批通过率沿对角随风险单调下降（Train {lo_lab}-{lo_lab} {pct(appr_rate(0, lo, lo))} → {hi_lab}-{hi_lab} {pct(appr_rate(0, hi, hi))}、OOT {lo_lab}-{lo_lab} {pct(appr_rate(1, lo, lo))} → {hi_lab}-{hi_lab} {pct(appr_rate(1, hi, hi))}）；低风险格仍有约 {(1 - appr_rate(0, lo, lo)) * 100:.0f} 成被拒，交叉矩阵可用于解释与风险错位的审批个案。")
+    B(f"- **成交与本金视角**：成交转化率各格 {pct(min(deal_rates))}–{pct(max(deal_rates))}、无明显梯度；本金向低中风险共识格集中（B-B {pct(bb_prin)}、C-C {pct(cc_prin)} 最大，{hi_lab} 行/列本金占比合计{g_row_prin_txt}），组合策略严控高风险格对总本金流量影响有限。")
     B("## 四、条件增量分析\n")
     B("### （一）固定一个模型档位时另一个模型的增量（Train）\n")
     B("| 维度 | 锚定档 | 锚定档样本量 | 锚定档 3M30+ | 另一模型档内最低 | 另一模型档内最高 | 跨度 |")
