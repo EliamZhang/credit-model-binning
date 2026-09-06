@@ -10,9 +10,11 @@ res/*.csv 重算（交叉报告三章矩阵内收入 4 指标：total_income/tot
 2. docs/分箱_新客_mlt_笔数.md
 3. docs/交叉_新客_mlt_价值.md
 """
+import argparse
 import csv
 import re
 import sys
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -23,6 +25,10 @@ from openpyxl import load_workbook
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 TODAY = "20260901"
+
+sys.path.insert(0, str(ROOT))
+from configs.datasets import DATASETS  # noqa: E402
+from configs.models import MODELS  # noqa: E402
 
 WTH_XLSX = ROOT / "out" / f"binning_new_worthiness_strategy_report_{TODAY}.xlsx"
 MLT_XLSX = ROOT / "out" / f"binning_new_mlt_strategy_report_{TODAY}.xlsx"
@@ -174,6 +180,99 @@ def count_csv_rows(path: Path) -> int:
         except (UnicodeDecodeError, UnicodeError):
             continue
     raise ValueError(f"无法读取 {path}")
+
+
+# ---------- 报告上下文与路径解析 ----------
+
+@dataclass(frozen=True)
+class ReportContext:
+    """一次报告渲染的上下文：数据集/模型配置与解析后的 Excel、md 路径。"""
+    dataset_key: str
+    dataset_cfg: dict
+    model_a_cfg: dict
+    model_b_cfg: dict | None
+    date: str
+    xlsx_a: Path
+    xlsx_b: Path | None
+    cross_xlsx: Path | None
+    md_dir: Path
+    metric: str = "cnt"
+
+
+def resolve_xlsx(prefix: str, date: str | None, out_dir: Path | None = None) -> Path:
+    """定位 Excel：date 给定则精确匹配 out/{prefix}_{date}.xlsx；
+    否则 glob out/{prefix}_*.xlsx 取文件名尾 8 位日期最新者。"""
+    out_dir = out_dir or ROOT / "out"
+    if date:
+        path = out_dir / f"{prefix}_{date}.xlsx"
+        if not path.exists():
+            raise ValueError(f"未找到 Excel：{path}")
+        return path
+    dated = []
+    for p in out_dir.glob(f"{prefix}_*.xlsx"):
+        m = re.match(rf"^{re.escape(prefix)}_(\d{{8}})\.xlsx$", p.name)
+        if m:
+            dated.append((m.group(1), p))
+    if not dated:
+        raise ValueError(f"out/ 下未找到匹配 {prefix}_YYYYMMDD.xlsx 的 Excel")
+    return sorted(dated)[-1][1]
+
+
+def resolve_cross_prefix(dataset_key: str, model_a: str, model_b: str) -> str:
+    """交叉 Excel 输出前缀：复用 scripts/cross_models.py 的历史登记，未登记走通用命名。"""
+    from scripts.cross_models import REPORT_PREFIXES
+
+    return REPORT_PREFIXES.get(
+        (dataset_key, model_a, model_b, "matrix"),
+        f"binning_cross_{model_a}_{model_b}_strategy_report")
+
+
+def model_report_prefix(model_cfg: dict, metric: str) -> str:
+    """单模型 Excel 输出前缀：金额口径用 report_prefix_amt（未启用时退回 report_prefix）。"""
+    if metric == "amt" and model_cfg.get("report_prefix_amt"):
+        return model_cfg["report_prefix_amt"]
+    return model_cfg["report_prefix"]
+
+
+def build_context(dataset_key: str, model_a_key: str, model_b_key: str | None = None,
+                  date: str | None = None, out_dir: str | Path | None = None,
+                  md_dir: str | Path | None = None, metric: str = "cnt") -> ReportContext:
+    """组装一次渲染的上下文；date 缺省时按 xlsx_a 实际解析到的日期回填。"""
+    dataset_cfg = DATASETS[dataset_key]
+    a_cfg = MODELS[model_a_key]
+    b_cfg = MODELS[model_b_key] if model_b_key else None
+    out_dir_path = Path(out_dir) if out_dir else ROOT / "out"
+    xlsx_a = resolve_xlsx(model_report_prefix(a_cfg, metric), date, out_dir_path)
+    xlsx_b = resolve_xlsx(model_report_prefix(b_cfg, metric), date, out_dir_path) if b_cfg else None
+    cross_xlsx = None
+    if b_cfg:
+        cross_xlsx = resolve_xlsx(
+            resolve_cross_prefix(dataset_key, model_a_key, model_b_key), date, out_dir_path)
+    resolved_date = date or re.match(r".*_(\d{8})\.xlsx$", xlsx_a.name).group(1)
+    return ReportContext(
+        dataset_key=dataset_key,
+        dataset_cfg=dataset_cfg,
+        model_a_cfg=a_cfg,
+        model_b_cfg=b_cfg,
+        date=resolved_date,
+        xlsx_a=xlsx_a,
+        xlsx_b=xlsx_b,
+        cross_xlsx=cross_xlsx,
+        md_dir=Path(md_dir) if md_dir else DOCS,
+        metric=metric,
+    )
+
+
+def resolve_md_path(ctx: ReportContext, kind: str) -> Path:
+    """按模板命名规则解析 md 路径：kind ∈ {"single_a", "single_b", "cross"}。"""
+    ds_name = ctx.dataset_cfg["name"]
+    if kind == "cross":
+        a = ctx.model_a_cfg["report_meta"]["md_name"]
+        b = ctx.model_b_cfg["report_meta"]["md_name"]
+        return ctx.md_dir / f"交叉_{ds_name}_{a}_{b}.md"
+    cfg = ctx.model_a_cfg if kind == "single_a" else ctx.model_b_cfg
+    metric_name = "金额" if ctx.metric == "amt" else "笔数"
+    return ctx.md_dir / f"分箱_{ds_name}_{cfg['report_meta']['md_name']}_{metric_name}.md"
 
 
 # ---------- 单模型报告渲染 ----------
@@ -1397,10 +1496,31 @@ def render_cross():
     print(f"已生成 {md_path.relative_to(ROOT)}（{len(L)} 行）")
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="报告生成器：从 Excel/res 现算生成同构 md 报告（配置驱动，禁固化值）")
+    parser.add_argument("--dataset", default="new", choices=sorted(DATASETS), help="样本集 key")
+    parser.add_argument("--model-a", default=None, help="A 模型 key（单模型渲染 / 交叉行轴）")
+    parser.add_argument("--model-b", default=None, help="B 模型 key（与 --model-a 一起渲染交叉）")
+    parser.add_argument("--metric", default="cnt", choices=["cnt", "amt"], help="分箱口径")
+    parser.add_argument("--date", default=None, help="锚定 Excel 日期 YYYYMMDD；缺省取 out/ 最新")
+    parser.add_argument("--out-dir", default=None, help="md 输出目录（缺省 docs/）")
+    return parser
+
+
+def main(argv=None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    md_dir = Path(args.out_dir) if args.out_dir else DOCS
+    # 参数化改造分阶段进行：渲染函数尚未接入 ctx，暂只放行默认 new 场景。
+    if args.dataset != "new" or args.model_a or args.model_b or args.metric != "cnt" or md_dir != DOCS:
+        raise SystemExit(
+            "生成器参数化改造进行中：当前仅支持默认 new 数据集笔数口径渲染"
+            "（--dataset/--model-a/--model-b/--metric/--out-dir 将在阶段 5 后启用）")
+    ctx = build_context("new", "new_mlt", "new_worthiness", date=args.date, md_dir=md_dir)
     render_single_model(
         "new_worthiness",
-        WTH_XLSX,
+        ctx.xlsx_b,
         DOCS / "分箱_新客_价值_笔数.md",
         "价值模型",
         "价值模型",
@@ -1421,7 +1541,7 @@ if __name__ == "__main__":
     )
     render_single_model(
         "new_mlt",
-        MLT_XLSX,
+        ctx.xlsx_a,
         DOCS / "分箱_新客_mlt_笔数.md",
         "mlt 主风险模型",
         "mlt 主风险模型",
@@ -1441,3 +1561,7 @@ if __name__ == "__main__":
     )
     render_cross()
     print("全部生成完成。")
+
+
+if __name__ == "__main__":
+    main()
