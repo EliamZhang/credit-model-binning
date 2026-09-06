@@ -340,8 +340,16 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     ds_notes = ctx.dataset_cfg.get("report_notes", {})
     sample_file = ctx.dataset_cfg["sample_file"]
     sc = cfg["strategy_config"]
-    auto_c = sc["auto_constraints"]
-    acc_c = sc["accept_constraints"]
+    amt_mode = ctx.metric == "amt"
+    if amt_mode:
+        auto_c = settings.AMT_STRATEGY_CONFIG["auto_constraints"]
+        acc_c = settings.AMT_STRATEGY_CONFIG["accept_constraints"]
+    else:
+        auto_c = sc["auto_constraints"]
+        acc_c = sc["accept_constraints"]
+    rate_sfx = "amt" if amt_mode else "cnt"  # 主指标口径后缀（金额/笔数）
+    rate_cn = "金额" if amt_mode else "笔数"
+    metric_title = "金额" if amt_mode else "笔数"
     share_cap_pct = f"{settings.MAX_FINAL_BIN_SHARE*100:.0f}%"
     init_bins = settings.INITIAL_BIN_COUNT
     inv_tol_pp = f"{settings.MONTHLY_INVERSION_TOLERANCE*100:.1f}pp"
@@ -358,8 +366,8 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     psi = float(O("稳定性", "最终箱 Train/OOT PSI"))
     auto_th = str(O("模型策略阈值", "自动通过阈值"))
     accept_th = str(O("模型策略阈值", "人工审核上限/拒绝阈值"))
-    acc_rate = float(O("策略风险", "接纳人群3M30+笔数逾期率"))
-    marginal = float(O("策略风险", "最后接纳档边际3M30+"))
+    acc_rate = float(O("策略风险", f"接纳人群3M30+{rate_cn}逾期率"))
+    marginal = float(O("策略风险", f"最后接纳档边际3M30+{'金额逾期率' if amt_mode else ''}"))
     tr_auc3 = float(O("模型效果", "train_duedate_3m_30_auc"))
     oo_auc3 = float(O("模型效果", "oot_duedate_3m_30_auc"))
     tr_ks3 = float(O("模型效果", "train_duedate_3m_30_ks"))
@@ -501,13 +509,13 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     else:
         pearson_cross = None
 
-    # 约束核对数值（从 03 的累计列取，与阈值选择一致）
+    # 约束核对数值（从 03 的累计列取，与阈值选择一致；主口径按 metric 取金额/笔数率）
     auto_cum = tr_rows[auto_bin_rank(auto_bin) - 1]
     acc_cum = tr_rows[accept_bin_rank(accept_bin) - 1]
-    auto_cum1 = auto_cum["cum_1m30p_cnt_bad_rate"]
-    auto_cum3 = auto_cum["cum_3m30p_cnt_bad_rate"]
-    acc_cum1 = acc_cum["cum_1m30p_cnt_bad_rate"]
-    acc_cum3 = acc_cum["cum_3m30p_cnt_bad_rate"]
+    auto_cum1 = auto_cum[f"cum_1m30p_{rate_sfx}_bad_rate"]
+    auto_cum3 = auto_cum[f"cum_3m30p_{rate_sfx}_bad_rate"]
+    acc_cum1 = acc_cum[f"cum_1m30p_{rate_sfx}_bad_rate"]
+    acc_cum3 = acc_cum[f"cum_3m30p_{rate_sfx}_bad_rate"]
     auto_cum3_hi = auto_cum["cum_3m30p_cnt_bad_rate_ci_high"]
     acc_cum3_hi = acc_cum["cum_3m30p_cnt_bad_rate_ci_high"]
     acc_cum1_hi = acc_cum["cum_1m30p_cnt_bad_rate_ci_high"]
@@ -516,8 +524,8 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     lines = []
     A = lines.append
 
-    A(f"# {ds_name}{model_cn}分数分箱与策略阈值设定报告（笔数口径）\n")
-    A(f"> 本报告说明{ds_name}{model_cn}（`{raw_score_col}`）分数分箱、样本外验证及策略阈值设定结果，由 `scr/_gen_new_reports.py` 从 `out/{xlsx.name}` 读取数值生成，与 Excel 逐项一致。管线沿用笔数违约合箱口径：完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 仅用于最终验证。")
+    A(f"# {ds_name}{model_cn}分数分箱与策略阈值设定报告（{metric_title}口径）\n")
+    A(f"> 本报告说明{ds_name}{model_cn}（`{raw_score_col}`）分数分箱、样本外验证及策略阈值设定结果，由 `scr/_gen_new_reports.py` 从 `out/{xlsx.name}` 读取数值生成，与 Excel 逐项一致。管线沿用{rate_cn}违约合箱口径：完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 仅用于最终验证。")
     if include_y_cols:
         A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/{cfg['score_file']}` 与 `res/{ctx.dataset_cfg['application_file']}` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
     A(">")
@@ -708,9 +716,13 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(f"5. **跨期分布稳定**：Train/OOT PSI 为 {rate4(psi)}；OOT 测算自动通过率、总接纳率分别为 {pct(S('OOT','测算自动通过率'))}、{pct(S('OOT','测算总接纳率'))}，较 Train 高 {pp_delta('测算自动通过率'):.2f}、{pp_delta('测算总接纳率'):.2f} 个百分点；")
 
     # 结论 6：阈值与 CI 余量
-    auto_hi_note = "略超" if auto_cum3_hi > auto_c["max_cum_3m30p_cnt_bad_rate"] else "贴近"
-    acc_hi_note = "略超" if acc_cum3_hi > acc_c["max_cum_3m30p_cnt_bad_rate"] else "贴近"
-    A(f"6. **策略阈值点估计满足默认约束、CI 余量有限**：自动通过阈值 {auto_th}（{auto_bin} 档右边界，Train 自动通过率 {pct(S('Train','测算自动通过率'))}），总接纳阈值 {accept_th}（{accept_bin} 档右边界，Train 总接纳率 {pct(S('Train','测算总接纳率'))}）；接纳人群 3M30+ {pct(acc_rate)}、最后接纳档边际 3M30+ {pct(marginal)}。自动通过累计 3M30+ CI 上界 {pct(auto_cum3_hi)}（{auto_hi_note} {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 上限）、总接纳累计 3M30+ CI 上界 {pct(acc_cum3_hi)}（{acc_hi_note} {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限），实施后需按约束口径持续监测；")
+    # 结论 6：阈值与 CI 余量（金额口径用点估计余量措辞，笔数口径用 CI 上界措辞）
+    if amt_mode:
+        A(f"6. **策略阈值点估计满足金额口径约束、余量充足**：自动通过阈值 {auto_th}（{auto_bin} 档右边界，Train 自动通过率 {pct(S('Train','测算自动通过率'))}），总接纳阈值 {accept_th}（{accept_bin} 档右边界，Train 总接纳率 {pct(S('Train','测算总接纳率'))}）；接纳人群 3M30+ 金额率 {pct(acc_rate)}、最后接纳档边际 3M30+ 金额率 {pct(marginal)}。选中档位的累计 3M30+ 金额率与约束上限间的余量分别为 {pct(auto_cum3)} vs {pct(auto_c[f'max_cum_3m30p_{rate_sfx}_bad_rate'])}（{auto_bin}）、{pct(acc_cum3)} vs {pct(acc_c[f'max_cum_3m30p_{rate_sfx}_bad_rate'])}（{accept_bin}），边际 3M30+ 金额率（{pct(auto_cum['3m30p_amt_bad_rate'])} / {pct(acc_cum['3m30p_amt_bad_rate'])}）均低于相应边际上限，实施后需按约束口径持续监测；")
+    else:
+        auto_hi_note = "略超" if auto_cum3_hi > auto_c[f"max_cum_3m30p_{rate_sfx}_bad_rate"] else "贴近"
+        acc_hi_note = "略超" if acc_cum3_hi > acc_c[f"max_cum_3m30p_{rate_sfx}_bad_rate"] else "贴近"
+        A(f"6. **策略阈值点估计满足默认约束、CI 余量有限**：自动通过阈值 {auto_th}（{auto_bin} 档右边界，Train 自动通过率 {pct(S('Train','测算自动通过率'))}），总接纳阈值 {accept_th}（{accept_bin} 档右边界，Train 总接纳率 {pct(S('Train','测算总接纳率'))}）；接纳人群 3M30+ {pct(acc_rate)}、最后接纳档边际 3M30+ {pct(marginal)}。自动通过累计 3M30+ CI 上界 {pct(auto_cum3_hi)}（{auto_hi_note} {pct(auto_c[f'max_cum_3m30p_{rate_sfx}_bad_rate'])} 上限）、总接纳累计 3M30+ CI 上界 {pct(acc_cum3_hi)}（{acc_hi_note} {pct(acc_c[f'max_cum_3m30p_{rate_sfx}_bad_rate'])} 上限），实施后需按约束口径持续监测；")
 
     # 结论 7：样本外衰减与月度稳定
     oo_max_drop = max((r["max_primary_rate_drop"] for r in oo_month_bad), default=None)
@@ -899,31 +911,54 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("### （二）模型策略阈值设定原则")
     A("自动通过和总接纳阈值均设在最终分箱边界上。在完整 Train 上按风险由低至高逐档放宽阈值，同时计算累计指标和新增档位的边际指标，并在满足风险上限的候选中选择通过率最高者。风险约束（默认策略，与老客一致）：")
     A("")
-    A("| 约束阶段 | 累计 1M30+ 笔数逾期率 | 累计 3M30+ 笔数逾期率 | 边际 3M30+ 笔数逾期率 |")
+    A(f"| 约束阶段 | 累计 1M30+ {rate_cn}逾期率 | 累计 3M30+ {rate_cn}逾期率 | 边际 3M30+ {rate_cn}逾期率 |")
     A("| --- | --- | --- | --- |")
-    A(f"| 自动通过 | ≤ {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} | ≤ {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} | ≤ {pct(auto_c['max_marginal_3m30p_cnt_bad_rate'])} |")
-    A(f"| 总接纳（自动 + 人工） | ≤ {pct(acc_c['max_cum_1m30p_cnt_bad_rate'])} | ≤ {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} | ≤ {pct(acc_c['max_marginal_3m30p_cnt_bad_rate'])} |")
+    A(f"| 自动通过 | ≤ {pct(auto_c[f'max_cum_1m30p_{rate_sfx}_bad_rate'])} | ≤ {pct(auto_c[f'max_cum_3m30p_{rate_sfx}_bad_rate'])} | ≤ {pct(auto_c[f'max_marginal_3m30p_{rate_sfx}_bad_rate'])} |")
+    A(f"| 总接纳（自动 + 人工） | ≤ {pct(acc_c[f'max_cum_1m30p_{rate_sfx}_bad_rate'])} | ≤ {pct(acc_c[f'max_cum_3m30p_{rate_sfx}_bad_rate'])} | ≤ {pct(acc_c[f'max_marginal_3m30p_{rate_sfx}_bad_rate'])} |")
     A("")
     A("### （三）模型策略阈值选择过程\n")
-    A("| 候选 | 阈值 | 档位 | 累计通过率 | 累计 1M30+ | 累计 3M30+ [CI 上界] | 边际 3M30+ [CI 上界] | 自动约束 | 接纳约束 |")
-    A("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-    for r in th_sel:
-        role = r["selected_role"]
-        if role in ("自动通过阈值", "人工审核上限/拒绝阈值"):
-            role = f"**{role}（选中）**"
-        elif r["threshold_order"] == 1:
-            role = "首档（最严）"
-        else:
-            role = "候选"
-        all_auto = all(r.get(f"auto_check_{k}") for k in ("cum_1m30p_cnt_bad_rate", "cum_3m30p_cnt_bad_rate", "marginal_3m30p_cnt_bad_rate"))
-        all_acc = all(r.get(f"accept_check_{k}") for k in ("cum_1m30p_cnt_bad_rate", "cum_3m30p_cnt_bad_rate", "marginal_3m30p_cnt_bad_rate"))
-        A(f"| {role} | {r['threshold']} | {r[bin_col]} | {pct(r.get('cum_pass_rate'))} | {pct(r.get('cum_1m30p_cnt_bad_rate'))} | {pct(r.get('cum_3m30p_cnt_bad_rate'))} [{pct(r.get('cum_3m30p_cnt_bad_rate_ci_high'))}] | {pct(r.get('marginal_3m30p_cnt_bad_rate'))} [{pct(r.get('marginal_3m30p_cnt_bad_rate_ci_high'))}] | {'通过' if all_auto else '不通过'} | {'通过' if all_acc else '不通过'} |")
+    if amt_mode:
+        A("| 候选档 | 阈值 | 累计通过率 | 累计 1M30+ 金额逾期率 | 累计 3M30+ 金额逾期率 | 累计 3M30+ 笔数逾期率 [CI 上界] | 边际 3M30+ 金额逾期率 | 边际 3M30+ 笔数逾期率 [CI 上界] | 自动检查 | 接纳检查 |")
+        A("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for r in th_sel:
+            lab = r[bin_col]
+            role = r["selected_role"]
+            all_auto = all(r.get(f"auto_check_{k}") for k in ("cum_1m30p_amt_bad_rate", "cum_3m30p_amt_bad_rate", "marginal_3m30p_amt_bad_rate"))
+            all_acc = all(r.get(f"accept_check_{k}") for k in ("cum_1m30p_amt_bad_rate", "cum_3m30p_amt_bad_rate", "marginal_3m30p_amt_bad_rate"))
+            auto_txt = "通过" if all_auto else "不通过"
+            acc_txt = "通过" if all_acc else "不通过"
+            if role == "自动通过阈值":
+                lab = f"**{lab}**"
+                auto_txt = "通过（选中）"
+            elif role == "人工审核上限/拒绝阈值":
+                lab = f"**{lab}**"
+                acc_txt = "通过（选中）"
+            A(f"| {lab} | {r['threshold']} | {pct(r.get('cum_pass_rate'))} | {pct(r.get('cum_1m30p_amt_bad_rate'))} | {pct(r.get('cum_3m30p_amt_bad_rate'))} | {pct(r.get('cum_3m30p_cnt_bad_rate'))} [{pct(r.get('cum_3m30p_cnt_bad_rate_ci_high'))}] | {pct(r.get('marginal_3m30p_amt_bad_rate'))} | {pct(r.get('marginal_3m30p_cnt_bad_rate'))} [{pct(r.get('marginal_3m30p_cnt_bad_rate_ci_high'))}] | {auto_txt} | {acc_txt} |")
+    else:
+        A("| 候选 | 阈值 | 档位 | 累计通过率 | 累计 1M30+ | 累计 3M30+ [CI 上界] | 边际 3M30+ [CI 上界] | 自动约束 | 接纳约束 |")
+        A("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for r in th_sel:
+            role = r["selected_role"]
+            if role in ("自动通过阈值", "人工审核上限/拒绝阈值"):
+                role = f"**{role}（选中）**"
+            elif r["threshold_order"] == 1:
+                role = "首档（最严）"
+            else:
+                role = "候选"
+            all_auto = all(r.get(f"auto_check_{k}") for k in ("cum_1m30p_cnt_bad_rate", "cum_3m30p_cnt_bad_rate", "marginal_3m30p_cnt_bad_rate"))
+            all_acc = all(r.get(f"accept_check_{k}") for k in ("cum_1m30p_cnt_bad_rate", "cum_3m30p_cnt_bad_rate", "marginal_3m30p_cnt_bad_rate"))
+            A(f"| {role} | {r['threshold']} | {r[bin_col]} | {pct(r.get('cum_pass_rate'))} | {pct(r.get('cum_1m30p_cnt_bad_rate'))} | {pct(r.get('cum_3m30p_cnt_bad_rate'))} [{pct(r.get('cum_3m30p_cnt_bad_rate_ci_high'))}] | {pct(r.get('marginal_3m30p_cnt_bad_rate'))} [{pct(r.get('marginal_3m30p_cnt_bad_rate_ci_high'))}] | {'通过' if all_auto else '不通过'} | {'通过' if all_acc else '不通过'} |")
     A("")
     nxt_auto = tr_rows[auto_bin_rank(auto_bin)]
     nxt_acc = tr_rows[accept_bin_rank(accept_bin)]
-    A(f"- 自动通过阈值为 {auto_bin} 档右边界 {auto_th}，累计通过率 {pct(S('Train','测算自动通过率'))}；总接纳阈值为 {accept_bin} 档右边界 {accept_th}，累计接纳率 {pct(S('Train','测算总接纳率'))}；")
-    A(f"- 约束核对：自动通过档累计 1M30+ {pct(auto_cum1)}、累计 3M30+ {pct(auto_cum3)}（CI 上界 {pct(auto_cum3_hi)}），边际 {pct(auto_cum['3m30p_cnt_bad_rate'])}；总接纳档累计 1M30+ {pct(acc_cum1)}（CI 上界 {pct(acc_cum1_hi)}）、累计 3M30+ {pct(acc_cum3)}（CI 上界 {pct(acc_cum3_hi)}）、边际 3M30+ {pct(acc_cum['3m30p_cnt_bad_rate'])}（CI 上界 {pct(marg3_hi)}）；")
-    A(f"- 放宽至下一档后约束均不再满足：{auto_bin}→{nxt_auto[bin_col]} 后累计 1M30+ {pct(nxt_auto['cum_1m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} 上限、累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故自动通过止于 {auto_bin}；{accept_bin}→{nxt_acc[bin_col]} 后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故总接纳止于 {accept_bin}。选中档位的累计及边际 3M30+ CI 上界（{pct(auto_cum3_hi)} / {pct(auto_cum['3m30p_cnt_bad_rate_ci_high'])}、{pct(acc_cum3_hi)} / {pct(marg3_hi)}）中，累计上界已达或超过对应上限（{pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} / {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])}），CI 层面余量有限，实施后需按约束口径持续监测。")
+    if amt_mode:
+        A(f"- 自动通过阈值为 {auto_bin} 档右边界 {auto_th}，累计通过率为 {pct(S('Train','测算自动通过率'))}；")
+        A(f"- 总接纳阈值为 {accept_bin} 档右边界 {accept_th}，累计接纳率为 {pct(S('Train','测算总接纳率'))}；")
+        A(f"- {auto_bin} 档放宽至 {nxt_auto[bin_col]} 档后，累计 1M30+ 金额逾期率 {pct(nxt_auto['cum_1m30p_amt_bad_rate'])} 超过 {pct(auto_c['max_cum_1m30p_amt_bad_rate'])} 上限、累计 3M30+ 金额逾期率 {pct(nxt_auto['cum_3m30p_amt_bad_rate'])} 超过 {pct(auto_c['max_cum_3m30p_amt_bad_rate'])} 上限，故自动通过止于 {auto_bin}；{accept_bin} 档累计 1M30+、累计 3M30+ 和边际 3M30+ 金额逾期率分别为 {pct(acc_cum1)}、{pct(acc_cum3)} 和 {pct(acc_cum['3m30p_amt_bad_rate'])}，均低于点估计约束，放宽至 {nxt_acc[bin_col]} 档后累计 1M30+ 金额 {pct(nxt_acc['cum_1m30p_amt_bad_rate'])} 超过 {pct(acc_c['max_cum_1m30p_amt_bad_rate'])} 上限、累计 3M30+ 金额 {pct(nxt_acc['cum_3m30p_amt_bad_rate'])} 超过 {pct(acc_c['max_cum_3m30p_amt_bad_rate'])} 上限，故总接纳止于 {accept_bin}。选中档位的累计 3M30+ 金额率与约束上限间的余量分别为 {pct(auto_cum3)} vs {pct(auto_c['max_cum_3m30p_amt_bad_rate'])}（{auto_bin}）、{pct(acc_cum3)} vs {pct(acc_c['max_cum_3m30p_amt_bad_rate'])}（{accept_bin}），边际 3M30+ 金额率（{pct(auto_cum['3m30p_amt_bad_rate'])} / {pct(acc_cum['3m30p_amt_bad_rate'])}）均低于相应边际上限。")
+    else:
+        A(f"- 自动通过阈值为 {auto_bin} 档右边界 {auto_th}，累计通过率 {pct(S('Train','测算自动通过率'))}；总接纳阈值为 {accept_bin} 档右边界 {accept_th}，累计接纳率 {pct(S('Train','测算总接纳率'))}；")
+        A(f"- 约束核对：自动通过档累计 1M30+ {pct(auto_cum1)}、累计 3M30+ {pct(auto_cum3)}（CI 上界 {pct(auto_cum3_hi)}），边际 {pct(auto_cum['3m30p_cnt_bad_rate'])}；总接纳档累计 1M30+ {pct(acc_cum1)}（CI 上界 {pct(acc_cum1_hi)}）、累计 3M30+ {pct(acc_cum3)}（CI 上界 {pct(acc_cum3_hi)}）、边际 3M30+ {pct(acc_cum['3m30p_cnt_bad_rate'])}（CI 上界 {pct(marg3_hi)}）；")
+        A(f"- 放宽至下一档后约束均不再满足：{auto_bin}→{nxt_auto[bin_col]} 后累计 1M30+ {pct(nxt_auto['cum_1m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} 上限、累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故自动通过止于 {auto_bin}；{accept_bin}→{nxt_acc[bin_col]} 后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故总接纳止于 {accept_bin}。选中档位的累计及边际 3M30+ CI 上界（{pct(auto_cum3_hi)} / {pct(auto_cum['3m30p_cnt_bad_rate_ci_high'])}、{pct(acc_cum3_hi)} / {pct(marg3_hi)}）中，累计上界已达或超过对应上限（{pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} / {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])}），CI 层面余量有限，实施后需按约束口径持续监测。")
     A("")
     A("### （四）模型策略测算流量与分段风险\n")
     A("```text")
@@ -931,26 +966,49 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(f"人工审核：{auto_th} < score ≤ {accept_th}")
     A(f"拒绝：    score > {accept_th}")
     A("```\n")
-    A("| 数据集 | 分段 | 样本量 | 占比 | 1M30+ 笔数逾期率 | 3M30+ 笔数逾期率 | 3M30+ 金额逾期率 |")
-    A("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
-    for r in seg_rows("train") + seg_rows("oot"):
-        A(f"| {r['sample_group']} | {r['decision']} | {num(r['n'])} | {pct(r['strategy_estimated_segment_rate'])} | {pct(r['1m30p_cnt_bad_rate'])} | {pct(r['3m30p_cnt_bad_rate'])} | {pct(r['3m30p_amt_bad_rate'])} |")
+    if amt_mode:
+        for g in ("train", "oot"):
+            A(f"**{'Train' if g == 'train' else 'OOT'}**：\n")
+            A("| 分段 | 样本量 | 占比 | 1M30+ 金额逾期率 | 3M30+ 金额逾期率 | 3M30+ 笔数逾期率 |")
+            A("| --- | ---: | ---: | ---: | ---: | ---: |")
+            for r in seg_rows(g):
+                A(f"| {r['decision']} | {num(r['n'])} | {pct(r['strategy_estimated_segment_rate'])} | {pct(r['1m30p_amt_bad_rate'])} | {pct(r['3m30p_amt_bad_rate'])} | {pct(r['3m30p_cnt_bad_rate'])} |")
+            A("")
+    else:
+        A("| 数据集 | 分段 | 样本量 | 占比 | 1M30+ 笔数逾期率 | 3M30+ 笔数逾期率 | 3M30+ 金额逾期率 |")
+        A("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+        for r in seg_rows("train") + seg_rows("oot"):
+            A(f"| {r['sample_group']} | {r['decision']} | {num(r['n'])} | {pct(r['strategy_estimated_segment_rate'])} | {pct(r['1m30p_cnt_bad_rate'])} | {pct(r['3m30p_cnt_bad_rate'])} | {pct(r['3m30p_amt_bad_rate'])} |")
     A("")
     A("Train 与 OOT 均呈\"自动通过 < 人工审核 < 拒绝\"的风险梯度。上述占比为理论流量，不是历史实际审批通过率。")
     A("")
     A("### （五）模型策略测算阈值敏感性\n")
-    A("| 阈值类型 | 场景 | 阈值 | 档位 | 自动通过率 | 人工审核率 | 拒绝率 | 自动 3M30+ | 接纳 3M30+ | 边际 3M30+ [CI 上界] |")
-    A("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-    for r in sens:
-        th = r["threshold"]
-        th_text = str(th) if isinstance(th, float) else str(th)
-        A(f"| {r['threshold_type']} | {r['scenario']} | {th_text} | {r.get(final_bin_col) or '—'} | {pct(r.get('strategy_estimated_auto_pass_rate'))} | {pct(r.get('strategy_estimated_manual_review_rate'))} | {pct(r.get('strategy_estimated_reject_rate'))} | {pct(r.get('auto_3m30p_cnt_bad_rate'))} | {pct(r.get('accept_3m30p_cnt_bad_rate'))} | {pct(r.get('accept_marginal_3m30p_cnt_bad_rate'))} [{pct(r.get('accept_marginal_3m30p_cnt_bad_rate_ci_high'))}] |")
+    if amt_mode:
+        A("| 阈值类型 | 场景 | 阈值 | 档位 | 自动通过率 | 人工审核率 | 总接纳率 | 拒绝率 | 自动 3M30+ 金额逾期率 | 接纳 3M30+ 金额逾期率 | 边际 3M30+ 金额逾期率 | 边际 3M30+ 笔数逾期率 [CI 上界] |")
+        A("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for r in sens:
+            th = r["threshold"]
+            th_text = str(th) if isinstance(th, float) else str(th)
+            A(f"| {r['threshold_type']} | {r['scenario']} | {th_text} | {r.get(final_bin_col) or '—'} | {pct(r.get('strategy_estimated_auto_pass_rate'))} | {pct(r.get('strategy_estimated_manual_review_rate'))} | {pct(r.get('strategy_estimated_total_accept_rate'))} | {pct(r.get('strategy_estimated_reject_rate'))} | {pct(r.get('auto_3m30p_amt_bad_rate'))} | {pct(r.get('accept_3m30p_amt_bad_rate'))} | {pct(r.get('accept_marginal_3m30p_amt_bad_rate'))} | {pct(r.get('accept_marginal_3m30p_cnt_bad_rate'))} [{pct(r.get('accept_marginal_3m30p_cnt_bad_rate_ci_high'))}] |")
+    else:
+        A("| 阈值类型 | 场景 | 阈值 | 档位 | 自动通过率 | 人工审核率 | 拒绝率 | 自动 3M30+ | 接纳 3M30+ | 边际 3M30+ [CI 上界] |")
+        A("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for r in sens:
+            th = r["threshold"]
+            th_text = str(th) if isinstance(th, float) else str(th)
+            A(f"| {r['threshold_type']} | {r['scenario']} | {th_text} | {r.get(final_bin_col) or '—'} | {pct(r.get('strategy_estimated_auto_pass_rate'))} | {pct(r.get('strategy_estimated_manual_review_rate'))} | {pct(r.get('strategy_estimated_reject_rate'))} | {pct(r.get('auto_3m30p_cnt_bad_rate'))} | {pct(r.get('accept_3m30p_cnt_bad_rate'))} | {pct(r.get('accept_marginal_3m30p_cnt_bad_rate'))} [{pct(r.get('accept_marginal_3m30p_cnt_bad_rate_ci_high'))}] |")
     A("")
     tight = sens_row("自动通过阈值", "收严一档")
-    if tight is not None and tight["threshold"] is not None:
-        A(f"自动通过阈值收紧一档后通过率降至 {pct(tight['strategy_estimated_auto_pass_rate'])}；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
+    if amt_mode:
+        if tight is not None and tight["threshold"] is not None:
+            A(f"自动通过阈值收紧一档后通过率降至 {pct(tight['strategy_estimated_auto_pass_rate'])}；放宽至 {nxt_auto[bin_col]} 档后累计 1M30+ 和累计 3M30+ 金额逾期率均超过自动通过上限。总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 1M30+ 和累计 3M30+ 金额逾期率均明显超限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
+        else:
+            A(f"自动通过阈值已为最低档 {auto_bin}（无收严一档）；放宽至 {nxt_auto[bin_col]} 档后累计 1M30+ 和累计 3M30+ 金额逾期率均超过自动通过上限。总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 1M30+ 和累计 3M30+ 金额逾期率均明显超限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
     else:
-        A(f"自动通过阈值已为最低档 {auto_bin}（无收严一档）；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
+        if tight is not None and tight["threshold"] is not None:
+            A(f"自动通过阈值收紧一档后通过率降至 {pct(tight['strategy_estimated_auto_pass_rate'])}；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
+        else:
+            A(f"自动通过阈值已为最低档 {auto_bin}（无收严一档）；放宽至 {nxt_auto[bin_col]} 档后累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 自动上限；总接纳阈值放宽至 {nxt_acc[bin_col]} 档后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限。因此 {auto_bin}、{accept_bin} 边界是现行点估计约束下的最大可行阈值。")
     A("")
     A("### （六）上线实施规范\n")
     A("| 类别 | 项目 | 规则 |")
@@ -1004,13 +1062,13 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         A(f"月度倒挂未形成连续趋势（Train {len(tr_month_bad)} 个月、OOT {len(oo_month_bad)} 个月{oo_max_txt}），建议上线后按月复核相同档位是否重复出现倒挂。")
     A("")
     A("### （五）模型策略测算分段验证\n")
-    A("| 分段 | Train 占比 | Train 3M30+ | OOT 占比 | OOT 3M30+ | 结果 |")
+    A(f"| 分段 | Train 占比 | Train 3M30+{'金额逾期率' if amt_mode else ''} | OOT 占比 | OOT 3M30+{'金额逾期率' if amt_mode else ''} | 结果 |")
     A("| --- | ---: | ---: | ---: | ---: | --- |")
     tr_seg = seg_rows("train")
     oo_seg = seg_rows("oot")
     for i, trr in enumerate(tr_seg):
         oor = oo_seg[i]
-        A(f"| {trr['decision']} | {pct(trr['strategy_estimated_segment_rate'])} | {pct(trr['3m30p_cnt_bad_rate'])} | {pct(oor['strategy_estimated_segment_rate'])} | {pct(oor['3m30p_cnt_bad_rate'])} | 风险梯度成立 |")
+        A(f"| {trr['decision']} | {pct(trr['strategy_estimated_segment_rate'])} | {pct(trr[f'3m30p_{rate_sfx}_bad_rate'])} | {pct(oor['strategy_estimated_segment_rate'])} | {pct(oor[f'3m30p_{rate_sfx}_bad_rate'])} | 风险梯度成立 |")
     A("")
     A("### （六）验证结论汇总\n")
     A("| 维度 | 结果 | 判定 |")
