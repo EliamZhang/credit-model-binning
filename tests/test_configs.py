@@ -32,6 +32,31 @@ class ConfigCompletenessTests(unittest.TestCase):
 
         self.assertIn(("laoke", "mlt", "worthiness", "matrix"), REPORT_PREFIXES)
 
+    def test_report_meta_schema(self):
+        # 报告生成器可选字段校验：登记了 report_meta 的模型必须有 report_name/md_name；
+        # y_interest 必须含 raw_col/threshold；引用 key 必须存在。
+        for key, cfg in models.MODELS.items():
+            meta = cfg.get("report_meta")
+            if meta is None:
+                continue
+            with self.subTest(model=key):
+                self.assertIn("report_name", meta, f"模型 {key} report_meta 缺少 report_name")
+                self.assertIn("md_name", meta, f"模型 {key} report_meta 缺少 md_name")
+                if "y_interest" in meta:
+                    for field in ("raw_col", "threshold"):
+                        self.assertIn(field, meta["y_interest"], f"模型 {key} y_interest 缺少 {field}")
+
+        for key, cfg in datasets.DATASETS.items():
+            meta = cfg.get("report_meta")
+            if meta is None:
+                continue
+            with self.subTest(dataset=key):
+                for model_key in meta.get("models", []) + meta.get("amt_models", []):
+                    self.assertIn(model_key, models.MODELS, f"数据集 {key} report_meta 引用未登记模型 {model_key}")
+                for pair in meta.get("cross_pairs", []):
+                    self.assertIn(pair[0], models.MODELS, f"数据集 {key} cross_pairs 引用未登记模型 {pair[0]}")
+                    self.assertIn(pair[1], models.MODELS, f"数据集 {key} cross_pairs 引用未登记模型 {pair[1]}")
+
 
 if __name__ == "__main__":
     unittest.main()
