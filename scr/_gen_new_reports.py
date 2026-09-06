@@ -518,7 +518,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(f"# {ds_name}{model_cn}分数分箱与策略阈值设定报告（笔数口径）\n")
     A(f"> 本报告说明{ds_name}{model_cn}（`{raw_score_col}`）分数分箱、样本外验证及策略阈值设定结果，由 `scr/_gen_new_reports.py` 从 `out/{xlsx.name}` 读取数值生成，与 Excel 逐项一致。管线沿用笔数违约合箱口径：完整 Train 用于学习分箱边界、执行合箱、选择候选方案和确定策略阈值；OOT 仅用于最终验证。")
     if include_y_cols:
-        A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/new_worthiness_score.csv` 与 `res/new_application_info.csv` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
+        A(f"> 章一摘要大表表末两列（3M 实付利息均值、3M 实付利息<160 占比 Lift）为价值标签统计，由 `res/{ctx.model_b_cfg['score_file']}` 与 `res/{ctx.dataset_cfg['application_file']}` 重算（分档样本量与 Excel 03 最终分箱统计逐档核对一致）。")
     A(">")
     A(f"> 数据范围：数据源 `{sample_file}` 为完成申请样本（未完成申请已在数据准备阶段剔除），分析样本 {num(n_raw)} 笔全部为完成进件；按月样本时间范围为 {tr_range.split('—')[0]}—{oo_range.split('—')[1]}，其中 {oot_last_month} 为非完整月份。{model_cn}分覆盖 {num(n_valid)} 笔（{pct(n_valid/n_raw)}），缺失 {num(n_missing)} 笔（{pct(n_missing/n_raw)}）{missing_note}，缺失样本不进入分箱与策略测算、线上按拒绝处理。{model_cn}分为**高分高风险**：check_data 十分位 3M30+ 笔数逾期率由最低分位 {decile.split('→')[0].strip()} 单调升至最高分位 {decile.split('→')[1].strip()}（{notes.get('decile_inversion', '倒挂 0 处')}，`HIGH_SCORE_HIGH_RISK=True`）。")
     A("")
@@ -1124,8 +1124,8 @@ def _income_verify_and_cells(rows, ctx: ReportContext):
         cells[key] = cells.get(key, 0) + 1
     wb = load(ctx.cross_xlsx)
     for sheet, group in [("02_交叉矩阵_Train", 1), ("03_交叉矩阵_OOT", 0)]:
-        for r in find_table(wb[sheet], "new_mlt_bin_order"):
-            a, b = r["new_mlt_bin_order"], r["new_wth_bin_order"]
+        for r in find_table(wb[sheet], f"{ctx.model_a_cfg['cross_tag']}_bin_order"):
+            a, b = r[f"{ctx.model_a_cfg['cross_tag']}_bin_order"], r[f"{ctx.model_b_cfg['cross_tag']}_bin_order"]
             if isinstance(a, int) and a > 0 and isinstance(b, int) and b > 0:
                 mine = cells.get((group, a, b), 0)
                 exl = int(r["n"])
@@ -1283,38 +1283,75 @@ def worthiness_interest_stats(ctx: ReportContext, role: str, expect_n):
 # ---------- 交叉报告渲染 ----------
 
 def render_cross(ctx: ReportContext):
+    tag_a = ctx.model_a_cfg["cross_tag"]
+    tag_b = ctx.model_b_cfg["cross_tag"]
+    meta_a = ctx.model_a_cfg["report_meta"]
+    meta_b = ctx.model_b_cfg["report_meta"]
+    md_name_a = meta_a["md_name"]
+    md_name_b = meta_b["md_name"]
+    disp_a = ctx.model_a_cfg["display_short"]
+    disp_b = ctx.model_b_cfg["display_short"]
+    ds_name = ctx.dataset_cfg["name"]
+    ds_notes = ctx.dataset_cfg.get("report_notes", {})
+    app_file = ctx.dataset_cfg["application_file"]
+    def rank(lab):
+        return ord(lab) - 64
+    ov_a = overview(load(ctx.xlsx_a)["01_总览"])
+    ov_b = overview(load(ctx.xlsx_b)["01_总览"])
+    auto_a = str(ov_a[("模型策略阈值", "自动通过截止风险档")])
+    acc_a = str(ov_a[("模型策略阈值", "人工审核截止风险档")])
+    auto_b = str(ov_b[("模型策略阈值", "自动通过截止风险档")])
+    acc_b = str(ov_b[("模型策略阈值", "人工审核截止风险档")])
+
     wb = load(ctx.cross_xlsx)
     ov = overview(wb["01_总览"])
     pearson = float(ov[("相关性", "模型分 Pearson 相关（Train）")])
     spearman = float(ov[("相关性", "模型分 Spearman 相关（Train）")])
     rank_corr = float(ov[("相关性", "最终分档秩相关（Train）")])
-    plan_a = ov[("分档方案", "new_mlt 最终方案")]
-    plan_b = ov[("分档方案", "new_wth 最终方案")]
+    plan_a = ov[("分档方案", f"{tag_a} 最终方案")]
+    plan_b = ov[("分档方案", f"{tag_b} 最终方案")]
     n_all = int(ov[("样本", "双分样本量")])
     train_oot = ov[("样本", "Train / OOT 样本量")]
     n_apply = count_csv_rows(ROOT / ctx.dataset_cfg["data_dir"] / ctx.dataset_cfg["sample_file"])
-    n_miss_a = int(overview(load(ctx.xlsx_a)["01_总览"])[("样本", "模型分缺失量")])
-    n_miss_b = int(overview(load(ctx.xlsx_b)["01_总览"])[("样本", "模型分缺失量")])
+    n_miss_a = int(ov_a[("样本", "模型分缺失量")])
+    n_miss_b = int(ov_b[("样本", "模型分缺失量")])
 
-    mtr = find_table(wb["02_交叉矩阵_Train"], "new_mlt_bin_order")
-    moo = find_table(wb["03_交叉矩阵_OOT"], "new_mlt_bin_order")
+    # 月份范围：复用 A 模型单模型 Excel 05 月度表（与单模型报告同源推导）
+    monthly_rows = None
+    for header, data in tables_in_sheet(load(ctx.xlsx_a)["05_模型验证"]):
+        if header[0] == "sample_group" and "application_month" in header and "primary_inversion_count" in header:
+            monthly_rows = as_dicts(header, data)
+    assert monthly_rows is not None
+    tr_range = month_range(monthly_rows, "train")
+    oo_range = month_range(monthly_rows, "oot")
+
+    # 交叉 Excel 07 附录配置（强分歧/组合分等口径说明）
+    appendix_cfg = {}
+    for r in find_table(wb["07_附录"], "config_group"):
+        appendix_cfg[str(r["config_name"])] = str(r["config_value"])
+
+    mtr = find_table(wb["02_交叉矩阵_Train"], f"{tag_a}_bin_order")
+    moo = find_table(wb["03_交叉矩阵_OOT"], f"{tag_a}_bin_order")
     cond_rows = find_table(wb["04_条件增量分析"], "dimension")
     perf_rows = find_table(wb["05_组合评分效果"], "sample_group")
     policy_rows = find_table(wb["06_二维策略模拟"], "policy")
-    grid_rows = find_table(wb["06_二维策略模拟"], "new_mlt_accept_bin")
+    grid_rows = find_table(wb["06_二维策略模拟"], f"{tag_a}_accept_bin")
     quad_rows = find_table(wb["06_二维策略模拟"], "sample_group")
+    bins_a = sorted({r[f"{tag_a}_bin_order"] for r in mtr if isinstance(r[f"{tag_a}_bin_order"], int) and r[f"{tag_a}_bin_order"] > 0})
+    bins_b = sorted({r[f"{tag_b}_bin_order"] for r in mtr if isinstance(r[f"{tag_b}_bin_order"], int) and r[f"{tag_b}_bin_order"] > 0})
+    bins_n = max(bins_a[-1], bins_b[-1])
 
     def matrix_md(rows, group, income_stats, pos_stats, deal_stats):
         """渲染 14 组 Excel 指标矩阵 + 4 组收入指标矩阵为 md 表格。
         rows 为 dict 列表（含边际与整体行）；income_stats 为 income_matrix_stats() 输出。"""
         A = []
-        label_order = sorted({r["new_wth_bin_order"] for r in rows if isinstance(r["new_wth_bin_order"], int) and r["new_wth_bin_order"] > 0})
-        row_order = sorted({r["new_mlt_bin_order"] for r in rows if isinstance(r["new_mlt_bin_order"], int) and r["new_mlt_bin_order"] > 0})
-        cell = {(r["new_mlt_bin_order"], r["new_wth_bin_order"]): r for r in rows
-                if isinstance(r["new_mlt_bin_order"], int) and r["new_mlt_bin_order"] > 0 and isinstance(r["new_wth_bin_order"], int) and r["new_wth_bin_order"] > 0}
-        row_marg = {r["new_mlt_bin_order"]: r for r in rows if r["new_wth_bin"] == "行边际"}
-        col_marg = {r["new_wth_bin_order"]: r for r in rows if r["new_mlt_bin"] == "列边际"}
-        overall_row = next(r for r in rows if r["new_mlt_bin"] == "整体" and r["new_wth_bin"] == "整体")
+        label_order = sorted({r[f"{tag_b}_bin_order"] for r in rows if isinstance(r[f"{tag_b}_bin_order"], int) and r[f"{tag_b}_bin_order"] > 0})
+        row_order = sorted({r[f"{tag_a}_bin_order"] for r in rows if isinstance(r[f"{tag_a}_bin_order"], int) and r[f"{tag_a}_bin_order"] > 0})
+        cell = {(r[f"{tag_a}_bin_order"], r[f"{tag_b}_bin_order"]): r for r in rows
+                if isinstance(r[f"{tag_a}_bin_order"], int) and r[f"{tag_a}_bin_order"] > 0 and isinstance(r[f"{tag_b}_bin_order"], int) and r[f"{tag_b}_bin_order"] > 0}
+        row_marg = {r[f"{tag_a}_bin_order"]: r for r in rows if r[f"{tag_b}_bin"] == "行边际"}
+        col_marg = {r[f"{tag_b}_bin_order"]: r for r in rows if r[f"{tag_a}_bin"] == "列边际"}
+        overall_row = next(r for r in rows if r[f"{tag_a}_bin"] == "整体" and r[f"{tag_b}_bin"] == "整体")
 
         def b(text):
             return f"**{text}**"
@@ -1331,7 +1368,7 @@ def render_cross(ctx: ReportContext):
 
         def metric_table(title, key, fmt, diagonal_bold=True):
             T = [f"**{title}**：", ""]
-            T.append("| new_mlt＼new_wth | " + " | ".join(f"{chr(64+o)}" for o in label_order) + " | **总计（mlt 边际）** |")
+            T.append(f"| {tag_a}＼{tag_b} | " + " | ".join(f"{chr(64+o)}" for o in label_order) + f" | **总计（{md_name_a} 边际）** |")
             T.append("| ---: | " + " | ".join("---:" for _ in label_order) + " | ---: |")
             for mo in row_order:
                 cells = []
@@ -1343,7 +1380,7 @@ def render_cross(ctx: ReportContext):
                     cells.append(v)
                 marg_v = cell_metric(row_marg.get(mo), key, fmt)
                 T.append(f"| **{chr(64+mo)}** | " + " | ".join(str(c) for c in cells) + f" | {marg_v} |")
-            T.append("| **总计（价值边际）** | " + " | ".join(str(cell_metric(col_marg.get(wo), key, fmt)) for wo in label_order) + f" | {cell_metric(overall_row, key, fmt)} |")
+            T.append(f"| **总计（{md_name_b}边际）** | " + " | ".join(str(cell_metric(col_marg.get(wo), key, fmt)) for wo in label_order) + f" | {cell_metric(overall_row, key, fmt)} |")
             return "\n".join(T)
 
         fmt_n = lambda v: f"{int(v):,}"
@@ -1385,7 +1422,7 @@ def render_cross(ctx: ReportContext):
         def income_table(title, fname, src=None):
             s = income_stats if src is None else src
             T = [f"**{title}**：", ""]
-            T.append("| new_mlt＼new_wth | " + " | ".join(f"{chr(64+o)}" for o in label_order) + " | **总计（mlt 边际）** |")
+            T.append(f"| {tag_a}＼{tag_b} | " + " | ".join(f"{chr(64+o)}" for o in label_order) + f" | **总计（{md_name_a} 边际）** |")
             T.append("| ---: | " + " | ".join("---:" for _ in label_order) + " | ---: |")
             for mo in row_order:
                 cells = [fmt_money(s.get((g, "cell", (mo, wo)), {}).get(fname)) for wo in label_order]
@@ -1411,40 +1448,40 @@ def render_cross(ctx: ReportContext):
     pol = {r["policy"]: r for r in policy_rows}
     and_row = pol["二维组合（AND）"]
     or_row = pol["二维组合（OR）"]
-    a_row = pol["new_mlt 单模型（现行）"]
-    b_row = pol["new_wth 单模型（现行）"]
+    a_row = pol[f"{tag_a} 单模型（现行）"]
+    b_row = pol[f"{tag_b} 单模型（现行）"]
 
     # 四象限
     quad = {}
     for r in quad_rows:
         if r["sample_group"] in ("train", "oot") and r.get("quadrant"):
             key = "双低" if r["quadrant"].startswith("双低") else (
-                "仅mlt低" if r["quadrant"].startswith("仅 new_mlt") else (
-                    "仅wth低" if r["quadrant"].startswith("仅 new_wth") else "双高"))
+                "仅mlt低" if r["quadrant"].startswith(f"仅 {tag_a}") else (
+                    "仅wth低" if r["quadrant"].startswith(f"仅 {tag_b}") else "双高"))
             quad[(r["sample_group"], key)] = r
 
     L = []
     B = L.append
-    B("# 两模型交叉效果评估报告（新客 mlt × 新客价值模型）\n")
-    B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{ctx.cross_xlsx.name}`（matrix）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
+    B(f"# 两模型交叉效果评估报告（{ds_name} {md_name_a} × {disp_b}）\n")
+    B(f"> 本报告评估{ds_name} {md_name_a} 主风险模型分（`{ctx.model_a_cfg['score_col']}`）与{disp_b}分（`{ctx.model_b_cfg['score_col']}`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{ctx.cross_xlsx.name}`（matrix）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/{app_file}` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 {bins_n} 档最终分档（高分高风险方向）参与分析（方案见附录）。")
     B(">")
-    B(f"> 分析样本为同时存在两个模型分的完成申请 {num(n_all)} 笔（占 {num(n_apply)} 笔完成申请的 {pct(n_all/n_apply)}），按 Train（2024-01—2025-10）/ OOT（2025-11—2026-05）切分，OOT 仅用于验证。两模型分数缺失口径：mlt 缺失 {num(n_miss_a)} 笔（{pct(n_miss_a/n_apply)}，含无银行交易数据人群的 −1.0 兜底分置空，2026-09-01 用户确认）、价值模型缺失 {num(n_miss_b)} 笔（{pct(n_miss_b/n_apply)}，无银行交易数据人群），双分样本即两模型分数交集。")
+    B(f"> 分析样本为同时存在两个模型分的完成申请 {num(n_all)} 笔（占 {num(n_apply)} 笔完成申请的 {pct(n_all/n_apply)}），按 Train（{tr_range}）/ OOT（{oo_range}）切分，OOT 仅用于验证。两模型分数缺失口径：{ds_notes.get('cross_missing_note', '').format(n_miss_a=num(n_miss_a), pct_a=pct(n_miss_a / n_apply), n_miss_b=num(n_miss_b), pct_b=pct(n_miss_b / n_apply))}，双分样本即两模型分数交集。")
     B(">")
     B(f"> **一句话结论：不做分数融合；价值模型的正确用法是二维规则——AND 组合（mlt ≤ C 档且价值 ≤ C 档）可把接纳风险从 {pct(and_row['train_accept_3m30p'])} 进一步压低（当前组合点接纳率 {pct(and_row['train_accept_rate'])}），而\"仅价值低\"的错配客群（Train {pct(quad[('train','仅wth低')]['sample_pct'])}、3M30+ {pct(quad[('train','仅wth低')]['3m30p_cnt_bad_rate'])}）必须由 mlt 把关拦截。**")
     B("")
     B("## 一、结论摘要\n")
     B(f"1. **两模型中等相关、互不冗余**：Train 上 Pearson 相关 {rate4(pearson)}、Spearman 相关 {rate4(spearman)}、分档秩相关 {rate4(rank_corr)}。")
-    B("2. **分数融合不加分**：各组合分的 Train/OOT AUC、KS 均不高于新客 mlt 单模型分（详见五）。")
+    B(f"2. **分数融合不加分**：各组合分的 Train/OOT AUC、KS 均不高于{ds_name} {md_name_a} 单模型分（详见五）。")
     B("3. **增量信息双向存在，mlt 是主排序器**：mlt 各档内价值增量与价值各档内 mlt 增量并存，mlt 档内跨度远大于价值档内跨度（详见四）。")
     B(f"4. **共识人群风险梯度清晰**：对角 3M30+ 由 A-A 低风险格单调升至 G-G 高风险格（详见三）。")
     B(f"5. **AND 规则交叉是唯一有效的交叉方式**：接纳风险 mlt 单模型 {pct(a_row['train_accept_3m30p'])} → AND 组合 {pct(and_row['train_accept_3m30p'])}（OOT {pct(and_row['oot_accept_3m30p'])}），接纳率 {pct(a_row['train_accept_rate'])} → {pct(and_row['train_accept_rate'])}；OR 组合无增益（详见六）。")
     B(f"6. **价值模型单独使用有高风险盲区**：\"仅价值低\"象限（价值 ≤ C 但 mlt > C）Train {pct(quad[('train','仅wth低')]['sample_pct'])}、3M30+ {pct(quad[('train','仅wth低')]['3m30p_cnt_bad_rate'])}——即\"价值好 & 风险差\"错配客群，价值模型单独决策会把这批高风险人群放进接纳段。")
     B("")
     B("**核心指标总览**：\n")
-    B("| 维度 | 指标 | new_mlt 单模型 | 新客价值模型单模型 | 最优组合 |")
+    B(f"| 维度 | 指标 | {tag_a} 单模型 | {disp_b}单模型 | 最优组合 |")
     B("| ---- | ---- | ---: | ---: | ---: |")
-    B(f"| 区分度（Train 3M30+） | AUC / KS | {rate4(0.7107727272484785)} / {rate4(0.3062687531678921)} | {rate4(0.6696873893042173)} / {rate4(0.2458587695662445)} | 不高于 mlt 单模型 |")
-    B(f"| 区分度（OOT 3M30+） | AUC / KS | {rate4(0.6575205078777688)} / {rate4(0.2388478301398968)} | {rate4(0.6374843140563005)} / {rate4(0.216285445104434)} | 不高于 mlt 单模型 |")
+    B(f"| 区分度（Train 3M30+） | AUC / KS | {rate4(float(ov_a[('模型效果', 'train_duedate_3m_30_auc')]))} / {rate4(float(ov_a[('模型效果', 'train_duedate_3m_30_ks')]))} | {rate4(float(ov_b[('模型效果', 'train_duedate_3m_30_auc')]))} / {rate4(float(ov_b[('模型效果', 'train_duedate_3m_30_ks')]))} | 不高于 mlt 单模型 |")
+    B(f"| 区分度（OOT 3M30+） | AUC / KS | {rate4(float(ov_a[('模型效果', 'oot_duedate_3m_30_auc')]))} / {rate4(float(ov_a[('模型效果', 'oot_duedate_3m_30_ks')]))} | {rate4(float(ov_b[('模型效果', 'oot_duedate_3m_30_auc')]))} / {rate4(float(ov_b[('模型效果', 'oot_duedate_3m_30_ks')]))} | 不高于 mlt 单模型 |")
     B(f"| 现行策略（双分样本重算） | Train 总接纳率 / 接纳 3M30+ | {pct(a_row['train_accept_rate'])} / {pct(a_row['train_accept_3m30p'])} | {pct(b_row['train_accept_rate'])} / {pct(b_row['train_accept_3m30p'])} | {pct(and_row['train_accept_rate'])} / {pct(and_row['train_accept_3m30p'])}（AND） |")
     B(f"| 现行策略（双分样本重算） | OOT 总接纳率 / 接纳 3M30+ | {pct(a_row['oot_accept_rate'])} / {pct(a_row['oot_accept_3m30p'])} | {pct(b_row['oot_accept_rate'])} / {pct(b_row['oot_accept_3m30p'])} | {pct(and_row['oot_accept_rate'])} / {pct(and_row['oot_accept_3m30p'])}（AND） |")
     B("")
@@ -1453,10 +1490,10 @@ def render_cross(ctx: ReportContext):
     B(f"- **切分**：双分样本 {train_oot}。两模型单模型策略通过率在双分口径下重算，与各自分箱报告略有差异（剔除对方模型缺失分样本所致）。")
     B("- **分档**：两模型均使用各自报告已评审的 7 档方案（见附录边界）。档位序 1–7 对应风险从低到高。")
     B("- **风险指标**：沿用笔数违约口径，1M30+/3M30+ 笔数逾期率为主要观察指标，金额逾期率同步输出；矩阵格的 Lift = 格逾期率 ÷ 该样本组整体逾期率；样本量不足 100 的格风险类指标显示 —。")
-    B("- **价值语义**：价值模型分为\"低分 = 高价值\"（分数越低，利息贡献越高，见 docs/价值评估_新客_0520.html）。因此价值档 A（最低分）同时是\"高价值 + 低风险\"档；下文\"价值 ≤ C\"即\"价值好（低分）人群\"。")
+    B(f"- **价值语义**：{ds_notes.get('value_note_cross', '')}")
     B("")
     B("## 三、交叉指标矩阵（Train/OOT）\n")
-    B("以 7×7 矩阵展示全部交叉格（行 = new_mlt 档、列 = new_wth 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（价值边际）= 该价值档全部人群的指标值、总计列（mlt 边际）= 该 mlt 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 8 张收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/new_application_info.csv` 重算，分档与矩阵逐格核对一致。")
+    B(f"以 {bins_n}×{bins_n} 矩阵展示全部交叉格（行 = {tag_a} 档、列 = {tag_b} 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（{md_name_b}边际）= 该{md_name_b}档全部人群的指标值、总计列（{md_name_a} 边际）= 该 {md_name_a} 档全部人群的指标值、右下角 = 样本组整体值。每组包含 14 个业务指标矩阵（来自 matrix Excel）与 8 张收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/{app_file}` 重算，分档与矩阵逐格核对一致。")
     B("")
     B("**Train**：\n")
     B(train_matrix_md)
@@ -1485,11 +1522,11 @@ def render_cross(ctx: ReportContext):
     for r in perf_rows:
         B(f"| {r['sample_group']} | {r['score']} | {r['label']} | {rate4(r['auc'])} | {rate4(r['ks'])} |")
     B("")
-    B("**所有组合分的 AUC / KS 都低于 new_mlt 单模型分**——价值模型分在排序维度上几乎不含 mlt 之外的增量信息，线性融合只会稀释 mlt 的排序能力；其增量只在强分歧格上体现，适合规则式使用。")
+    B(f"**所有组合分的 AUC / KS 都低于 {tag_a} 单模型分**——价值模型分在排序维度上几乎不含 mlt 之外的增量信息，线性融合只会稀释 mlt 的排序能力；其增量只在强分歧格上体现，适合规则式使用。")
     B("")
     B("## 六、二维策略模拟\n")
     B("### （一）策略对照（双分样本口径）\n")
-    B("现行单模型阈值映射到档位：new_mlt 自动 ≤ 2 档（B）、接纳 ≤ 3 档（C）；新客价值模型自动 ≤ 1 档（A）、接纳 ≤ 3 档（C）。AND 组合 = 两模型同时达标，OR 组合 = 任一达标。")
+    B(f"现行单模型阈值映射到档位：{tag_a} 自动 ≤ {rank(auto_a)} 档（{auto_a}）、接纳 ≤ {rank(acc_a)} 档（{acc_a}）；{disp_b}自动 ≤ {rank(auto_b)} 档（{auto_b}）、接纳 ≤ {rank(acc_b)} 档（{acc_b}）。AND 组合 = 两模型同时达标，OR 组合 = 任一达标。")
     B("")
     B("| 策略 | 逻辑 | Train 自动通过 | Train 总接纳 | Train 拒绝 | Train 接纳 3M30+ | OOT 自动通过 | OOT 总接纳 | OOT 接纳 3M30+ |")
     B("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
@@ -1500,11 +1537,11 @@ def render_cross(ctx: ReportContext):
     B(f"- **OR 组合无增益**：接纳率 {pct(or_row['train_accept_rate'])}、风险 {pct(or_row['train_accept_3m30p'])}，均不优于 mlt 单模型。")
     B("")
     B("### （二）AND 接纳网格（Train 接纳率 / 接纳 3M30+）\n")
-    B("| new_mlt＼new_wth | " + " | ".join(f"≤{chr(64+b)}（{b}）" for b in range(2, 8)) + " |")
+    B(f"| {tag_a}＼{tag_b} | " + " | ".join(f"≤{chr(64+b)}（{b}）" for b in range(2, bins_n + 1)) + " |")
     B("| --- | " + " | ".join("---:" for _ in range(6)) + " |")
     grid = {}
     for r in grid_rows:
-        grid[(r["new_mlt_accept_bin"], r["new_wth_accept_bin"])] = r
+        grid[(r[f"{tag_a}_accept_bin"], r[f"{tag_b}_accept_bin"])] = r
     for a in range(2, 8):
         cells = []
         for b in range(2, 8):
@@ -1517,7 +1554,7 @@ def render_cross(ctx: ReportContext):
         B(f"| **≤{chr(64+a)}（{a}）** | " + " | ".join(cells) + " |")
     B("")
     B("### （三）现行接纳阈值的四象限人群\n")
-    B("按 new_mlt 接纳线（≤C）与新客价值模型接纳线（≤C）划分：双低 = 低风险 × 高价值（优先经营）、仅 mlt 低 = 低风险 × 低价值（收益验证）、仅价值低 = 高价值 × 高风险（谨慎经营）、双高 = 高风险 × 低价值（优先风险控制）。")
+    B(f"按 {tag_a} 接纳线（≤{acc_a}）与{disp_b}接纳线（≤{acc_b}）划分：双低 = 低风险 × 高价值（优先经营）、仅 mlt 低 = 低风险 × 低价值（收益验证）、仅价值低 = 高价值 × 高风险（谨慎经营）、双高 = 高风险 × 低价值（优先风险控制）。")
     B("")
     B("| 样本组 | 象限 | 样本量 | 占比 | 1M30+ | 3M30+ |")
     B("| --- | --- | ---: | ---: | ---: | ---: |")
@@ -1539,30 +1576,26 @@ def render_cross(ctx: ReportContext):
     B("6. **上线后按月监控**：组合段风险、两模型分档分布（PSI）、强分歧格占比，重点关注双高格与仅价值低象限的风险漂移。")
     B("")
     B("## 附录：两模型分档边界与配置\n")
-    B("| 档位 | new_mlt 右边界 | new_wth 右边界 |")
+    B(f"| 档位 | {tag_a} 右边界 | {tag_b} 右边界 |")
     B("| --- | ---: | ---: |")
-    edges_a = {
-        "A": "0.04990757831163817", "B": "0.08716503179896717", "C": "0.1389779549508124",
-        "D": "0.1680492389325501", "E": "0.2265159415546004", "F": "0.3707433694616369", "G": "+∞",
-    }
-    edges_b = {
-        "A": "0.1170685806554901", "B": "0.1709751456242708", "C": "0.1933179021763764",
-        "D": "0.3080852570024352", "E": "0.389342402737837", "F": "0.5135447691545544", "G": "+∞",
-    }
-    for lab in "ABCDEFG":
+    edges_a = {chr(64 + i): str(v) for i, v in enumerate(load_edges(ctx.xlsx_a), start=1)}
+    edges_b = {chr(64 + i): str(v) for i, v in enumerate(load_edges(ctx.xlsx_b), start=1)}
+    edges_a[chr(64 + bins_n)] = "+∞"
+    edges_b[chr(64 + bins_n)] = "+∞"
+    for lab in (chr(64 + i) for i in range(1, bins_n + 1)):
         B(f"| {lab} | {edges_a[lab]} | {edges_b[lab]} |")
     B("")
     B("| 配置项 | 值 | 说明 |")
     B("| --- | --- | --- |")
-    B("| 现行阈值映射 | new_mlt 自动 ≤2 / 接纳 ≤3；价值 自动 ≤1 / 接纳 ≤3 | 取自两模型各自报告的最终策略 |")
-    B(f"| new_mlt 最终方案 | {plan_a} | 自动合箱 |")
-    B(f"| new_wth 最终方案 | {plan_b} | 手动指定（final_bin_ranges） |")
+    B(f"| 现行阈值映射 | {tag_a} 自动 ≤{rank(auto_a)} / 接纳 ≤{rank(acc_a)}；{md_name_b} 自动 ≤{rank(auto_b)} / 接纳 ≤{rank(acc_b)} | 取自两模型各自报告的最终策略 |")
+    B(f"| {tag_a} 最终方案 | {plan_a} | 自动合箱 |")
+    B(f"| {tag_b} 最终方案 | {plan_b} | {'手动指定（final_bin_ranges）' if 'final_bin_ranges' in ctx.model_b_cfg else '自动合箱'} |")
     B("| 组合分 | z 平均 / 7:3 加权 / 档位平均 / 档位取大 | z 用 Train 均值标准差，复用到 OOT |")
     B("| 强分歧定义 | 两模型档位差 ≥ 3 | 用于分歧人群汇总 |")
     B("| 矩阵格展示阈值 | 样本量 ≥ 100 | 不足只展示样本量 |")
     B("")
 
-    md_path = DOCS / "交叉_新客_mlt_价值.md"
+    md_path = resolve_md_path(ctx, "cross")
     md_path.write_text("\n".join(L), encoding="utf-8")
     print(f"已生成 {md_path.relative_to(ROOT)}（{len(L)} 行）")
 
