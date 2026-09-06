@@ -24,15 +24,10 @@ from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
-TODAY = "20260901"
 
 sys.path.insert(0, str(ROOT))
 from configs.datasets import DATASETS  # noqa: E402
 from configs.models import MODELS  # noqa: E402
-
-WTH_XLSX = ROOT / "out" / f"binning_new_worthiness_strategy_report_{TODAY}.xlsx"
-MLT_XLSX = ROOT / "out" / f"binning_new_mlt_strategy_report_{TODAY}.xlsx"
-CROSS_XLSX = ROOT / "out" / f"binning_new_cross_strategy_report_{TODAY}.xlsx"
 
 
 # ---------- 通用工具 ----------
@@ -189,6 +184,8 @@ class ReportContext:
     """一次报告渲染的上下文：数据集/模型配置与解析后的 Excel、md 路径。"""
     dataset_key: str
     dataset_cfg: dict
+    model_a_key: str
+    model_b_key: str | None
     model_a_cfg: dict
     model_b_cfg: dict | None
     date: str
@@ -252,6 +249,8 @@ def build_context(dataset_key: str, model_a_key: str, model_b_key: str | None = 
     return ReportContext(
         dataset_key=dataset_key,
         dataset_cfg=dataset_cfg,
+        model_a_key=model_a_key,
+        model_b_key=model_b_key,
         model_a_cfg=a_cfg,
         model_b_cfg=b_cfg,
         date=resolved_date,
@@ -277,32 +276,38 @@ def resolve_md_path(ctx: ReportContext, kind: str) -> Path:
 
 # ---------- 单模型报告渲染 ----------
 
-def render_single_model(
-    model_key: str,
-    xlsx: Path,
-    md_path: Path,
-    title: str,
-    model_cn: str,
-    score_col: str,
-    final_bin_col: str,
-    raw_score_col: str,
-    decile: str,
-    auto_bin: str,
-    accept_bin: str,
-    missing_note: str,
-    merge_note: str,
-    manual: bool = False,
-    value_semantics: bool = False,
-    dist_note: str = "",
-    steps_note: str = "",
-    cand_note: str = "",
-    include_y_cols: bool = False,
-):
+def render_single_model(ctx: ReportContext, role: str = "a"):
+    """渲染单模型分箱报告：全部输入取自 ctx（configs 字段 + Excel 读数），不接收叙事实参。"""
+    if role == "a":
+        cfg, model_key, xlsx = ctx.model_a_cfg, ctx.model_a_key, ctx.xlsx_a
+        md_path = resolve_md_path(ctx, "single_a")
+    else:
+        cfg, model_key, xlsx = ctx.model_b_cfg, ctx.model_b_key, ctx.xlsx_b
+        md_path = resolve_md_path(ctx, "single_b")
+    meta = cfg["report_meta"]
+    notes = cfg.get("report_notes", {})
+    title = model_cn = meta["report_name"]
+    score_col = cfg["score_col"]
+    final_bin_col = cfg["final_bin_col"]
+    raw_score_col = cfg["raw_score_col"]
+    decile = notes.get("decile", "")
+    missing_note = notes.get("missing_note", "")
+    merge_note = notes.get("merge_note", "")
+    manual = "final_bin_ranges" in cfg
+    value_semantics = bool(meta.get("value_model"))
+    dist_note = notes.get("dist_note", "")
+    steps_note = notes.get("steps_note", "")
+    cand_note = notes.get("cand_note", "")
+    include_y_cols = "y_interest" in meta
+
     wb = load(xlsx)
     ov = overview(wb["01_总览"])
 
     def O(section, metric):
         return ov[(section, metric)]
+
+    auto_bin = str(O("模型策略阈值", "自动通过截止风险档"))
+    accept_bin = str(O("模型策略阈值", "人工审核截止风险档"))
 
     n_raw = int(O("样本", "原始样本量"))
     n_removed = int(O("样本", "剔除未完成申请量"))
@@ -351,7 +356,8 @@ def render_single_model(
     # 价值标签两列（y_interest_income_3m）：res 重算 + 与 Excel 03 逐档断言（仅价值模型报告开启）
     y_interest_stats = y_interest_overall = None
     if include_y_cols:
-        assert model_key == "new_worthiness", "include_y_cols 仅用于新客价值模型报告"
+        assert meta.get("value_model"), f"include_y_cols 仅用于价值模型（{model_key} 缺少 value_model）"
+        edges = load_edges(xlsx)
         expect_n = {}
         for g, rows in (("Train", tr_rows), ("OOT", oo_rows)):
             for r in rows:
@@ -359,9 +365,9 @@ def render_single_model(
         for r in tr_rows:
             o = int(r["bin_order"])
             sr = r.get("score_right")
-            if o < 7 and (not isinstance(sr, float) or abs(sr - WTH_EDGES[o - 1]) > 1e-12):
-                raise ValueError(f"价值标签分档边界与 Excel 03 不一致：档{o} 右边界 {sr!r} vs {WTH_EDGES[o - 1]}")
-        y_interest_stats, y_interest_overall = worthiness_interest_stats(expect_n)
+            if o <= len(edges) and (not isinstance(sr, float) or abs(sr - edges[o - 1]) > 1e-12):
+                raise ValueError(f"价值标签分档边界与 Excel 03 不一致：档{o} 右边界 {sr!r} vs {edges[o - 1]}")
+        y_interest_stats, y_interest_overall = worthiness_interest_stats(ctx, role, expect_n)
         for g, rows in (("Train", tr_rows), ("OOT", oo_rows)):
             for r in rows:
                 _n, mean, _y1r, lift = y_interest_stats[(g, int(r["bin_order"]))]
@@ -443,7 +449,7 @@ def render_single_model(
     candidates.sort(key=lambda r: (str(r["selected"]) != "True", -float(r["candidate_score"])))
 
     if value_semantics:
-        cross_ov = overview(load(CROSS_XLSX)["01_总览"])
+        cross_ov = overview(load(ctx.cross_xlsx)["01_总览"])
         pearson_cross = float(cross_ov[("相关性", "模型分 Pearson 相关（Train）")])
     else:
         pearson_cross = None
@@ -994,12 +1000,19 @@ SURPLUS_FIELDS = ["gross_surplus", "net_surplus"]
 DEAL_STATUSES = {"Active_Account", "Closed", "Blocked"}
 
 # 两模型最终 7 档右边界（与附录一致；区间规则 (left, right]）
-MLT_EDGES = [0.04990757831163817, 0.08716503179896717, 0.1389779549508124,
-             0.1680492389325501, 0.2265159415546004, 0.3707433694616369]
-WTH_EDGES = [0.1170685806554901, 0.1709751456242708, 0.1933179021763764,
-             0.3080852570024352, 0.389342402737837, 0.5135447691545544]
-MLT_SCORE_COL = "aus_new_risk_bid_3rdmodel_v1_0_20251201"
-WTH_SCORE_COL = "aus_new_worthiness_bid_3rdmodel_v1_0_20260429"
+def load_edges(xlsx: Path) -> list[float]:
+    """读单模型 Excel 03 最终分箱统计 Train 行各档 score_right，返回 n-1 个右边界
+    （最后一档右边界为 inf，不进入数组；区间规则 (left, right]）。"""
+    wb = load(xlsx)
+    rows = [r for r in find_table(wb["03_最终分箱统计"], "sample_group") if r["sample_group"] == "Train"]
+    rows = sorted(rows, key=lambda r: int(r["bin_order"]))
+    edges = []
+    for r in rows[:-1]:
+        sr = r["score_right"]
+        if not isinstance(sr, float) or sr == float("inf"):
+            raise ValueError(f"Excel 03 档 {r['bin_order']} 右边界异常：{sr!r}")
+        edges.append(sr)
+    return edges
 
 
 def _bin_of(score: float, edges) -> int:
@@ -1009,32 +1022,30 @@ def _bin_of(score: float, edges) -> int:
     return len(edges) + 1
 
 
-def _read_scores():
-    """读两模型分文件：application_id -> 分数（缺失/空值剔除）。"""
-    mlt, wth = {}, {}
-    with open(ROOT / "res/new_mlt_score.csv", encoding="utf-8-sig") as f:
-        r = csv.reader(f)
-        hdr = next(r)
-        aidx, sidx = hdr.index("application_id"), hdr.index(MLT_SCORE_COL)
-        for row in r:
-            if row[sidx]:
-                v = float(row[sidx])
-                if v >= 0:
-                    mlt[row[aidx]] = v
-    with open(ROOT / "res/new_worthiness_score.csv", encoding="utf-8-sig") as f:
-        r = csv.reader(f)
-        hdr = next(r)
-        aidx, sidx = hdr.index("application_id"), hdr.index(WTH_SCORE_COL)
-        for row in r:
-            if row[sidx]:
-                wth[row[aidx]] = float(row[sidx])
-    return mlt, wth
+def _read_scores(ctx: ReportContext):
+    """读两模型分文件：application_id -> 分数（缺失/空值剔除；A 模型 v<0 剔除）。"""
+    def read(score_file, raw_col, drop_negative):
+        out = {}
+        with open(ROOT / ctx.dataset_cfg["data_dir"] / score_file, encoding="utf-8-sig") as f:
+            r = csv.reader(f)
+            hdr = next(r)
+            aidx, sidx = hdr.index("application_id"), hdr.index(raw_col)
+            for row in r:
+                if row[sidx]:
+                    v = float(row[sidx])
+                    if not drop_negative or v >= 0:
+                        out[row[aidx]] = v
+        return out
+
+    a = read(ctx.model_a_cfg["score_file"], ctx.model_a_cfg["raw_score_col"], drop_negative=True)
+    b = read(ctx.model_b_cfg["score_file"], ctx.model_b_cfg["raw_score_col"], drop_negative=False)
+    return a, b
 
 
-def _read_app_info():
+def _read_app_info(ctx: ReportContext):
     """读申请信息：application_id -> (application_month, 4 收入字段, 是否成交)。成交 = status ∈ DEAL_STATUSES（与管线漏斗口径一致）。"""
     out = {}
-    with open(ROOT / "res/new_application_info.csv", encoding="utf-8-sig") as f:
+    with open(ROOT / ctx.dataset_cfg["data_dir"] / ctx.dataset_cfg["application_file"], encoding="utf-8-sig") as f:
         r = csv.reader(f)
         hdr = next(r)
         aidx = hdr.index("application_id")
@@ -1054,13 +1065,13 @@ def _mean(vals):
     return sum(vals) / len(vals)
 
 
-def _income_verify_and_cells(rows):
+def _income_verify_and_cells(rows, ctx: ReportContext):
     """用 Excel 矩阵逐格核对分档，返回 (wb, {(group, mlt_bin, wth_bin): n})。"""
     cells = {}
     for aid, (mbin, wbin, is_train) in rows.items():
         key = (1 if is_train else 0, mbin, wbin)
         cells[key] = cells.get(key, 0) + 1
-    wb = load(CROSS_XLSX)
+    wb = load(ctx.cross_xlsx)
     for sheet, group in [("02_交叉矩阵_Train", 1), ("03_交叉矩阵_OOT", 0)]:
         for r in find_table(wb[sheet], "new_mlt_bin_order"):
             a, b = r["new_mlt_bin_order"], r["new_wth_bin_order"]
@@ -1072,7 +1083,7 @@ def _income_verify_and_cells(rows):
     return wb, cells
 
 
-def income_matrix_stats():
+def income_matrix_stats(ctx: ReportContext):
     """收入 4 字段在 7×7 矩阵格/边际上的平均数（数值来自 res/*.csv 重算，
     分档先与矩阵逐格核对一致）。返回 (all_stats, surplus_pos_stats, deal_stats)：
     all_stats = {(group, kind, idx): {field: mean}}，kind ∈ cell/row/col/all，
@@ -1080,15 +1091,18 @@ def income_matrix_stats():
     surplus_pos_stats 仅 gross_surplus/net_surplus，口径为剔除 <0 样本后的平均数；
     deal_stats 仅 gross_surplus/net_surplus，口径为成交样本（status ∈ DEAL_STATUSES）的平均数
     （后两者 key 结构同 all_stats）。"""
-    mlt, wth = _read_scores()
-    app = _read_app_info()
+    mlt, wth = _read_scores(ctx)
+    app = _read_app_info(ctx)
+    edges_a = load_edges(ctx.xlsx_a)
+    edges_b = load_edges(ctx.xlsx_b)
     common = set(mlt) & set(wth) & set(app)
     rows = {}
     for aid in common:
         m = app[aid][0]
         if m:
-            rows[aid] = (_bin_of(mlt[aid], MLT_EDGES), _bin_of(wth[aid], WTH_EDGES), m <= "2025-10")
-    _income_verify_and_cells(rows)
+            rows[aid] = (_bin_of(mlt[aid], edges_a), _bin_of(wth[aid], edges_b),
+                         m <= ctx.dataset_cfg["train_end_month"])
+    _income_verify_and_cells(rows, ctx)
 
     acc, pos_acc, deal_acc = {}, {}, {}
     for aid, (ma, wa, tr) in rows.items():
@@ -1118,21 +1132,22 @@ def income_matrix_stats():
     return all_stats, pos_stats, deal_stats
 
 
-# ---------- 新客价值模型 y 标签（3M 实付利息）档级统计（数据来自 res/*.csv，非 Excel） ----------
+# ---------- 价值模型 y 标签（3M 实付利息）档级统计（数据来自 res/*.csv，非 Excel） ----------
 
-# 建模标签 y_interest_income_3m 的判定阈值：3 个月实付利息 < 160 元 → y=1（价值较弱）。
-# 判定必须用精确十进制文本（见 worthiness_interest_stats），不能用 float(raw) < 160.0：
+# 建模标签 y_interest_income_3m 的判定阈值（3 个月实付利息 < 阈值元 → y=1，价值较弱）取自
+# 模型 report_meta.y_interest.threshold。判定必须用精确十进制文本，不能用 float(raw) < 阈值：
 # CSV 含 '159.999999999999988' 类文本，float() 会舍入成 160.0 而把 y=1 漏判为 y=0。
-Y1_THRESHOLD = Decimal("160")
 
 
-def _read_wth_interest():
-    """读新客价值模型分与申请信息：application_id -> (score, application_month, raw3m_str)。
+def _read_wth_interest(ctx: ReportContext, role: str):
+    """读价值模型分与申请信息：application_id -> (score, application_month, raw3m_str)。
     分数空值/非数值剔除；月份缺失回退 application_time[:7]。"""
-    with open(ROOT / "res/new_worthiness_score.csv", encoding="utf-8-sig") as f:
+    cfg = ctx.model_a_cfg if role == "a" else ctx.model_b_cfg
+    meta = cfg["report_meta"]
+    with open(ROOT / ctx.dataset_cfg["data_dir"] / cfg["score_file"], encoding="utf-8-sig") as f:
         r = csv.reader(f)
         hdr = next(r)
-        aidx, sidx = hdr.index("application_id"), hdr.index(WTH_SCORE_COL)
+        aidx, sidx = hdr.index("application_id"), hdr.index(cfg["raw_score_col"])
         scores = {}
         for row in r:
             v = row[sidx]
@@ -1142,13 +1157,13 @@ def _read_wth_interest():
                 except ValueError:
                     pass
     out = {}
-    with open(ROOT / "res/new_application_info.csv", encoding="utf-8-sig") as f:
+    with open(ROOT / ctx.dataset_cfg["data_dir"] / ctx.dataset_cfg["application_file"], encoding="utf-8-sig") as f:
         r = csv.reader(f)
         hdr = next(r)
         aidx = hdr.index("application_id")
         midx = hdr.index("application_month")
         tix = hdr.index("application_time")
-        rix = hdr.index("raw_interest_income_3m")
+        rix = hdr.index(meta["y_interest"]["raw_col"])
         for row in r:
             aid = row[aidx]
             if aid not in scores:
@@ -1160,9 +1175,9 @@ def _read_wth_interest():
     return out
 
 
-def worthiness_interest_stats(expect_n):
+def worthiness_interest_stats(ctx: ReportContext, role: str, expect_n):
     """价值标签档级统计（数值来自 res/*.csv 重算）：
-    - 分档：分数按 WTH_EDGES 绝对边界划 7 档（区间规则同分箱口径），Train/OOT 按月份切分；
+    - 分档：分数按 Excel 03 各档右边界划档（区间规则同分箱口径），Train/OOT 按月份切分；
     - 利息：raw_interest_income_3m 非缺失样本（3M 实付利息，建模标签 y_interest_income_3m 的底层金额，
       y=1 ⇔ 利息 <160，两者逐笔一致率已核验 100%）；均值 = 档内全部非缺失利息的平均（含 0 元与冲销负值）；
     - Lift = 档内 y=1 占比 ÷ 该样本组整体 y=1 占比。
@@ -1170,14 +1185,19 @@ def worthiness_interest_stats(expect_n):
     bin_stats[(group, bin_order)] = (n_irr, mean, y1_rate, y1_lift)（group ∈ Train/OOT；无利息样本档为 (0, None, None, None)）；
     group_overall[group] = (n_irr, overall_mean, overall_y1_rate)。
     断言：res 分档计数（全部有分样本）与 expect_n 逐档一致（expect_n 由调用方从 Excel 03 传入），不一致抛 ValueError。"""
-    data = _read_wth_interest()
+    cfg = ctx.model_a_cfg if role == "a" else ctx.model_b_cfg
+    meta = cfg["report_meta"]
+    y_threshold = Decimal(meta["y_interest"]["threshold"])
+    edges = load_edges(ctx.xlsx_a if role == "a" else ctx.xlsx_b)
+    n_bins = len(edges) + 1
+    data = _read_wth_interest(ctx, role)
     by_key = {}
     irr = {}
     for aid, (score, m, raw) in data.items():
         if not m:
             continue
-        g = "Train" if m <= "2025-10" else "OOT"
-        k = (g, _bin_of(score, WTH_EDGES))
+        g = "Train" if m <= ctx.dataset_cfg["train_end_month"] else "OOT"
+        k = (g, _bin_of(score, edges))
         by_key[k] = by_key.get(k, 0) + 1
         if raw:
             try:
@@ -1185,24 +1205,24 @@ def worthiness_interest_stats(expect_n):
             except (ValueError, InvalidOperation):
                 pass
     for g in ("Train", "OOT"):
-        for o in range(1, 8):
+        for o in range(1, n_bins + 1):
             mine = by_key.get((g, o), 0)
             ex = expect_n[(g, o)]
             if mine != ex:
                 raise ValueError(f"价值标签分档与 Excel 03 不一致：{g} 档{o} 重算={mine} Excel={ex}")
     bin_stats, group_overall = {}, {}
     for g in ("Train", "OOT"):
-        vals_all = [v for o in range(1, 8) for v in irr.get((g, o), [])]
+        vals_all = [v for o in range(1, n_bins + 1) for v in irr.get((g, o), [])]
         n_all = len(vals_all)
         mean_all = sum(f for f, _d in vals_all) / n_all if n_all else None
-        y1_all = sum(1 for _f, d in vals_all if d < Y1_THRESHOLD) / n_all if n_all else None
+        y1_all = sum(1 for _f, d in vals_all if d < y_threshold) / n_all if n_all else None
         group_overall[g] = (n_all, mean_all, y1_all)
-        for o in range(1, 8):
+        for o in range(1, n_bins + 1):
             vals = irr.get((g, o), [])
             n = len(vals)
             if n:
                 mean = sum(f for f, _d in vals) / n
-                y1r = sum(1 for _f, d in vals if d < Y1_THRESHOLD) / n
+                y1r = sum(1 for _f, d in vals if d < y_threshold) / n
                 bin_stats[(g, o)] = (n, mean, y1r, y1r / y1_all)
             else:
                 bin_stats[(g, o)] = (0, None, None, None)
@@ -1211,8 +1231,8 @@ def worthiness_interest_stats(expect_n):
 
 # ---------- 交叉报告渲染 ----------
 
-def render_cross():
-    wb = load(CROSS_XLSX)
+def render_cross(ctx: ReportContext):
+    wb = load(ctx.cross_xlsx)
     ov = overview(wb["01_总览"])
     pearson = float(ov[("相关性", "模型分 Pearson 相关（Train）")])
     spearman = float(ov[("相关性", "模型分 Spearman 相关（Train）")])
@@ -1221,9 +1241,9 @@ def render_cross():
     plan_b = ov[("分档方案", "new_wth 最终方案")]
     n_all = int(ov[("样本", "双分样本量")])
     train_oot = ov[("样本", "Train / OOT 样本量")]
-    n_apply = count_csv_rows(ROOT / "res" / "new_sample.csv")
-    n_miss_a = int(overview(load(MLT_XLSX)["01_总览"])[("样本", "模型分缺失量")])
-    n_miss_b = int(overview(load(WTH_XLSX)["01_总览"])[("样本", "模型分缺失量")])
+    n_apply = count_csv_rows(ROOT / ctx.dataset_cfg["data_dir"] / ctx.dataset_cfg["sample_file"])
+    n_miss_a = int(overview(load(ctx.xlsx_a)["01_总览"])[("样本", "模型分缺失量")])
+    n_miss_b = int(overview(load(ctx.xlsx_b)["01_总览"])[("样本", "模型分缺失量")])
 
     mtr = find_table(wb["02_交叉矩阵_Train"], "new_mlt_bin_order")
     moo = find_table(wb["03_交叉矩阵_OOT"], "new_mlt_bin_order")
@@ -1332,7 +1352,7 @@ def render_cross():
             A.append("")
         return "\n".join(A)
 
-    income_stats, surplus_pos_stats, deal_stats = income_matrix_stats()
+    income_stats, surplus_pos_stats, deal_stats = income_matrix_stats(ctx)
     train_matrix_md = matrix_md(mtr, "Train", income_stats, surplus_pos_stats, deal_stats)
     oot_matrix_md = matrix_md(moo, "OOT", income_stats, surplus_pos_stats, deal_stats)
 
@@ -1355,7 +1375,7 @@ def render_cross():
     L = []
     B = L.append
     B("# 两模型交叉效果评估报告（新客 mlt × 新客价值模型）\n")
-    B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{CROSS_XLSX.name}`（matrix）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
+    B(f"> 本报告评估新客 mlt 主风险模型分（`score_new_mlt`）与新客价值模型分（`score_new_worthiness`）交叉使用的效果，由 `scr/_gen_new_reports.py` 从 `{ctx.cross_xlsx.name}`（matrix）读取数值生成（Excel 数值与 Excel 逐项一致；三章矩阵内收入 4 指标 total_income/total_expenses/gross_surplus/net_surplus 平均数由 `res/new_application_info.csv` 重算（gross_surplus/net_surplus 另附剔除 <0 样本后与成交样本两版口径，成交 = status 属 Active_Account/Closed/Blocked，同漏斗定义），分档与矩阵逐格核对一致），与 Excel 逐项一致。两模型均按各自已评审的 7 档最终分档（高分高风险方向）参与分析（方案见附录）。")
     B(">")
     B(f"> 分析样本为同时存在两个模型分的完成申请 {num(n_all)} 笔（占 {num(n_apply)} 笔完成申请的 {pct(n_all/n_apply)}），按 Train（2024-01—2025-10）/ OOT（2025-11—2026-05）切分，OOT 仅用于验证。两模型分数缺失口径：mlt 缺失 {num(n_miss_a)} 笔（{pct(n_miss_a/n_apply)}，含无银行交易数据人群的 −1.0 兜底分置空，2026-09-01 用户确认）、价值模型缺失 {num(n_miss_b)} 笔（{pct(n_miss_b/n_apply)}，无银行交易数据人群），双分样本即两模型分数交集。")
     B(">")
@@ -1518,48 +1538,9 @@ def main(argv=None) -> None:
             "生成器参数化改造进行中：当前仅支持默认 new 数据集笔数口径渲染"
             "（--dataset/--model-a/--model-b/--metric/--out-dir 将在阶段 5 后启用）")
     ctx = build_context("new", "new_mlt", "new_worthiness", date=args.date, md_dir=md_dir)
-    render_single_model(
-        "new_worthiness",
-        ctx.xlsx_b,
-        DOCS / "分箱_新客_价值_笔数.md",
-        "价值模型",
-        "价值模型",
-        "score_new_worthiness",
-        "score_new_worthiness_final_bin",
-        "aus_new_worthiness_bid_3rdmodel_v1_0_20260429",
-        "6.50% → 39.26%",
-        "A",
-        "C",
-        "（均为无银行交易数据人群，与老客价值模型缺失口径一致，2026-09-01 用户确认）",
-        "手动指定（模型配置 final_bin_ranges，2026-09-01 用户确认）：自动合箱在该口径下选中 6 档 [(1,1),(2,3),(4,4),(5,9),(10,19),(20,20)]（Train 主指标与全指标倒挂 0 处、箱级约束违规 2 项）；经评审改为手动 7 档，将 (10,19) 拆为 (10,12)+(13,16) 并与 (17,20) 合并，消除 7/8 档候选残留的 B20 单箱倒挂——校验结果 Train 主指标倒挂 0 处、极端边界跨越 1 处（边界 19，经用户确认）、箱级约束违规 1 项（C 档占比 4.9998% 略低于中间箱 5% 下限，与自动 6 档方案同性质），A/B/C 三档边界与阈值不受影响。",
-        manual=True,
-        value_semantics=True,
-        dist_note="自动 6 档方案的 E 档（B10–B19）50.00% 超限更严重且无可行拆分点；最终手动 7 档方案已按用户确认采用（详见三（四））",
-        steps_note="第 1 步为小箱清理（合并 B18+B19）；第 2–12 步为档位压缩（19 档 → 8 档），主指标倒挂由初始 7 处降至 1 处、箱级约束违规由初始 10 项降至 2 项；第 13–14 步为候选生成，产出 7 档与 6 档候选。自动合箱全过程未跨越极端箱边界（最终手动方案的边界 19 跨越另见三（二））。7/8 档候选残留 1 处主指标倒挂（该结构均含最坏极端箱 B20 单箱，见候选表 ranges 列）、6 档候选无倒挂（详见三（四））；最终方案按用户确认的手动 7 档执行，将 (10,19) 拆为 (10,12)+(13,16) 并与 (17,20) 合并，消除 B20 单箱倒挂（详见三（二））。",
-        cand_note="该口径下自动合箱的 6–8 档候选均未完全满足硬约束（7/8 档候选主指标倒挂 1 处、6 档候选无倒挂；箱级约束违规 1–2 项，含 C 档占比 4.9998% 略低于中间箱 5% 下限），自动选中综合得分最高的 6 档方案（倒挂 0 处、违规 2 项）。经评审改为手动 7 档方案（模型配置 final_bin_ranges）：将 (10,19) 拆为 (10,12)+(13,16) 并与 (17,20) 合并，消除 B20 单箱倒挂、违规降至 1 项（C 档同性质，2026-09-01 用户确认，详见三（二））。",
-        include_y_cols=True,
-    )
-    render_single_model(
-        "new_mlt",
-        ctx.xlsx_a,
-        DOCS / "分箱_新客_mlt_笔数.md",
-        "mlt 主风险模型",
-        "mlt 主风险模型",
-        "score_new_mlt",
-        "score_new_mlt_final_bin",
-        "aus_new_risk_bid_3rdmodel_v1_0_20251201",
-        "4.34% → 35.65%",
-        "B",
-        "C",
-        "（4,588 笔为文件本身缺失，其余 37,987 笔为无银行交易数据人群的 −1.0 兜底分、按缺失分置空处理，2026-09-01 用户确认）",
-        "自动合箱：小箱清理 → 单调合并 → 档位压缩 → 候选生成，最终选中 7 档方案（详见三（二））。",
-        manual=False,
-        value_semantics=False,
-        dist_note="分布整形拆分后可得到合规子箱（5.00% / 20.00%），但合回 7 档的唯一不超限合并 (1,1)+(2,4) 跨越极端箱边界 B01（默认禁止），其余相邻对合并后占比均重新超限，整形失败、原候选保留（详见三（四））",
-        steps_note="前 6 步为小箱清理：初始 20 箱的 6 个单箱硬约束违反全部消除，主指标倒挂由 8 处降至 3 处；第 7–8 步为单调合并，消除全部剩余倒挂（降至 0）；第 9–12 步为档位压缩，将档位压缩至上限 8 档；第 13–14 步为候选生成，产出 7 档与 6 档候选。全过程未跨越极端箱边界。第 13 步生成的 7 档方案中 F 档（初始箱 15–19）Train 占比 25.00%，超过 21% 的人数分布上限：分布整形拆分为 (15,15) 与 (16,19)（5.00% / 20.00% 均不超限）后，合回 7 档的唯一不超限合并 (1,1)+(2,4)（20.00%）跨越极端箱边界 1（默认禁止），其余相邻对合并后占比均重新超限（35% / 30% / 30% / 25% / 25%），整形失败、原候选保留，属该口径下的合法结果（详见三（四））。",
-        cand_note="三个 6–8 档候选均满足硬约束。自动选中的 7 档方案综合得分最高：IV 保留率 0.9661 介于 8 档（0.9728）与 6 档（0.9249）之间，档位数量最接近目标 7 档；8 档方案信息保留更高但档位复杂度更高，6 档方案信息损失最大。F 档（初始箱 15–19）Train 占比 25.00% 超过 21% 的人数分布上限，分布整形无可行回并方案、原候选保留（见三（三））。",
-    )
-    render_cross()
+    render_single_model(ctx, "b")
+    render_single_model(ctx, "a")
+    render_cross(ctx)
     print("全部生成完成。")
 
 
