@@ -19,12 +19,13 @@ res/        # 输入数据（gitignored）：用户把 CSV 放这里，文件名
             #   命名前缀约定：老客 old_*、新客 new_*，新数据文件不要与既有文件重名
 out/        # 输出 Excel 与临时文件（gitignored）
 configs/    # datasets.py（样本集）、models.py（模型）——扩展点
-pipeline/   # 核心管线：settings（常量层）/ data_loading / risk_metrics / binning_cnt /
+pipeline/   # 核心管线：settings（常量层）/ common / data_loading / risk_metrics / binning_cnt /
             #   strategy / monthly / reporting / orchestration / bin_amt / cross_analysis
 scripts/    # 入口：bin_model.py、cross_models.py、check_data.py + 4 个快捷壳
 docs/       # 全部报告 md 与参考文档
-scr/        # 数据准备与核对工具
+scr/        # 数据准备、报告生成与核对工具
 tests/      # 单元测试（19 例）
+单变量分析/ # 拒付规则（BR05）策略迭代与收益/损失回测文档（dishonour_rule_report + BR05_gain_loss_analysis）
 ```
 
 标准输入三件套（以老客为例，见 configs/datasets.py）：
@@ -65,11 +66,11 @@ tests/      # 单元测试（19 例）
 
 | 报告（docs/） | 数值锚 | 维护方式 |
 | --- | --- | --- |
-| 分箱方法论与结果说明报告（mlt 笔数口径 / mlt 金额口径 / 价值模型笔数口径）.md | 老客单模型 Excel（页头锚定日期版本） | 手工维护；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py` / `_verify_report_sync_mlt_amt.py` 兜底核对 |
-| 两模型交叉效果评估报告（mlt × 价值模型）.md | 老客交叉 Excel + res/old_*.csv 重算 | 手工维护；章三收入/自动审批矩阵逐格独立核对 |
-| 分箱方法论与结果说明报告（新客mlt笔数口径 / 新客价值模型笔数口径）.md | binning_new_*_strategy_report | `scr/_gen_new_reports.py` 生成（改文案改生成器，重跑后 git diff 仅目标行） |
-| 两模型交叉效果评估报告（新客mlt × 新客价值模型）.md | binning_new_cross_strategy_report | 同上 |
-| 四类客群矩阵（新客mlt × 新客价值模型）.md | 交叉 Excel 02/03/06 + res/new_* | `scr/_quadrant_metrics.py` 重算核对（Excel 逐格 + md 数值逐项） |
+| 分箱_老客_mlt_笔数.md / 分箱_老客_mlt_金额.md / 分箱_老客_价值_笔数.md | 老客单模型 Excel（页头锚定日期版本） | 手工维护；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py` / `_verify_report_sync_mlt_amt.py` 兜底核对 |
+| 交叉_老客_mlt_价值.md | 老客交叉 Excel + res/old_*.csv 重算 | 手工维护；章三收入/自动审批矩阵逐格独立核对 |
+| 分箱_新客_mlt_笔数.md / 分箱_新客_价值_笔数.md | binning_new_*_strategy_report | `scr/_gen_new_reports.py` 生成（改文案改生成器，重跑后 git diff 仅目标行） |
+| 交叉_新客_mlt_价值.md | binning_new_cross_strategy_report | 同上 |
+| 四象限_新客_mlt_价值.md | 交叉 Excel 02/03/06 + res/new_* | `scr/_quadrant_metrics.py` 重算核对（Excel 逐格 + md 数值逐项） |
 
 口径提醒：交叉报告（老/新客）收入矩阵为**平均数**三口径；四类客群矩阵收入/盈余为**中位数**口径，跨文档比对注意区分。
 

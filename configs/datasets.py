@@ -35,7 +35,7 @@ DATASETS = {
         "train_end_month": "2025-10",
         "oot_start_month": "2025-11",
         "incomplete_statuses": ["0.Incomplete", "1.In Progress"],
-        "value_semantics": "新客价值模型口径：分数越低价值越高（见 docs/新客价值模型效果评估文档_0520.html）",
+        "value_semantics": "新客价值模型口径：分数越低价值越高（见 docs/价值评估_新客_0520.html）",
     },
 }
 

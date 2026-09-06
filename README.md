@@ -60,12 +60,13 @@
 项目目录/
 ├── .venv/           # Python 3.11 虚拟环境（解释器 .venv/Scripts/python.exe）
 ├── configs/         # 数据集与模型注册表（datasets.py / models.py）
-├── pipeline/        # 核心管线（settings / data_loading / risk_metrics / binning_cnt /
+├── pipeline/        # 核心管线（settings / common / data_loading / risk_metrics / binning_cnt /
 │                    #   strategy / monthly / reporting / orchestration / bin_amt / cross_analysis）
 ├── scripts/         # 入口脚本（bin_model.py / cross_models.py / check_data.py + 快捷壳）
 ├── docs/            # 全部报告 md 与参考文档（报告清单见第十一节）
 ├── scr/             # 数据准备、报告生成与核对工具（_gen_new_reports.py / _quadrant_metrics.py 等）
 ├── tests/           # 单元测试（19 例）
+├── 单变量分析/      # 拒付规则（BR05）策略迭代与收益/损失回测文档（dishonour_rule_report + BR05_gain_loss_analysis）
 ├── res/             # 输入数据（gitignored）：老客 old_* 与 新客 new_* 同构三件套
 │   ├── old_sample.csv / old_application_info.csv
 │   ├── old_mlt_score.csv / old_worthiness_score.csv     # 老客两模型分
@@ -99,7 +100,7 @@
 .venv/Scripts/python.exe scripts/bin_model.py --dataset new --model mlt --metric cnt   # 新客样本集同理
 ```
 
-脚本运行完成后会在 `out/` 输出当日日期的 Excel（`binning_strategy_report_YYYYMMDD.xlsx` / `binning_amt_strategy_report_YYYYMMDD.xlsx` / `binning_worthiness_strategy_report_YYYYMMDD.xlsx` / `binning_cross_strategy_report_YYYYMMDD.xlsx`，交叉含新客 `binning_new_cross_strategy_report_*`），并在 `docs/` 对应报告 md 的页头登记数值锚。文件名中的日期为运行当天。管线运行只输出 Excel（日志走控制台，Windows 下可能 GBK 乱码、不影响结果）；`check_data.py` 额外在 `out/` 写检查报告 txt（见 CLAUDE.md 2.3）。
+脚本运行完成后会在 `out/` 输出当日日期的 Excel（`binning_strategy_report_YYYYMMDD.xlsx` / `binning_amt_strategy_report_YYYYMMDD.xlsx` / `binning_worthiness_strategy_report_YYYYMMDD.xlsx` / `binning_cross_strategy_report_YYYYMMDD.xlsx`；新客为 `binning_new_mlt_strategy_report_*` / `binning_new_worthiness_strategy_report_*` / 交叉 `binning_new_cross_strategy_report_*`），并在 `docs/` 对应报告 md 的页头登记数值锚。文件名中的日期为运行当天。管线运行只输出 Excel（日志走控制台，Windows 下可能 GBK 乱码、不影响结果）；`check_data.py` 额外在 `out/` 写检查报告 txt（见 CLAUDE.md 2.3）。
 
 ### 4. 输入文件及作用
 
@@ -1362,7 +1363,7 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 out/binning_amt_strategy_report_YYYYMMDD.xlsx
 ```
 
-报告文档为 `分箱方法论与结果说明报告（mlt 金额口径）.md`，与其 Excel 的数值一致性由 `scr/_verify_report_sync_mlt_amt.py` 核对（重跑后运行一次即可）。
+报告文档为 `分箱_老客_mlt_金额.md`，与其 Excel 的数值一致性由 `scr/_verify_report_sync_mlt_amt.py` 核对（重跑后运行一次即可）。
 
 ### 2. 混合口径设计
 
@@ -1394,7 +1395,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 .venv/Scripts/python.exe scripts/bin_worthiness_cnt.py
 ```
 
-输出 `out/binning_worthiness_strategy_report_YYYYMMDD.xlsx`；报告文档为 `分箱方法论与结果说明报告（价值模型笔数口径）.md`。注意：价值模型分覆盖 306,149 笔（93.32%），缺失 21,914 笔均为无银行交易数据的申请（按拒绝处理）；同一套风险约束下其通过率明显低于 mlt（自动通过 20.00% / 总接纳 40.00%），区分能力与月度稳定性弱于 mlt，详见其报告。
+输出 `out/binning_worthiness_strategy_report_YYYYMMDD.xlsx`；报告文档为 `分箱_老客_价值_笔数.md`。注意：价值模型分覆盖 306,149 笔（93.32%），缺失 21,914 笔均为无银行交易数据的申请（按拒绝处理）；同一套风险约束下其通过率明显低于 mlt（自动通过 20.00% / 总接纳 40.00%），区分能力与月度稳定性弱于 mlt，详见其报告。
 
 ### 2. 两模型交叉分析（入口 scripts/cross_mlt_wth.py）
 
@@ -1404,9 +1405,9 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 .venv/Scripts/python.exe scripts/cross_mlt_wth.py
 ```
 
-输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `两模型交叉效果评估报告（mlt × 价值模型）.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），数值由 `res/old_application_info.csv` 重算并与 Excel 逐格核对。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
+输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `交叉_老客_mlt_价值.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），数值由 `res/old_application_info.csv` 重算并与 Excel 逐格核对。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
 
-新客（`new` 数据集）同构交叉输出 `binning_new_cross_strategy_report_YYYYMMDD.xlsx`，报告为 `两模型交叉效果评估报告（新客mlt × 新客价值模型）.md`；其四象限客群画像见 `四类客群矩阵（新客mlt × 新客价值模型）.md`（收入/盈余为中位数口径，与交叉报告平均数口径区分，两文档对比时注意）。
+新客（`new` 数据集）同构交叉输出 `binning_new_cross_strategy_report_YYYYMMDD.xlsx`，报告为 `交叉_新客_mlt_价值.md`；其四象限客群画像见 `四象限_新客_mlt_价值.md`（收入/盈余为中位数口径，与交叉报告平均数口径区分，两文档对比时注意）。
 
 ---
 
@@ -1456,15 +1457,15 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 | 报告（docs/） | 数值来源 Excel（out/，日期=重跑当天，md 页头锚定具体版本） | 维护 / 核对方式 |
 | --- | --- | --- |
-| 分箱方法论与结果说明报告（mlt 笔数口径）.md | `binning_strategy_report_*.xlsx`（6 sheets） | 老客手工维护（AI 编辑，数值 openpyxl 读 Excel）；`scr/_verify_report_sync_mlt_cnt.py` 兜底 |
-| 分箱方法论与结果说明报告（mlt 金额口径）.md | `binning_amt_strategy_report_*.xlsx` | 同上；`scr/_verify_report_sync_mlt_amt.py` 兜底 |
-| 分箱方法论与结果说明报告（价值模型笔数口径）.md | `binning_worthiness_strategy_report_*.xlsx` | 同上（重锚新 Excel 前先逐格零漂移比较两版） |
-| 两模型交叉效果评估报告（mlt × 价值模型）.md | `binning_cross_strategy_report_*.xlsx`（20260904 起 02/03 含自动审批率列） | 章三收入/自动审批矩阵数值 res 重算或读 Excel，逐格独立核对 |
-| 分箱方法论与结果说明报告（新客mlt笔数口径）.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（重跑新客管线后重跑） |
-| 分箱方法论与结果说明报告（新客价值模型笔数口径）.md | `binning_new_worthiness_strategy_report_*.xlsx` | 同上 |
-| 两模型交叉效果评估报告（新客mlt × 新客价值模型）.md | `binning_new_cross_strategy_report_*.xlsx` | 同上 |
-| 四类客群矩阵（新客mlt × 新客价值模型）.md | 交叉 Excel 02/03/06 + `res/new_*` | `scr/_quadrant_metrics.py` 重算并逐项核对（Excel 逐格 + md 数值） |
-| 新客价值模型效果评估文档_0520.html | —（外部参考文档，价值标签口径引用） | 不改 |
+| 分箱_老客_mlt_笔数.md | `binning_strategy_report_*.xlsx`（6 sheets） | 老客手工维护（AI 编辑，数值 openpyxl 读 Excel）；`scr/_verify_report_sync_mlt_cnt.py` 兜底 |
+| 分箱_老客_mlt_金额.md | `binning_amt_strategy_report_*.xlsx` | 同上；`scr/_verify_report_sync_mlt_amt.py` 兜底 |
+| 分箱_老客_价值_笔数.md | `binning_worthiness_strategy_report_*.xlsx` | 同上（重锚新 Excel 前先逐格零漂移比较两版） |
+| 交叉_老客_mlt_价值.md | `binning_cross_strategy_report_*.xlsx`（20260904 起 02/03 含自动审批率列） | 章三收入/自动审批矩阵数值 res 重算或读 Excel，逐格独立核对 |
+| 分箱_新客_mlt_笔数.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（重跑新客管线后重跑） |
+| 分箱_新客_价值_笔数.md | `binning_new_worthiness_strategy_report_*.xlsx` | 同上 |
+| 交叉_新客_mlt_价值.md | `binning_new_cross_strategy_report_*.xlsx` | 同上 |
+| 四象限_新客_mlt_价值.md | 交叉 Excel 02/03/06 + `res/new_*` | `scr/_quadrant_metrics.py` 重算并逐项核对（Excel 逐格 + md 数值） |
+| 价值评估_新客_0520.html | —（外部参考文档，价值标签口径引用） | 不改 |
 
 
 ## 十二、一句话总结
