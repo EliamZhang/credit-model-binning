@@ -137,12 +137,12 @@ def check_cell(md_cell: str, excel_value, where: str):
 
 def check_pp_cell(md_cell: str, excel_value, where: str):
     global checked
-    m = re.match(r"^(-?\d[\d,]*(?:\.\d+)?)pp$", md_cell)
+    m = re.match(r"^[+-]?(\d[\d,]*(?:\.\d+)?)pp$", md_cell)
     if not m:
         return
     checked += 1
     decimals = len(m.group(1).split(".")[1]) if "." in m.group(1) else 0
-    expected = f"{excel_value * 100:.{decimals}f}pp"
+    expected = f"{excel_value * 100:+.{decimals}f}pp"
     if not same(expected, md_cell):
         issues.append(f"{where}: md={md_cell!r} excel={expected!r} (原始 {excel_value})")
 
@@ -171,11 +171,12 @@ def check_bool_cell(md_cell: str, excel_value, where: str):
         issues.append(f"{where}: md={md_cell!r} excel={excel_value}")
 
 
-def check_p_cell(md_cell: str, excel_value, where: str):
+def check_p_cell(md_cell: str, excel_value, where: str, lt: str = "0.001"):
     global checked
-    if md_cell == "<0.001":
+    if md_cell == f"<{lt}":
         checked += 1
-        if not (isinstance(excel_value, (int, float)) and 0 <= excel_value < 0.001):
+        eps = float(lt)
+        if not (isinstance(excel_value, (int, float)) and 0 <= excel_value < eps):
             issues.append(f"{where}: md={md_cell!r} excel={excel_value}")
     else:
         check_cell(md_cell, excel_value, where)
@@ -287,11 +288,30 @@ OVERALL_SRC = {
 }
 
 
+def row_of_by_right_bound(md_right_cell: str, sheet03, sample_group: str):
+    """md 分箱大表按分数上界匹配 Excel 03 行（末档 +∞ → score_right='inf'）。
+    生成器大表首列不再带 A–G 字母（显示 —），上界为全精度原始值、逐行唯一。"""
+    if md_right_cell in ("+∞", "−∞"):
+        right_want = "inf" if md_right_cell == "+∞" else "-inf"
+        return row_of(sheet03, sample_group=sample_group, score_right=right_want)
+    try:
+        ub = float(md_right_cell)
+    except ValueError:
+        return None
+    for er in sheet03["rows"]:
+        if str(er[col_of(sheet03, "sample_group")]) != sample_group:
+            continue
+        sr = er[col_of(sheet03, "score_right")]
+        if isinstance(sr, (int, float)) and float(sr) == ub:
+            return er
+    return None
+
+
 def check_big_table(md_tbl, sheet03, overall, where_prefix: str):
     h = md_tbl["header"]
     for row in md_tbl["rows"]:
         bin_name = row[0]
-        where = f"{where_prefix} {bin_name}"
+        where = f"{where_prefix} 档 {row[h.index('分数上界')]}"
         if bin_name == "整体":
             ov = overall[where_prefix.lower()]
             for md_col, key in OVERALL_SRC.items():
@@ -302,7 +322,7 @@ def check_big_table(md_tbl, sheet03, overall, where_prefix: str):
                     continue
                 check_cell(md_cell, 1.0 if key is None else ov[key], f"{where}.{md_col}")
             continue
-        er = row_of(sheet03, sample_group=where_prefix, score_mlt_final_bin=bin_name)
+        er = row_of_by_right_bound(row[h.index("分数上界")], sheet03, where_prefix)
         if er is None:
             issues.append(f"{where}: Excel 03 中找不到对应行")
             continue
@@ -323,6 +343,8 @@ def check_candidates(md_tbl, ex02, issues):
     cand = [t for t in ex02 if t["header"][0] == "selected"][0]
     rows = [r for r in cand["rows"] if str(r[col_of(cand, "hard_constraints_ok")]).strip() == "True"]
     rows = [r for r in rows if int(r[col_of(cand, "final_bin_count")]) in (6, 7, 8)]
+    stage_word = {"share_balancing": "分布整形", "candidate_reduction": "候选生成",
+                  "granularity_reduction": "档位压缩"}
     for row in md_tbl["rows"]:
         scheme = norm_scheme(row[1])
         er = next((r for r in rows if norm_scheme(str(r[col_of(cand, "ranges")])) == scheme), None)
@@ -334,7 +356,7 @@ def check_candidates(md_tbl, ex02, issues):
         if bins and int(bins.group()) != int(er[col_of(cand, "final_bin_count")]):
             issues.append(f"{where}: 档位数 md={row[0]} excel={er[col_of(cand, 'final_bin_count')]}")
         md_src = row[2]
-        ex_src = "整形" if str(er[col_of(cand, "stage")]) == "share_balancing" else "候选生成"
+        ex_src = stage_word.get(str(er[col_of(cand, "stage")]), str(er[col_of(cand, "stage")]))
         if md_src != ex_src:
             issues.append(f"{where}: 来源 md={md_src!r} excel={ex_src!r}")
         check_cell(row[3], er[col_of(cand, "train_primary_inversion_cnt")], f"{where}.主指标倒挂")
@@ -346,7 +368,7 @@ def check_candidates(md_tbl, ex02, issues):
 
 def check_merge_steps(md_tbl, ex02):
     steps = [t for t in ex02 if t["header"][0] == "step_no"][0]
-    stage_map = {"small_bin_cleanup": "约束修正", "granularity_reduction": "档位压缩",
+    stage_map = {"small_bin_cleanup": "小箱清理", "granularity_reduction": "档位压缩",
                  "candidate_reduction": "候选生成"}
     for row in md_tbl["rows"]:
         step = int(row[0])
@@ -366,7 +388,7 @@ def check_merge_steps(md_tbl, ex02):
             check_cell(m.group(1), er[col_of(steps, "left_primary_rate")], f"{where}.左率")
             check_cell(m.group(2), er[col_of(steps, "right_primary_rate")], f"{where}.右率")
         check_p_cell(row[4], er[col_of(steps, "two_proportion_p_value")], f"{where}.p值")
-        check_cell(row[5], er[col_of(steps, "primary_iv_loss")], f"{where}.IV损失")
+        check_p_cell(row[5], er[col_of(steps, "primary_iv_loss")], f"{where}.IV损失", lt="0.0001")
         if int(row[6]) != 20 - step:
             issues.append(f"{where}: 合并后档位数 md={row[6]} excel={20 - step}")
 
@@ -426,6 +448,7 @@ FUNNEL_RATIO_COLS = {
 def check_funnel(md_cnt, md_ratio, ex04_funnel):
     for md_tbl, colmap in ((md_cnt, FUNNEL_CNT_COLS), (md_ratio, FUNNEL_RATIO_COLS)):
         h = md_tbl["header"]
+        cols = {k: v for k, v in colmap.items() if k in h}  # md 未展示的列（如进件完成率冗余列）不核对
         for row in md_tbl["rows"]:
             sg = row[0]
             er = row_of(ex04_funnel, sample_group=sg)
@@ -433,7 +456,7 @@ def check_funnel(md_cnt, md_ratio, ex04_funnel):
             if er is None:
                 issues.append(f"{where}: Excel 中找不到")
                 continue
-            for md_col, ex_col in colmap.items():
+            for md_col, ex_col in cols.items():
                 check_cell(row[h.index(md_col)], er[col_of(ex04_funnel, ex_col)], f"{where}.{md_col}")
 
 
@@ -443,11 +466,12 @@ def norm_sg(s: str) -> str:
 
 
 def check_threshold_table(md_tbl, sheet03):
-    """md 候选档表（7 行 A-G）对应 03_最终分箱统计：阈值=右边界（末档用分数上限），
-    累计/边际列直接取 cum_* / 单箱 3m30p 率；约束两列是判断文本，无 Excel 字段。"""
+    """md 阈值选择表（候选行 A-G）对应 03_最终分箱统计：阈值=右边界（末档用分数上限），
+    累计/边际列直接取 cum_* / 单箱 3m30p 率；约束两列是判断文本，无 Excel 字段。
+    生成器表结构：候选 | 阈值 | 档位 | 累计通过率 | ...，档位列为 A-G。"""
     h = md_tbl["header"]
     for row in md_tbl["rows"]:
-        bin_name = row[0]
+        bin_name = row[h.index("档位")]
         er = row_of(sheet03, sample_group="Train", score_mlt_final_bin=bin_name)
         where = f"阈值选择 {bin_name}"
         if er is None:
@@ -458,7 +482,7 @@ def check_threshold_table(md_tbl, sheet03):
             thr_val = er[col_of(sheet03, "score_max")]
         else:
             thr_val = sr
-        check_text(row[h.index("候选档")], er[col_of(sheet03, "score_mlt_final_bin")], f"{where}.档位")
+        check_text(bin_name, er[col_of(sheet03, "score_mlt_final_bin")], f"{where}.档位")
         check_cell(row[h.index("阈值")], thr_val, f"{where}.阈值")
         check_cell(row[h.index("累计通过率")], er[col_of(sheet03, "cum_pass_rate")], f"{where}.累计通过率")
         check_cell(row[h.index("累计 1M30+")], er[col_of(sheet03, "cum_1m30p_cnt_bad_rate")], f"{where}.累计1M30+")
@@ -477,12 +501,14 @@ SEGMENT_COLS = {
 }
 
 
-def check_segments(md_tbl, ex04_seg, sample_group: str):
+def check_segments(md_tbl, ex04_seg):
+    """生成器分段流量表为单表（数据集列 train/oot + 分段列），逐行按样本组核对。"""
     h = md_tbl["header"]
     for row in md_tbl["rows"]:
-        decision = row[0]
-        er = row_of(ex04_seg, sample_group=sample_group, decision=decision)
-        where = f"分段流量[{sample_group}] {decision}"
+        sg = norm_sg(row[0])
+        decision = row[1]
+        er = row_of(ex04_seg, sample_group=sg, decision=decision)
+        where = f"分段流量[{sg}] {decision}"
         if er is None:
             issues.append(f"{where}: Excel 中找不到")
             continue
@@ -516,23 +542,21 @@ def check_sensitivity(md_tbl, ex04_sens):
                       f"{where}.边际3M30+")
 
 
-MONO_METRICS = {
-    "1M30+ 笔数倒挂": "1m30p_cnt_bad_rate", "3M30+ 笔数倒挂": "3m30p_cnt_bad_rate",
-    "1M30+ 金额倒挂": "1m30p_amt_bad_rate", "3M30+ 金额倒挂": "3m30p_amt_bad_rate",
-}
-
-
 def check_monotonic(md_tbl, ex05_mono):
+    """生成器单调表为长表：数据集 | 指标（Excel metric 键）| 单调 | 倒挂数 | 倒挂档位。"""
     h = md_tbl["header"]
+    want = {"True": "是", "False": "否"}
     for row in md_tbl["rows"]:
         sg = norm_sg(row[0])
-        for md_col, metric in MONO_METRICS.items():
-            er = row_of(ex05_mono, sample_group=sg, metric=metric)
-            where = f"单调性[{sg}] {md_col}"
-            if er is None:
-                issues.append(f"{where}: Excel 中找不到")
-                continue
-            check_cell(row[h.index(md_col)], er[col_of(ex05_mono, "violation_cnt")], where)
+        metric = row[1]
+        er = row_of(ex05_mono, sample_group=sg, metric=metric)
+        where = f"单调性[{sg}] {metric}"
+        if er is None:
+            issues.append(f"{where}: Excel 中找不到")
+            continue
+        check_cell(row[h.index("倒挂数")], er[col_of(ex05_mono, "violation_cnt")], f"{where}.倒挂数")
+        mono = str(er[col_of(ex05_mono, "is_monotonic_non_decreasing")]).strip()
+        check_text(row[h.index("单调")], want.get(mono, mono), f"{where}.单调")
 
 
 def check_psi(md_tbl, ex05_psi):
@@ -543,7 +567,7 @@ def check_psi(md_tbl, ex05_psi):
             check_cell(row[h.index("PSI 分量")],
                        [r[col_of(ex05_psi, "psi_total")] for r in ex05_psi["rows"]][0], where)
             continue
-        er = row_of(ex05_psi, score_mlt_final_bin=row[0])
+        er = row_of(ex05_psi, final_bin_order=row[0])
         if er is None:
             issues.append(f"{where}: Excel 中找不到")
             continue
@@ -647,20 +671,19 @@ def main():
     check_ci_table(ci_tbls[1], sheet03, "OOT")
 
     funnel = [t for t in ex04 if "actual_apply_cnt" in t["header"]][0]
-    check_funnel(md_tables_with("申请数")[0], md_tables_with("进件完成率")[0], funnel)
+    check_funnel(md_tables_with("申请数")[0], md_tables_with("审批通过率")[0], funnel)
 
-    check_threshold_table(md_tables_with("候选档")[0], sheet03)
+    check_threshold_table(md_tables_with("累计通过率")[0], sheet03)
 
     seg = [t for t in ex04 if t["header"][0] == "sample_group"][0]
     seg_tbls = md_tables_with("分段", "占比")
-    check_segments(seg_tbls[0], seg, "train")
-    check_segments(seg_tbls[1], seg, "oot")
+    check_segments(seg_tbls[0], seg)
 
     sens = [t for t in ex04 if t["header"][0] == "threshold_type"][0]
     check_sensitivity(md_tables_with("阈值类型")[0], sens)
 
     mono = [t for t in ex05 if "is_monotonic_non_decreasing" in t["header"]][0]
-    check_monotonic(md_tables_with("1M30+ 笔数倒挂")[0], mono)
+    check_monotonic(md_tables_with("倒挂数")[0], mono)
 
     psi = [t for t in ex05 if "psi_component" in t["header"]][0]
     check_psi(md_tables_with("PSI 分量")[0], psi)
