@@ -1320,6 +1320,70 @@ def income_matrix_stats(ctx: ReportContext):
     return all_stats, pos_stats, deal_stats
 
 
+def _cross_bin_rows(ctx: ReportContext):
+    """读两模型分与申请信息，按两模型边界与月份切分双分样本。
+    返回 (rows, app)：rows[application_id] = (mlt_bin, wth_bin, is_train)、
+    app 为 _read_app_info() 原样输出。分档计数先与 matrix Excel 逐格核对一致。"""
+    mlt, wth = _read_scores(ctx)
+    app = _read_app_info(ctx)
+    edges_a = load_edges(ctx.xlsx_a)
+    edges_b = load_edges(ctx.xlsx_b)
+    common = set(mlt) & set(wth) & set(app)
+    rows = {}
+    for aid in common:
+        m = app[aid][0]
+        if m:
+            rows[aid] = (_bin_of(mlt[aid], edges_a), _bin_of(wth[aid], edges_b),
+                         m <= ctx.dataset_cfg["train_end_month"])
+    _income_verify_and_cells(rows, ctx)
+    return rows, app
+
+
+def interest_matrix_stats(ctx: ReportContext):
+    """3M 实付利息（raw_interest_income_3m）在 7×7 矩阵格/边际上的统计（数值来自 res/*.csv
+    重算，分档先与矩阵逐格核对一致）。y=1（价值较弱）判定：利息 < report_meta.y_interest.threshold
+    元，必须用 Decimal 文本比较（同价值模型单模型口径）。
+    返回 {(group, kind, idx): {"n": n_irr, "mean": float, "y1_rate": float}}：
+    group ∈ 1/0（Train/OOT），kind ∈ cell/row/col/all，idx ∈ (mlt_bin, wth_bin) / mlt_bin /
+    wth_bin / 0；n = 利息非缺失样本数，mean = 非缺失利息算术平均（含 0 元与冲销负值），
+    y1_rate = 利息 < 阈值的样本占比；无利息观察的键缺失（渲染侧显示 —）。"""
+    cfg_b = ctx.model_b_cfg
+    y = cfg_b["report_meta"]["y_interest"]
+    y_threshold = Decimal(y["threshold"])
+    raw_file = (cfg_b["score_file"] if y.get("raw_col_source", "application_file") == "score_file"
+                else ctx.dataset_cfg["application_file"])
+    rows, _app = _cross_bin_rows(ctx)
+    raw = {}
+    with open(ROOT / ctx.dataset_cfg["data_dir"] / raw_file, encoding="utf-8-sig") as f:
+        r = csv.reader(f)
+        hdr = next(r)
+        aidx = hdr.index("application_id")
+        rix = hdr.index(y["raw_col"])
+        for row in r:
+            raw[row[aidx]] = row[rix]
+    acc = {}
+    for aid, (ma, wa, tr) in rows.items():
+        v = raw.get(aid)
+        if not v or v in ("null", "None"):
+            continue
+        try:
+            fv, dv = float(v), Decimal(v)
+        except (ValueError, InvalidOperation):
+            continue
+        g = 1 if tr else 0
+        for key in [(g, "cell", (ma, wa)), (g, "row", ma), (g, "col", wa), (g, "all", 0)]:
+            acc.setdefault(key, []).append((fv, dv))
+    stats = {}
+    for key, vals in acc.items():
+        n = len(vals)
+        stats[key] = {
+            "n": n,
+            "mean": sum(f for f, _d in vals) / n,
+            "y1_rate": sum(1 for _f, d in vals if d < y_threshold) / n,
+        }
+    return stats
+
+
 # ---------- 价值模型 y 标签（3M 实付利息）档级统计（数据来自 res/*.csv，非 Excel） ----------
 
 # 建模标签 y_interest_income_3m 的判定阈值（3 个月实付利息 < 阈值元 → y=1，价值较弱）取自
@@ -1490,9 +1554,10 @@ def render_cross(ctx: ReportContext):
     bins_b = sorted({r[f"{tag_b}_bin_order"] for r in mtr if isinstance(r[f"{tag_b}_bin_order"], int) and r[f"{tag_b}_bin_order"] > 0})
     bins_n = max(bins_a[-1], bins_b[-1])
 
-    def matrix_md(rows, group, income_stats, pos_stats, deal_stats):
+    def matrix_md(rows, group, income_stats, pos_stats, deal_stats, interest_stats=None):
         """渲染 14 组 Excel 指标矩阵 + 4 组收入指标矩阵为 md 表格。
-        rows 为 dict 列表（含边际与整体行）；income_stats 为 income_matrix_stats() 输出。"""
+        rows 为 dict 列表（含边际与整体行）；income_stats 为 income_matrix_stats() 输出；
+        interest_stats 非 None 时追加 2 张利息标签统计矩阵（interest_matrix_stats() 输出）。"""
         A = []
         label_order = sorted({r[f"{tag_b}_bin_order"] for r in rows if isinstance(r[f"{tag_b}_bin_order"], int) and r[f"{tag_b}_bin_order"] > 0})
         row_order = sorted({r[f"{tag_a}_bin_order"] for r in rows if isinstance(r[f"{tag_a}_bin_order"], int) and r[f"{tag_a}_bin_order"] > 0})
@@ -1576,7 +1641,7 @@ def render_cross(ctx: ReportContext):
             for mo in row_order:
                 cells = [fmt_money(s.get((g, "cell", (mo, wo)), {}).get(fname)) for wo in label_order]
                 T.append(f"| **{chr(64+mo)}** | " + " | ".join(str(c) for c in cells) + f" | {fmt_money(s.get((g, 'row', mo), {}).get(fname))} |")
-            T.append("| **总计（价值边际）** | " + " | ".join(fmt_money(s.get((g, "col", wo), {}).get(fname)) for wo in label_order) + f" | {fmt_money(s.get((g, 'all', 0), {}).get(fname))} |")
+            T.append(f"| **总计（{md_name_b}边际）** | " + " | ".join(fmt_money(s.get((g, "col", wo), {}).get(fname)) for wo in label_order) + f" | {fmt_money(s.get((g, 'all', 0), {}).get(fname))} |")
             return "\n".join(T)
         for fname in INCOME_FIELDS:
             A.append(income_table(f"{fname} 平均数（元）", fname))
@@ -1587,11 +1652,44 @@ def render_cross(ctx: ReportContext):
         for fname in SURPLUS_FIELDS:
             A.append(income_table(f"{fname} 平均数（成交样本，元）", fname, deal_stats))
             A.append("")
+
+        # 利息标签统计 2 张矩阵（均值 + <160 占比 Lift，口径同价值模型单模型章一摘要两列）
+        if interest_stats is not None:
+            overall = interest_stats.get((g, "all", 0)) or {}
+            base_y1 = overall.get("y1_rate")
+
+            def istat_table(title, get_v, fmt):
+                T = [f"**{title}**：", ""]
+                T.append(f"| {tag_a}＼{tag_b} | " + " | ".join(f"{chr(64+o)}" for o in label_order) + f" | **总计（{md_name_a} 边际）** |")
+                T.append("| ---: | " + " | ".join("---:" for _ in label_order) + " | ---: |")
+                def disp(d):
+                    if not d or d.get("n", 0) < 100:
+                        return "—"
+                    v = get_v(d)
+                    return "—" if v is None else fmt(v)
+                for mo in row_order:
+                    cells = [disp(interest_stats.get((g, "cell", (mo, wo)))) for wo in label_order]
+                    T.append(f"| **{chr(64+mo)}** | " + " | ".join(cells) + f" | {disp(interest_stats.get((g, 'row', mo)))} |")
+                T.append(f"| **总计（{md_name_b}边际）** | " + " | ".join(disp(interest_stats.get((g, "col", wo))) for wo in label_order) + f" | {disp(overall)} |")
+                return "\n".join(T)
+
+            A.append(istat_table("3M 实付利息均值（元）", lambda d: d["mean"],
+                                 lambda v: f"{v:,.1f}"))
+            A.append("")
+            if base_y1:
+                A.append(istat_table("3M 实付利息<160 占比 Lift",
+                                     lambda d: d["y1_rate"] / base_y1,
+                                     lambda v: f"{v:.2f}"))
+                A.append("")
+                A.append(f"（<160 占比 Lift 基准：该样本组整体 3M 实付利息 <160 占比 {base_y1*100:.2f}%，即价值建模标签 y=1（价值较弱）占比；Lift = 格内占比 ÷ 基准，整体恒为 1.0000。利息矩阵覆盖样本为成交且有 3 个月利息观察的申请，格与边际利息观察不足 100 显示 —，不解读其均值与占比）")
+            A.append("")
         return "\n".join(A)
 
     income_stats, surplus_pos_stats, deal_stats = income_matrix_stats(ctx)
-    train_matrix_md = matrix_md(mtr, "Train", income_stats, surplus_pos_stats, deal_stats)
-    oot_matrix_md = matrix_md(moo, "OOT", income_stats, surplus_pos_stats, deal_stats)
+    interest_stats = interest_matrix_stats(ctx) if "y_interest" in meta_b else None
+    n_groups = 22 + (2 if interest_stats is not None else 0)
+    train_matrix_md = matrix_md(mtr, "Train", income_stats, surplus_pos_stats, deal_stats, interest_stats)
+    oot_matrix_md = matrix_md(moo, "OOT", income_stats, surplus_pos_stats, deal_stats, interest_stats)
 
     # 策略表
     pol = {r["policy"]: r for r in policy_rows}
@@ -1641,10 +1739,19 @@ def render_cross(ctx: ReportContext):
     B("- **风险指标**：沿用笔数违约口径，1M30+/3M30+ 笔数逾期率为主要观察指标，金额逾期率同步输出；矩阵格的 Lift = 格逾期率 ÷ 该样本组整体逾期率；样本量不足 100 的格风险类指标显示 —。")
     B(f"- **价值语义**：{ds_notes.get('value_note_cross', '')}")
     B("")
-    B("## 三、交叉指标矩阵（22 组 × Train/OOT）\n")
+    B(f"## 三、交叉指标矩阵（{n_groups} 组 × Train/OOT）\n")
     B(f"以 {bins_n}×{bins_n} 矩阵展示全部交叉格（行 = {tag_a} 档、列 = {tag_b} 档），**对角格加粗 = 两模型分到同一等级的同档一致人群**；每张矩阵带**总计行与总计列**：总计行（{md_name_b}边际）= 该{md_name_b}档全部人群的指标值、总计列（{md_name_a} 边际）= 该 {md_name_a} 档全部人群的指标值、右下角 = 样本组整体值。横纵边际与交叉格对照，可直接读出组合分档相对单模型分档的增量。建议阅读顺序：样本量 → 3M30+ 笔数逾期率 → 历史实际审批通过率，再按需查看其余矩阵。风险类矩阵中样本量不足 100 的格显示 —，不解读其风险率。")
     B("")
-    B(f"22 组中 14 组为业务指标（来自 matrix Excel），另 8 张为收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/{app_file}` 重算，分档与矩阵逐格核对一致。")
+    if interest_stats is not None:
+        y_thr = meta_b["y_interest"]["threshold"]
+        interest_desc = (f"；另 2 张为利息标签统计：3M 实付利息均值（元）+ 3M 实付利息<160 占比 Lift"
+                         f"（y=1 ⇔ 3M 实付利息 < {y_thr} 元、即“价值较弱”，与价值模型单模型报告章一摘要"
+                         f"两列同口径，Decimal 文本判定），利息列 `raw_interest_income_3m` 来自 `res/{app_file}` "
+                         f"重算（分档与矩阵逐格核对一致），覆盖样本为成交且有 3 个月利息观察的申请"
+                         f"（均值含 0 元与冲销负值样本），利息观察样本不足 100 的格与边际显示 —")
+    else:
+        interest_desc = ""
+    B(f"{n_groups} 组中 14 组为业务指标（来自 matrix Excel），另 8 张为收入口径矩阵：total_income / total_expenses / gross_surplus / net_surplus 平均数 4 张（全样本）+ gross_surplus / net_surplus 剔除 <0 样本后平均数 2 张（口径：仅保留盈余 ≥ 0 的样本求平均）+ gross_surplus / net_surplus 成交样本平均数 2 张（成交 = status 属 Active_Account/Closed/Blocked，同历史漏斗口径），均来自 `res/{app_file}` 重算，分档与矩阵逐格核对一致{interest_desc}。")
     B("")
     B("**Train**：\n")
     B(train_matrix_md)
