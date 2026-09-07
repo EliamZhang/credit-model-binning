@@ -65,7 +65,7 @@
 ├── scripts/         # 入口脚本（bin_model.py / cross_models.py / check_data.py + 快捷壳）
 ├── docs/            # 全部报告 md 与参考文档（报告清单见第十一节）
 ├── scr/             # 数据准备、报告生成与核对工具（_gen_new_reports.py / _verify_report_sync_*.py 等）
-├── tests/           # 单元测试（19 例）
+├── tests/           # 单元测试（28 例）
 ├── 单变量分析/      # 拒付规则（BR05）策略迭代与收益/损失回测文档（dishonour_rule_report + BR05_gain_loss_analysis）
 ├── res/             # 输入数据（gitignored）：老客 old_* 与 新客 new_* 同构三件套
 │   ├── old_sample.csv / old_application_info.csv
@@ -1381,7 +1381,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 ### 4. 与笔数版核对脚本的差异
 
-`scr/_verify_report_sync_mlt_amt.py` 与 `scr/_verify_report_sync_mlt_cnt.py` 的区别：Excel 源改用 `out/binning_amt_strategy_report_*.xlsx`；阈值选择与敏感性表主展示列为金额率，笔数率降为带 CI 上界的参考列；CI 表表头为 `3M30+ 笔数逾期率 [95% CI 上界]`；月度稳定性断言按金额版实际倒挂月份设定。
+`scr/_verify_report_sync_mlt_amt.py` 与 `scr/_verify_report_sync_mlt_cnt.py` 的区别：Excel 源改用 `out/binning_amt_strategy_report_*.xlsx`；阈值选择与敏感性表主展示列为金额率（12 列金额主列版），笔数率带 CI 上界降为参考列；月度稳定性断言按金额版实际倒挂月份设定（Train 仅 2024-01 与 2025-07 各 1 次、OOT 仅 2026-01 1 次）。两脚本解析生成器输出的同构 md 模板（2026-09-07 起 md 全量改由 `scr/_gen_new_reports.py` 输出）：CI 表统一 7 列双界结构（含 3M30+ 金额逾期率参考列）、单调表为长表（数据集|指标|单调|倒挂数|倒挂档位）、最终分箱大表按分数右边界匹配 Excel 行。
 
 ---
 
@@ -1405,7 +1405,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 .venv/Scripts/python.exe scripts/cross_mlt_wth.py
 ```
 
-输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `交叉_老客_mlt_价值.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），数值由 `res/old_application_info.csv` 重算并与 Excel 逐格核对。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
+输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `交叉_老客_mlt_价值.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），由生成器每次渲染时从 `res/old_application_info.csv` 按同一口径现算并断言分档计数与 Excel 矩阵逐格 n 一致（2026-09-07 起该报告改由 `scr/_gen_new_reports.py` 输出）。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
 
 新客（`new` 数据集）同构交叉输出 `binning_new_cross_strategy_report_YYYYMMDD.xlsx`，报告为 `交叉_新客_mlt_价值.md`。
 
@@ -1441,27 +1441,27 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 ### 4. 新增报告
 
-1. 跑完脚本生成 Excel 后，参照 `docs/` 下既有报告撰写 md（结构与口径保持一致，骨架见 CLAUDE.md 7.1）；
-2. 数值必须与 Excel 一致（openpyxl `data_only=True` 读值或脚本重算，禁止手抄）；撰写/修改后与 Excel 逐项核对；
-3. 老客场景优先复用核对脚本：mlt 笔数 / 金额口径分别为 `scr/_verify_report_sync_mlt_cnt.py`（961 个数值单元）与 `scr/_verify_report_sync_mlt_amt.py`（940 个）；交叉矩阵的收入/自动审批率部分用 pandas 重算或读 Excel 逐格比对（一次性核对脚本放 `out/`，gitignored）；
-4. 新客三份报告与老客不同：数值统一由 `scr/_gen_new_reports.py` 从 Excel/res 生成，**改文案只改生成器再重跑**（重跑后 git diff 应只含目标行，出现多余 diff 说明生成器漂移，停下排查）；
-5. 报告 md 放 `docs/`，命名沿用 `<报告名>（<模型><口径>）.md` 约定。
+1. 跑完管线出 Excel 后，md 统一由生成器输出：`python scr/_gen_new_reports.py --dataset <key> [--metric cnt|amt] [--model-a/--model-b] [--date YYYYMMDD]`。已在 `configs/datasets.py` 登记 `report_meta` 的数据集（laoke / new）默认渲染其全部单模型+交叉组合；新增组合或未登记数据集先 `--out-dir` 临时目录渲染评审，数值确认后再放 `docs/`（防覆盖护栏）；
+2. 数值必须与 Excel 一致：生成器从 Excel / res 现算（openpyxl 读值 + 内建断言），**禁止手抄**；
+3. 老客场景复核优先复用核对脚本（已适配生成器输出的同构表结构）：mlt 笔数 / 金额口径分别为 `scr/_verify_report_sync_mlt_cnt.py`（966 个数值单元）与 `scr/_verify_report_sync_mlt_amt.py`（991 个）；价值 / 交叉数值由生成器内建断言与 CLAUDE.md 第 8 节冻结基准保证；
+4. 结构与文案改动只改 `scr/_gen_new_reports.py` 再重跑：重跑后 git diff 应只含目标行，出现多余 diff 说明生成器漂移，停下排查；
+5. 报告 md 放 `docs/`，文件名由生成器按配置推导（`分箱_{数据集}_{md_name}_笔数.md` / `_金额.md` / `交叉_..._..._md`），不改名、不手改。
 
 ### 5. 修改管线逻辑时的纪律
 
 - 函数级改动只发生在 `pipeline/` 对应模块；
-- 任何改动后必须跑：`python -m unittest discover tests`（19 例全绿）；
-- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（961 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（940 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py` 并核对 git diff。
+- 任何改动后必须跑：`python -m unittest discover tests`（28 例全绿）；
+- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（966 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（991 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py`（7 份 md 全部由生成器维护）并核对 git diff 仅目标行。
 
 ### 6. docs/ 报告清单（数值锚与维护方式）
 
 | 报告（docs/） | 数值来源 Excel（out/，日期=重跑当天，md 页头锚定具体版本） | 维护 / 核对方式 |
 | --- | --- | --- |
-| 分箱_老客_mlt_笔数.md | `binning_strategy_report_*.xlsx`（6 sheets） | 老客手工维护（AI 编辑，数值 openpyxl 读 Excel）；`scr/_verify_report_sync_mlt_cnt.py` 兜底 |
-| 分箱_老客_mlt_金额.md | `binning_amt_strategy_report_*.xlsx` | 同上；`scr/_verify_report_sync_mlt_amt.py` 兜底 |
-| 分箱_老客_价值_笔数.md | `binning_worthiness_strategy_report_*.xlsx` | 同上（重锚新 Excel 前先逐格零漂移比较两版） |
-| 交叉_老客_mlt_价值.md | `binning_cross_strategy_report_*.xlsx`（20260904 起 02/03 含自动审批率列） | 章三收入/自动审批矩阵数值 res 重算或读 Excel，逐格独立核对 |
-| 分箱_新客_mlt_笔数.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（重跑新客管线后重跑） |
+| 分箱_老客_mlt_笔数.md | `binning_strategy_report_*.xlsx`（6 sheets） | 生成器输出（改文案改生成器重跑）+ `scr/_verify_report_sync_mlt_cnt.py` 复核（966 单元） |
+| 分箱_老客_mlt_金额.md | `binning_amt_strategy_report_*.xlsx` | 同上（amt 分支，991 单元） |
+| 分箱_老客_价值_笔数.md | `binning_worthiness_strategy_report_*.xlsx` | 同上（生成器内建断言：价值标签分档计数 vs Excel 03 逐档 n 一致） |
+| 交叉_老客_mlt_价值.md | `binning_cross_strategy_report_*.xlsx`（20260904 起 02/03 含自动审批率列） | 同上（生成器内建断言：收入/自动审批矩阵 res 重算，分档计数 vs Excel 矩阵逐格 n） |
+| 分箱_新客_mlt_笔数.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（管线重跑后重跑，结构与老客同模板） |
 | 分箱_新客_价值_笔数.md | `binning_new_worthiness_strategy_report_*.xlsx` | 同上 |
 | 交叉_新客_mlt_价值.md | `binning_new_cross_strategy_report_*.xlsx` | 同上 |
 | 价值评估_新客_0520.html | —（外部参考文档，价值标签口径引用） | 不改 |

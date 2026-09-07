@@ -24,7 +24,7 @@ pipeline/   # 核心管线：settings（常量层）/ common / data_loading / ri
 scripts/    # 入口：bin_model.py、cross_models.py、check_data.py + 4 个快捷壳
 docs/       # 全部报告 md 与参考文档
 scr/        # 数据准备、报告生成与核对工具
-tests/      # 单元测试（19 例）
+tests/      # 单元测试（28 例）
 单变量分析/ # 拒付规则（BR05）策略迭代与收益/损失回测文档（dishonour_rule_report + BR05_gain_loss_analysis）
 ```
 
@@ -66,9 +66,9 @@ tests/      # 单元测试（19 例）
 
 | 报告（docs/） | 数值锚 | 维护方式 |
 | --- | --- | --- |
-| 分箱_老客_mlt_笔数.md / 分箱_老客_mlt_金额.md / 分箱_老客_价值_笔数.md | 老客单模型 Excel（页头锚定日期版本） | 手工维护；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py` / `_verify_report_sync_mlt_amt.py` 兜底核对 |
-| 交叉_老客_mlt_价值.md | 老客交叉 Excel + res/old_*.csv 重算 | 手工维护；章三收入/自动审批矩阵逐格独立核对 |
-| 分箱_新客_mlt_笔数.md / 分箱_新客_价值_笔数.md | binning_new_*_strategy_report | `scr/_gen_new_reports.py` 生成（改文案改生成器，重跑后 git diff 仅目标行） |
+| 分箱_老客_mlt_笔数.md / 分箱_老客_mlt_金额.md / 分箱_老客_价值_笔数.md | 老客单模型 Excel（页头锚定日期版本） | `scr/_gen_new_reports.py` 生成（2026-09-07 起由手工迁移至生成器，改文案改生成器重跑）；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py`（966 单元）/ `_verify_report_sync_mlt_amt.py`（991 单元）复核 |
+| 交叉_老客_mlt_价值.md | 老客交叉 Excel + res/old_*.csv 重算 | 同上（收入/自动审批矩阵由生成器内建断言每次渲染现算核对） |
+| 分箱_新客_mlt_笔数.md / 分箱_新客_价值_笔数.md | binning_new_*_strategy_report | 同上（模板与老客同构，生成器内建断言含新客分档边界） |
 | 交叉_新客_mlt_价值.md | binning_new_cross_strategy_report | 同上 |
 
 口径提醒：交叉报告（老/新客）收入矩阵为**平均数**三口径。
@@ -113,9 +113,12 @@ python scripts/cross_mlt_wth.py   # 快捷壳（matrix）
 # 测试与核对
 python -m unittest discover tests
 python scripts/check_data.py --dataset <d> --model <m>   # 新数据质量检查（2.3 节协议）
-python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 后必跑
-python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 后必跑
-python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生成三份新客报告（数值从 Excel 读）
+python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 或改老客笔数 md 后必跑（966 单元）
+python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 或改老客金额 md 后必跑（991 单元）
+python scr/_gen_new_reports.py                          # 报告生成器：渲染 --dataset 登记的全部组合
+                                                        #   （默认 new；老客加 --dataset laoke，两者覆盖 7 份 md）
+                                                        #   [--metric cnt|amt] [--date YYYYMMDD] [--out-dir]
+                                                        #   数值从 Excel/res 现算；跑管线/改模板文案后重跑
 ```
 
 输出文件名规则：`out/<model.report_prefix>_YYYYMMDD.xlsx`；交叉用 `REPORT_PREFIXES`（scripts/cross_models.py）登记的历史前缀，新组合默认 `binning_cross_<a>_<b>_strategy_report`。
@@ -128,7 +131,7 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 4. **写配置**：在 configs/datasets.py 复制一份（参照 new 模板）填 data_dir/sample_file/application_file/train_end_month/oot_start_month/incomplete_statuses；
 5. **验方向**：检查脚本已含十分位方向验证；价值类模型把"低分=高价值"语义记入 value_semantics；
 6. **试跑**：`python scripts/bin_model.py --dataset <key> --model <model> --metric cnt`，检查日志（样本量、月份切分、初始箱数、缺失量）与 Excel 01_总览；
-7. **写报告**：参照第 7.1 节规范在 docs/ 写 md，数值一律从 Excel 取。
+7. **登记并生成报告**：在 datasets.py/models.py 对应配置补 report_meta（报告名/md 名/单模型与交叉清单）与 report_notes（本次运行的叙事事实），跑 `python scr/_gen_new_reports.py --dataset <key>`（未登记组合先 `--out-dir` 临时目录评审）——md 结构与格式按第 7.1 节模板，数值一律从 Excel/res 现算（生成器内建断言核对）。
 
 ## 5. 新增模型操作步骤
 
@@ -137,7 +140,7 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 3. **跑检查**：`python scripts/check_data.py --dataset <d> --model <m>`（分数文件到位后立即跑），按 2.3 节协议处理 BLOCK/WARN；
 4. **写配置**：在 configs/models.py 复制一份（参照 mlt），填 score_file/raw_score_col/score_col/initial_bin_col/final_bin_col/high_score_high_risk/strategy_config/report_prefix/cross_tag/display_short；列名保持唯一（不同模型不要共用 score_col）；
 5. **验方向**：检查脚本的十分位方向验证结果为准，不一致要停下来问用户；
-6. **跑分箱**：`python scripts/bin_model.py --dataset <d> --model <m> --metric cnt`；评审方案与阈值后把最终方案记入模型配置注释（供交叉分析 `_current_thresholds` 登记）；
+6. **跑分箱**：`python scripts/bin_model.py --dataset <d> --model <m> --metric cnt`；评审方案与阈值后把最终方案记入模型配置注释（供交叉分析 `_current_thresholds` 登记），并在该模型 `report_meta`/`report_notes` 登记本次运行叙事（decile/merge/dist/steps/cand_note，逐字对应最终评审结论）；
 7. **交叉**：需要与其它模型交叉时按第 6 节。
 
 > 金额口径（amt）说明：目前只有 mlt 有金额口径（约束上限按老客校准：auto 金额率 ≤0.0054/0.039、accept ≤0.011/0.0597）。**新模型要做 amt 口径时，约束值必须重新校准**（先跑 cnt 定阈值，再取该阈值处的金额累计/边际率做约束），并与用户确认后才能写入配置。
@@ -151,8 +154,8 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 
 ## 7. 验证纪律（最重要）
 
-1. **任何改动后必跑**：`python -m unittest discover tests`（19 例全绿）；
-2. **碰了 pipeline 或 configs 后必回归**：重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py`（961 个数值单元）、`scripts/bin_mlt_amt.py` + 金额核对（940 个单元）；价值模型/交叉场景对比冻结关键值（见第 8 节）；
+1. **任何改动后必跑**：`python -m unittest discover tests`（28 例全绿）；
+2. **碰了 pipeline 或 configs 后必回归**：重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py`（966 个数值单元）、`scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（991 个单元）；价值模型/交叉场景对比冻结关键值（见第 8 节）；
 3. **报告数值禁止手抄**：md 报告里的数字必须来自 Excel（用 openpyxl 读值或脚本生成），写完与 Excel 逐项核对；
 4. **OOT 纪律**：OOT 不参与任何分箱/合箱/阈值选择；所有方案只在 Train 上定；
 5. **提交纪律**：验证全绿才提交；提交信息用中文、说明改动与验证结果；用户未要求不提交。
@@ -160,17 +163,17 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 **提交前 DoD 清单**：
 
 - [ ] `python -m unittest discover tests` 全绿
-- [ ] 动过 mlt 管线 → cnt 核对 961 单元 + amt 核对 940 单元通过
+- [ ] 动过 mlt 管线 → cnt 核对 966 单元 + amt 核对 991 单元通过
 - [ ] 动过价值模型/交叉 → 关键值与第 8 节基准一致（不一致要说明原因，且经用户确认）
-- [ ] 动过新客生成器（scr/_gen_new_reports.py）→ 重跑后三份新客 md git diff 仅目标行
-- [ ] 报告 md 数值与 Excel 逐项一致（新报告按 7.1 模板与格式）
+- [ ] 动过生成器（scr/_gen_new_reports.py）或管线 → 重跑 `_gen_new_reports.py`（new + laoke 共 7 份）后 git diff 仅目标行；老客笔数/金额 md 另跑 cnt/amt verify 复核
+- [ ] 报告 md 数值与 Excel 逐项一致（生成器内建断言全过；新报告按 7.1 模板与格式）
 - [ ] `git status` 无遗漏文件；提交信息中文、含验证结果
 - [ ] 推送前已征得用户明确同意（推送纪律）
 - [ ] 分支工作流：改动在功能分支上做；提交后按既有惯例同步 staging / master（用户确认后执行）
 
 ## 7.1 报告模板与数值格式（docs/ 下新报告的规范）
 
-报告骨架按现有报告照抄（新模型/新样本沿用同结构）：
+报告模板由 `scr/_gen_new_reports.py` 实现（新模型/新样本沿用同结构，docs/ 现 7 份即其输出）；骨架为：
 
 ```text
 # <报告名>（<模型><口径>）
@@ -205,7 +208,7 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 | 价值模型 cnt | 7 档 `[(1,1),(2,4),(5,8),(9,13),(14,16),(17,19),(20,20)]`，自动 0.1362170673263007，接纳 0.1863252117841281，PSI 0.0084，缺失 21,914 笔（6.68%） |
 | 交叉 matrix | Pearson 0.5938；AND（mlt ≤ E 且 wth ≤ C）接纳 37.54% / 风险 5.74%；四象限：双低 37.54%、仅 mlt 低 37.86%、仅价值低 2.46%（22.74%）、双高 22.14% |
 
-> 新客（new）关键值不冻结在本表，由生成器与核对脚本内建断言保证：分档边界（MLT_EDGES/WTH_EDGES，交叉报告附录 C 行即两模型 C 档右边界 mlt 0.1389779549508124 / 价值 0.1933179021763764）、双分样本量 Train 407,134 / OOT 129,382（总 536,516）。
+> 新客（new）关键值不冻结在本表，由生成器内建断言保证：分档边界渲染时读单模型 Excel 03 各档右边界（交叉报告附录 C 行即两模型 C 档右边界 mlt 0.1389779549508124 / 价值 0.1933179021763764，与 Excel 逐值断言一致）、双分样本量 Train 407,134 / OOT 129,382（总 536,516）。
 
 ## 9. 关键业务口径提醒
 
@@ -223,6 +226,6 @@ python scr/_gen_new_reports.py              # 重跑新客分箱/交叉后重生
 - **等频初分可能不足 20 箱**：分数唯一值不足时 qcut duplicates=drop，少于 6 箱会报错——遇此情况先与用户确认分数分布；
 - **金额口径与笔数口径不可混用**：bin_amt 的 21 个差异函数按调用传递闭包保留，新增差异函数时注意其内部裸调用的归属模块；
 - **收入口径跨文档区分**：老/新客交叉报告收入矩阵为**平均数**三口径（res 重算，无 Excel 列）；
-- **新客 md 由生成器维护**：scr/_gen_new_reports.py 生成的 md 不要手工改数值/格式——改生成器再重跑，提交前确认 git diff 仅目标行（生成器对未改动段落 byte 稳定）；
+- **全部报告 md 由生成器维护（老/新客 7 份同模板）**：scr/_gen_new_reports.py 输出的 md 不要手工改数值/格式——改生成器再重跑（老客 4 份自 2026-09-07 由手工迁移至生成器），提交前确认 git diff 仅目标行（生成器对未改动段落 byte 稳定）；
 - **Excel 日期锚**：md 页头锚定具体日期版本 Excel（如 20260901）；重跑管线产出新日期文件后，需先做新旧两版逐格零漂移证明（openpyxl data_only 逐格比较）再更新 md 锚，不能直接换锚；
 - **报告里不写未经验证的结论**：所有结论必须有对应数值支撑，来源注明（Train/OOT、笔数/金额口径）。
