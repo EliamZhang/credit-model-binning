@@ -1366,7 +1366,7 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 .venv/Scripts/python.exe scripts/cross_mlt_wth.py
 ```
 
-输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `交叉_老客_mlt_价值.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），由生成器每次渲染时从 `res/old_application_info.csv` 按同一口径现算并断言分档计数与 Excel 矩阵逐格 n 一致（2026-09-07 起该报告改由 `scr/_gen_new_reports.py` 输出）。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 7.26% 降到 5.74%（接纳率减半）、OR 组合无增益。
+输出 `out/binning_cross_strategy_report_YYYYMMDD.xlsx`（20260904 版起 02/03 矩阵每格含历史实际自动审批通过率列）；报告文档为 `交叉_老客_mlt_价值.md`，其章三收入矩阵为平均数三口径（全样本 / 剔除 <0 / 成交样本），由生成器每次渲染时从 `res/old_application_info.csv` 按同一口径现算并断言分档计数与 Excel 矩阵逐格 n 一致（2026-09-07 起该报告改由 `scr/_gen_new_reports.py` 输出）。核心结论：两模型中等相关（Pearson 0.5938）、分数融合不加分（组合分 AUC/KS 均不高于 mlt 单模型）、AND 二维规则（mlt ≤ E 且价值 ≤ C）可把接纳风险从 6.80% 降到 5.53%（接纳率 70.30% → 36.47%）、OR 组合无增益。
 
 新客（`new` 数据集）同构交叉输出 `binning_new_cross_strategy_report_YYYYMMDD.xlsx`，报告为 `交叉_新客_mlt_价值.md`。
 
