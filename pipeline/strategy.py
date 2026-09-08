@@ -4,16 +4,10 @@
 本模块由旧脚本机械迁移生成：函数体与原实现逐行一致，常量经 settings 同步注入。
 新增/修改逻辑时请同步更新对应报告与测试。
 """
-import ast
-import math
-import time
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 
 import pipeline.settings as settings
 

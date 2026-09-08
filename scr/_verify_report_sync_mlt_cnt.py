@@ -161,16 +161,6 @@ def check_ci_cell(md_cell: str, excel_value, ci_low, ci_high, where: str):
         check_cell(parts[0], ci_high, f"{where} CI上界")
 
 
-def check_bool_cell(md_cell: str, excel_value, where: str):
-    global checked
-    if "通过" not in md_cell:
-        return
-    checked += 1
-    want = "不通过" not in md_cell
-    if bool(excel_value) is not want:
-        issues.append(f"{where}: md={md_cell!r} excel={excel_value}")
-
-
 def check_p_cell(md_cell: str, excel_value, where: str, lt: str = "0.001"):
     global checked
     if md_cell == f"<{lt}":

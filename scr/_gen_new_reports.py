@@ -117,13 +117,6 @@ def rate4(x):
     return f"{x:.4f}"
 
 
-def pp4(x):
-    """pp 差写 +0.0014 式四位数。"""
-    if x is None:
-        return "—"
-    return f"{x:+.4f}"
-
-
 def diff_pp(a, b):
     if a is None or b is None:
         return "—"
