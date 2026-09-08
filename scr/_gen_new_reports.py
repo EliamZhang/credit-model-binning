@@ -546,7 +546,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         iv1 = sum(r["1m30p_iv_component"] for r in rows)
         iv3 = sum(r["3m30p_iv_component"] for r in rows)
         cols = [
-            ("档位", None, None),
+            ("档位", bin_col, "raw"),
             ("分数下界", "score_left", "bound"),
             ("分数上界", "score_right", "bound"),
             ("样本量", "n", "num"),

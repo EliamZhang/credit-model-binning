@@ -290,7 +290,7 @@ OVERALL_SRC = {
 
 def row_of_by_right_bound(md_right_cell: str, sheet03, sample_group: str):
     """md 分箱大表按分数上界匹配 Excel 03 行（末档 +∞ → score_right='inf'）。
-    生成器大表首列不再带 A–G 字母（显示 —），上界为全精度原始值、逐行唯一。"""
+    上界为全精度原始值、逐行唯一；首列档位字母另由 check_big_table 核对。"""
     if md_right_cell in ("+∞", "−∞"):
         right_want = "inf" if md_right_cell == "+∞" else "-inf"
         return row_of(sheet03, sample_group=sample_group, score_right=right_want)
@@ -326,6 +326,7 @@ def check_big_table(md_tbl, sheet03, overall, where_prefix: str):
         if er is None:
             issues.append(f"{where}: Excel 03 中找不到对应行")
             continue
+        check_text(bin_name, er[col_of(sheet03, "score_mlt_final_bin")], f"{where}.档位")
         for md_col, ex_col in BIG_COL_MAP.items():
             if md_col not in h:
                 continue
