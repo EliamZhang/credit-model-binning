@@ -2,7 +2,7 @@
 
 > 本文档是本项目统一的方法论与操作说明（人读）；AI 维护请读 [CLAUDE.md](CLAUDE.md)（操作手册），与当前管线（pipeline/，入口 `scripts/bin_model.py`，配置驱动）的实际执行逻辑对应，涵盖样本设计、指标口径、分箱与阈值方法、方案验证、运行方式和结果解读。
 >
-> 仓库以同一管线支撑多数据集 × 多模型 × 多口径：老客/新客样本集（configs/datasets.py），mlt 主风险模型、价值模型与两模型交叉（configs/models.py），笔数（cnt）与金额（amt）口径。本文以 mlt 笔数口径为主线展开方法论，其余场景在第九、十节与第十一节报告清单中说明运行与核对方式。
+> 仓库以同一管线支撑多数据集 × 多模型：老客/新客样本集（configs/datasets.py），mlt 主风险模型、价值模型与两模型交叉（configs/models.py），分箱与策略阈值均为笔数口径（cnt；1M30+/3M30+ 金额逾期率为报告参考列）。本文以 mlt 笔数口径为主线展开方法论，其余场景在第九节与第十节报告清单中说明运行与核对方式。
 >
 > 核心目标以 `score_mlt` 为例：在完整 Train 上建立稳定风险等级，并划分自动通过、人工审核和拒绝阈值，最终生成 `out/binning_strategy_report_YYYYMMDD.xlsx`。
 
@@ -61,9 +61,9 @@
 ├── .venv/           # Python 3.11 虚拟环境（解释器 .venv/Scripts/python.exe）
 ├── configs/         # 数据集与模型注册表（datasets.py / models.py）
 ├── pipeline/        # 核心管线（settings / common / data_loading / risk_metrics / binning_cnt /
-│                    #   strategy / monthly / reporting / orchestration / bin_amt / cross_analysis）
+│                    #   strategy / monthly / reporting / orchestration / cross_analysis）
 ├── scripts/         # 入口脚本（bin_model.py / cross_models.py / check_data.py + 快捷壳）
-├── docs/            # 全部报告 md 与参考文档（报告清单见第十一节）
+├── docs/            # 全部报告 md 与参考文档（报告清单见第十节）
 ├── scr/             # 数据准备、报告生成与核对工具（_gen_new_reports.py / _verify_report_sync_*.py 等）
 ├── tests/           # 单元测试（28 例）
 ├── 单变量分析/      # 拒付规则（BR05）策略迭代与收益/损失回测文档（dishonour_rule_report + BR05_gain_loss_analysis）
@@ -93,14 +93,13 @@
 ### 3. 运行方式
 
 ```bash
-.venv/Scripts/python.exe scripts/bin_mlt_cnt.py                 # mlt 笔数口径（等价：bin_model.py --dataset laoke --model mlt --metric cnt）
-.venv/Scripts/python.exe scripts/bin_mlt_amt.py                 # mlt 金额口径
+.venv/Scripts/python.exe scripts/bin_mlt_cnt.py                 # mlt 笔数口径（等价：bin_model.py --dataset laoke --model mlt）
 .venv/Scripts/python.exe scripts/bin_worthiness_cnt.py          # 老客价值模型（笔数口径）
 .venv/Scripts/python.exe scripts/cross_mlt_wth.py               # 老客 mlt × 价值模型交叉（matrix）
-.venv/Scripts/python.exe scripts/bin_model.py --dataset new --model mlt --metric cnt   # 新客样本集同理
+.venv/Scripts/python.exe scripts/bin_model.py --dataset new --model new_mlt   # 新客样本集同理
 ```
 
-脚本运行完成后会在 `out/` 输出当日日期的 Excel（`binning_strategy_report_YYYYMMDD.xlsx` / `binning_amt_strategy_report_YYYYMMDD.xlsx` / `binning_worthiness_strategy_report_YYYYMMDD.xlsx` / `binning_cross_strategy_report_YYYYMMDD.xlsx`；新客为 `binning_new_mlt_strategy_report_*` / `binning_new_worthiness_strategy_report_*` / 交叉 `binning_new_cross_strategy_report_*`），并在 `docs/` 对应报告 md 的页头登记数值锚。文件名中的日期为运行当天。管线运行只输出 Excel（日志走控制台，Windows 下可能 GBK 乱码、不影响结果）；`check_data.py` 额外在 `out/` 写检查报告 txt（见 CLAUDE.md 2.3）。
+脚本运行完成后会在 `out/` 输出当日日期的 Excel（`binning_strategy_report_YYYYMMDD.xlsx` / `binning_worthiness_strategy_report_YYYYMMDD.xlsx` / `binning_cross_strategy_report_YYYYMMDD.xlsx`；新客为 `binning_new_mlt_strategy_report_*` / `binning_new_worthiness_strategy_report_*` / 交叉 `binning_new_cross_strategy_report_*`），并在 `docs/` 对应报告 md 的页头登记数值锚。文件名中的日期为运行当天。管线运行只输出 Excel（日志走控制台，Windows 下可能 GBK 乱码、不影响结果）；`check_data.py` 额外在 `out/` 写检查报告 txt（见 CLAUDE.md 2.3）。
 
 ### 4. 输入文件及作用
 
@@ -174,7 +173,7 @@ MAX_FINAL_BIN_SHARE = 0.21
 
 ## 三、风险标签和指标口径
 
-当前代码同时计算 `1M30+` 和 `3M30+`，并分别提供笔数口径和金额口径。
+当前代码同时计算 `1M30+` 和 `3M30+` 的笔数逾期率与金额逾期率（金额逾期率为参考列，合箱与策略阈值以笔数口径为准）。
 
 | 指标 | 主要作用 |
 | --- | --- |
@@ -230,7 +229,7 @@ duedate_3m_30 = 1
 3m30p_cnt_bad_rate = 3m30p_cnt_bad / 3m30p_cnt_mature
 ```
 
-### 3. 1M30+ 金额口径
+### 3. 1M30+ 金额逾期率（参考列口径）
 
 成熟条件：
 
@@ -259,7 +258,7 @@ dpd_days_ever_mob1 非空
 = 1m30p_amt_bad / 1m30p_amt_exposure
 ```
 
-### 4. 3M30+ 金额口径
+### 4. 3M30+ 金额逾期率（参考列口径）
 
 成熟条件：
 
@@ -520,7 +519,7 @@ violation_severity = Σ max(0, 1 - 实际值 / 要求值)
 #### 6.2 单调性要求
 
 - Train 上主指标（1M30+、3M30+ 笔数逾期率）不允许相邻倒挂。
-- 候选评分同时监控 Train 上四个风险率（含金额口径）的倒挂数。
+- 候选评分同时监控 Train 上四个风险率（笔数与金额逾期率）的倒挂数。
 - 月度稳定性检查允许 0.3 个百分点的容忍倒挂。
 
 #### 6.3 合并代价
@@ -1347,45 +1346,7 @@ AUC / KS / PSI / 相关系数 / p 值使用 `0.0000`，阈值和分数边界使�
 
 ---
 
-## 九、金额口径分箱（入口 scripts/bin_mlt_amt.py）
-
-金额口径管线（pipeline/bin_amt.py + 共享模块）是与笔数口径管线（pipeline/binning_cnt.py）并行的**独立备选分箱方案**，以金额逾期率为合箱主指标，其余流程与笔数版一致。两个口径可独立运行、互不影响。
-
-### 1. 运行方式
-
-```bash
-.venv/Scripts/python.exe scripts/bin_mlt_amt.py    # 等价：scripts/bin_model.py --dataset laoke --model mlt --metric amt
-```
-
-脚本运行完成后输出：
-
-```text
-out/binning_amt_strategy_report_YYYYMMDD.xlsx
-```
-
-报告文档为 `分箱_老客_mlt_金额.md`，与其 Excel 的数值一致性由 `scr/_verify_report_sync_mlt_amt.py` 核对（重跑后运行一次即可）。
-
-### 2. 混合口径设计
-
-| 环节                     | 口径选择                                         | 说明                                                 |
-| ------------------------ | ------------------------------------------------ | ---------------------------------------------------- |
-| 合箱主指标               | 金额逾期率（1M30+ / 3M30+ 金额）                 | 单调合并、保护边界、策略约束均以金额率为准           |
-| 显著性检验与单箱样本约束 | 笔数口径（成熟量 / 坏 / 好样本量）               | 两比例 Z 检验与单箱样本量约束保持笔数，保证统计稳定性 |
-| IV 与评估                | 金额加权 IV（bad=逾期金额，good=敞口−逾期金额）  | 候选评估与 IV 保留率以金额加权计算；KS 曲线保持笔数  |
-
-### 3. 与笔数版方案的差异
-
-金额口径整体逾期率低于笔数口径（Train 3M30+ 金额率 7.32% vs 笔数率 9.56%），金额尺度下的合箱行为与笔数版不同，最终方案、保护边界与策略阈值均为独立结果，与笔数版方案（入口 scripts/bin_mlt_cnt.py）不可混用。当前金额版选中方案：7 档 `[(1,1),(2,4),(5,10),(11,13),(14,17),(18,19),(20,20)]`，自动通过阈值 `0.0494555109039948`（累计通过率 20.18%），总接纳阈值 `0.1411377275703105`（累计接纳率 65.14%），Train/OOT PSI 0.0061。约束值为同风险水平设定（校准自笔数版方案阈值处的金额累计/边际率），与笔数版方案不可直接比较通过率。
-
-**分布整形限制**：金额版 7 档候选的 C 档（初始箱 5–10）占比 29.84% 超过 21% 上限，整形尝试拆分后无法在不重新超限的前提下合并回 7 档（低风险侧合回方案均使某档再次超限或跨越被禁止的极端箱边界），故整形失败、原候选保留，属该口径下的合法结果；整形成功的 8 档变体（将 C 档拆为 (5,6)+(7,10)）作为备选展示在候选评估表中。
-
-### 4. 与笔数版核对脚本的差异
-
-`scr/_verify_report_sync_mlt_amt.py` 与 `scr/_verify_report_sync_mlt_cnt.py` 的区别：Excel 源改用 `out/binning_amt_strategy_report_*.xlsx`；阈值选择与敏感性表主展示列为金额率（12 列金额主列版），笔数率带 CI 上界降为参考列；月度稳定性断言按金额版实际倒挂月份设定（Train 仅 2024-01 与 2025-07 各 1 次、OOT 仅 2026-01 1 次）。两脚本解析生成器输出的同构 md 模板（2026-09-07 起 md 全量改由 `scr/_gen_new_reports.py` 输出）：CI 表统一 7 列双界结构（含 3M30+ 金额逾期率参考列）、单调表为长表（数据集|指标|单调|倒挂数|倒挂档位）、最终分箱大表按分数右边界匹配 Excel 行。
-
----
-
-## 十、价值模型与两模型交叉脚本
+## 九、价值模型与两模型交叉脚本
 
 ### 1. 价值模型分箱（入口 scripts/bin_worthiness_cnt.py）
 
@@ -1415,7 +1376,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 ---
 
-## 十一、维护指南（面向人和 AI 共同维护）
+## 十、维护指南（面向人和 AI 共同维护）
 
 本仓库采用"配置驱动、管线单一实现"的架构，新增样本、模型与交叉组合原则上**只改配置，不改管线**。
 
@@ -1423,14 +1384,14 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 1. 在 `configs/datasets.py` 复制一份配置（参照 `new` 模板），填写文件路径、Train/OOT 月份、未完成状态值；
 2. 把数据文件放入 `res/`；
-3. 跑 `python scripts/bin_model.py --dataset <key> --model mlt --metric cnt` 试跑；
+3. 跑 `python scripts/bin_model.py --dataset <key> --model mlt` 试跑；
 4. 检查运行日志与 Excel 总览（样本量、月份切分、缺失量）是否符合预期。
 
 ### 2. 新增模型
 
 1. 在 `configs/models.py` 复制一份配置（参照 `mlt`），填写分数文件名/列名、分箱列名、风险方向与策略约束、输出前缀；
 2. 用样本数据验证分数与 3M30+ 违约率的方向（确认 `high_score_high_risk`），价值语义类模型把"低分=高价值"记入注释；
-3. 跑 `python scripts/bin_model.py --dataset <dataset> --model <key> --metric cnt`；
+3. 跑 `python scripts/bin_model.py --dataset <dataset> --model <key>`；
 4. 评审合箱方案与阈值后，把最终方案记入模型配置的注释，供交叉分析复用。
 
 ### 3. 新增交叉组合
@@ -1441,9 +1402,9 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 ### 4. 新增报告
 
-1. 跑完管线出 Excel 后，md 统一由生成器输出：`python scr/_gen_new_reports.py --dataset <key> [--metric cnt|amt] [--model-a/--model-b] [--date YYYYMMDD]`。已在 `configs/datasets.py` 登记 `report_meta` 的数据集（laoke / new）默认渲染其全部单模型+交叉组合；新增组合或未登记数据集先 `--out-dir` 临时目录渲染评审，数值确认后再放 `docs/`（防覆盖护栏）；
+1. 跑完管线出 Excel 后，md 统一由生成器输出：`python scr/_gen_new_reports.py --dataset <key> [--model-a/--model-b] [--date YYYYMMDD]`。已在 `configs/datasets.py` 登记 `report_meta` 的数据集（laoke / new）默认渲染其全部单模型+交叉组合；新增组合或未登记数据集先 `--out-dir` 临时目录渲染评审，数值确认后再放 `docs/`（防覆盖护栏）；
 2. 数值必须与 Excel 一致：生成器从 Excel / res 现算（openpyxl 读值 + 内建断言），**禁止手抄**；
-3. 老客场景复核优先复用核对脚本（已适配生成器输出的同构表结构）：mlt 笔数 / 金额口径分别为 `scr/_verify_report_sync_mlt_cnt.py`（980 个数值单元）与 `scr/_verify_report_sync_mlt_amt.py`（1005 个）；价值 / 交叉数值由生成器内建断言与 CLAUDE.md 第 8 节冻结基准保证；
+3. 老客场景复核优先复用核对脚本（已适配生成器输出的同构表结构）：mlt 笔数为 `scr/_verify_report_sync_mlt_cnt.py`（980 个数值单元）；价值 / 交叉数值由生成器内建断言与 CLAUDE.md 第 8 节冻结基准保证；
 4. 结构与文案改动只改 `scr/_gen_new_reports.py` 再重跑：重跑后 git diff 应只含目标行，出现多余 diff 说明生成器漂移，停下排查；
 5. 报告 md 放 `docs/`，文件名由生成器按配置推导（`分箱_{数据集}_{md_name}_笔数.md` / `_金额.md` / `交叉_..._..._md`），不改名、不手改。
 
@@ -1451,14 +1412,13 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 - 函数级改动只发生在 `pipeline/` 对应模块；
 - 任何改动后必须跑：`python -m unittest discover tests`（28 例全绿）；
-- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（980 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（1005 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py`（7 份 md 全部由生成器维护）并核对 git diff 仅目标行。
+- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（980 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py`（6 份 md 全部由生成器维护）并核对 git diff 仅目标行。
 
 ### 6. docs/ 报告清单（数值锚与维护方式）
 
 | 报告（docs/） | 数值来源 Excel（out/，日期=重跑当天，md 页头锚定具体版本） | 维护 / 核对方式 |
 | --- | --- | --- |
 | 分箱_老客_mlt_笔数.md | `binning_strategy_report_*.xlsx`（6 sheets） | 生成器输出（改文案改生成器重跑）+ `scr/_verify_report_sync_mlt_cnt.py` 复核（980 单元） |
-| 分箱_老客_mlt_金额.md | `binning_amt_strategy_report_*.xlsx` | 同上（amt 分支，1005 单元） |
 | 分箱_老客_价值_笔数.md | `binning_worthiness_strategy_report_*.xlsx` | 同上（生成器内建断言：价值标签分档计数 vs Excel 03 逐档 n 一致） |
 | 交叉_老客_mlt_价值.md | `binning_cross_strategy_report_*.xlsx`（20260904 起 02/03 含自动审批率列） | 同上（生成器内建断言：收入/自动审批矩阵 res 重算，分档计数 vs Excel 矩阵逐格 n） |
 | 分箱_新客_mlt_笔数.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（管线重跑后重跑，结构与老客同模板） |
@@ -1467,6 +1427,6 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 | 价值评估_新客_0520.html | —（外部参考文档，价值标签口径引用） | 不改 |
 
 
-## 十二、一句话总结
+## 十一、一句话总结
 
 > **binning_mlt_cnt.py 在完整 Train 上将 `score_mlt` 等频切成 20 箱，结合样本量、成熟度和风险倒挂自动合箱为 6~8 个风险等级（目标 7 档），并在 OOT 上进行独立验证；随后在风险约束下测算自动通过、人工审核、总接纳和拒绝流量，同时基于 `application_info` 计算历史实际审批漏斗，最终将两套口径分开输出到 6 个 sheet 的 Excel 策略报告。**

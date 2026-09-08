@@ -22,7 +22,7 @@ from openpyxl.utils import get_column_letter
 import pipeline.settings as settings
 from configs.datasets import DATASETS
 from configs.models import MODELS
-from pipeline import bin_amt, binning_cnt, data_loading, monthly, reporting, risk_metrics, strategy
+from pipeline import binning_cnt, data_loading, monthly, reporting, risk_metrics, strategy
 from pipeline.data_loading import _actual_funnel_row
 from pipeline.risk_metrics import calc_auc_ks
 
@@ -30,15 +30,14 @@ from pipeline.risk_metrics import calc_auc_ks
 # 1. 模型上下文：在指定数据集/模型配置下运行管线
 # ============================================================
 
-_SYNC_MODULES = (data_loading, risk_metrics, binning_cnt, strategy, monthly, reporting, bin_amt)
+_SYNC_MODULES = (data_loading, risk_metrics, binning_cnt, strategy, monthly, reporting)
 
 
 @contextlib.contextmanager
-def model_context(dataset_cfg: dict, model_cfg: dict, metric: str = "cnt"):
-    """临时应用数据集+模型配置并同步各模块；退出时恢复默认（老客 mlt cnt）。"""
+def model_context(dataset_cfg: dict, model_cfg: dict):
+    """临时应用数据集+模型配置并同步各模块；退出时恢复默认（老客 mlt）。"""
     settings.apply_dataset(dataset_cfg)
     settings.apply_model(model_cfg)
-    settings.apply_metric(metric)
     for module in _SYNC_MODULES:
         module._sync_settings()
     try:
@@ -46,7 +45,6 @@ def model_context(dataset_cfg: dict, model_cfg: dict, metric: str = "cnt"):
     finally:
         settings.apply_dataset(DATASETS["laoke"])
         settings.apply_model(MODELS["mlt"])
-        settings.apply_metric("cnt")
         for module in _SYNC_MODULES:
             module._sync_settings()
 

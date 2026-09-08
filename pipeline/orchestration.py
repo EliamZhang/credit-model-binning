@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 分箱管线编排：按 settings 的当前配置跑完"加载 → 切分 → 等频初分 → 自动合箱 →
-验证 → 策略阈值 → Excel 报告"全流程（笔数口径 / 金额口径共用）。
+验证 → 策略阈值 → Excel 报告"全流程（笔数口径）。
 
-运行前由入口脚本完成：settings.apply_dataset / apply_model / apply_metric，
-并调用各模块 _sync_settings()。本模块函数体由 binning_mlt_cnt.py 的 main()
-逐行移植而来，仅把函数调用改为跨模块限定引用。
+运行前由入口脚本完成：settings.apply_dataset / apply_model，并调用各模块
+_sync_settings()。本模块函数体由 binning_mlt_cnt.py 的 main() 逐行移植而来，
+仅把函数调用改为跨模块限定引用。
 """
 from pathlib import Path
 
 import pandas as pd
 
 import pipeline.settings as settings
-from pipeline import bin_amt as _bin_amt
 from pipeline.binning_cnt import (
     apply_edges,
     apply_merge_map,
@@ -49,13 +48,6 @@ from pipeline.strategy import build_threshold_sensitivity as _cnt_build_threshol
 from pipeline.strategy import build_threshold_selection_table as _cnt_build_threshold_selection_table
 
 
-def _pick(name: str, default):
-    """amt 口径下若 bin_amt 提供同名覆盖实现则使用之，否则用共享实现。"""
-    if settings.CURRENT_METRIC == "amt" and hasattr(_bin_amt, name):
-        return getattr(_bin_amt, name)
-    return default
-
-
 def _sync_settings() -> None:
     settings.sync(globals())
 
@@ -74,19 +66,19 @@ def run_binning(report_path: Path) -> None:
     reporting._sync_settings()
     _sync_settings()
 
-    # 金额口径下切换到 bin_amt 的覆盖实现。
-    calc_complete_initial_stats = _pick("calc_complete_initial_stats", _cnt_calc_complete_initial_stats)
-    build_merge_candidate_score_table = _pick("build_merge_candidate_score_table", _cnt_build_merge_candidate_score_table)
-    build_strategy_plan = _pick("build_strategy_plan", _cnt_build_strategy_plan)
-    build_threshold_sensitivity = _pick("build_threshold_sensitivity", _cnt_build_threshold_sensitivity)
-    build_binning_process_table = _pick("build_binning_process_table", _cnt_build_binning_process_table)
-    build_threshold_selection_table = _pick("build_threshold_selection_table", _cnt_build_threshold_selection_table)
-    build_overview = _pick("build_overview", _cnt_build_overview)
-    build_metric_dictionary = _pick("build_metric_dictionary", _cnt_build_metric_dictionary)
-    build_monthly_stability_summary = _pick("build_monthly_stability_summary", _cnt_build_monthly_stability_summary)
-    build_monthly_bin_stability = _pick("build_monthly_bin_stability", _cnt_build_monthly_bin_stability)
-    build_enriched_final_bin_report = _pick("build_enriched_final_bin_report", _cnt_build_enriched_final_bin_report)
-    calc_bin_stats = _pick("calc_bin_stats", _cnt_calc_bin_stats)
+    # 各环节使用笔数口径共享实现（binning_cnt / strategy / reporting / monthly / risk_metrics）。
+    calc_complete_initial_stats = _cnt_calc_complete_initial_stats
+    build_merge_candidate_score_table = _cnt_build_merge_candidate_score_table
+    build_strategy_plan = _cnt_build_strategy_plan
+    build_threshold_sensitivity = _cnt_build_threshold_sensitivity
+    build_binning_process_table = _cnt_build_binning_process_table
+    build_threshold_selection_table = _cnt_build_threshold_selection_table
+    build_overview = _cnt_build_overview
+    build_metric_dictionary = _cnt_build_metric_dictionary
+    build_monthly_stability_summary = _cnt_build_monthly_stability_summary
+    build_monthly_bin_stability = _cnt_build_monthly_bin_stability
+    build_enriched_final_bin_report = _cnt_build_enriched_final_bin_report
+    calc_bin_stats = _cnt_calc_bin_stats
 
     _t = _log_step._t0 = time.time()
 

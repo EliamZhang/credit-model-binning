@@ -179,29 +179,6 @@ RISK_HELPER_CONFIG = {
     },
 }
 
-# 金额口径专属列（bin_amt 使用）：金额加权的坏样本/敞口/好样本口径。
-PRIMARY_AMT_BAD_COL = "3m30p_amt_bad"
-PRIMARY_AMT_EXPOSURE_COL = "3m30p_amt_exposure"
-PRIMARY_AMT_GOOD_COL = "3m30p_amt_good"
-
-# 金额口径下的主指标与策略约束（apply_metric("amt") 时启用）。
-AMT_PRIMARY_RATE_COLS = ["1m30p_amt_bad_rate", "3m30p_amt_bad_rate"]
-AMT_PRIMARY_RATE_COL = "3m30p_amt_bad_rate"
-AMT_STRATEGY_CONFIG = {
-    "strategy_name": "默认策略（金额口径）",
-    "objective": "平衡通过率、整体风险和边际风险（金额逾期率口径）",
-    "auto_constraints": {
-        "max_cum_1m30p_amt_bad_rate": 0.0054,
-        "max_cum_3m30p_amt_bad_rate": 0.0390,
-        "max_marginal_3m30p_amt_bad_rate": 0.0760,
-    },
-    "accept_constraints": {
-        "max_cum_1m30p_amt_bad_rate": 0.0110,
-        "max_cum_3m30p_amt_bad_rate": 0.0597,
-        "max_marginal_3m30p_amt_bad_rate": 0.1500,
-    },
-}
-
 # 以上常量名清单：各 pipeline 模块的 _sync_settings() 据此把 settings 刷入模块全局。
 CONSTANT_NAMES = [
     "DATA_DIR",
@@ -263,31 +240,7 @@ CONSTANT_NAMES = [
     "RISK_PREFIXES",
     "ALL_RISK_RATE_COLS",
     "RISK_HELPER_CONFIG",
-    "PRIMARY_AMT_BAD_COL",
-    "PRIMARY_AMT_EXPOSURE_COL",
-    "PRIMARY_AMT_GOOD_COL",
 ]
-
-
-# 当前合箱口径标记（apply_metric 设置；编排模块据此在 cnt/amt 实现间分发）。
-CURRENT_METRIC = "cnt"
-
-
-def apply_metric(metric: str) -> None:
-    """切换合箱口径：cnt = 笔数口径（默认），amt = 金额口径。
-
-    调用顺序约定：apply_dataset → apply_model → apply_metric。
-    amt 口径的策略约束为金额率上限（AMT_STRATEGY_CONFIG）；cnt 口径沿用
-    apply_model 注入的模型策略约束（STRATEGY_CONFIG 不动）。
-    """
-    globals()["CURRENT_METRIC"] = metric
-    if metric == "amt":
-        globals()["PRIMARY_RATE_COLS"] = AMT_PRIMARY_RATE_COLS
-        globals()["PRIMARY_RATE_COL"] = AMT_PRIMARY_RATE_COL
-        globals()["STRATEGY_CONFIG"] = AMT_STRATEGY_CONFIG
-    else:
-        globals()["PRIMARY_RATE_COLS"] = ["1m30p_cnt_bad_rate", "3m30p_cnt_bad_rate"]
-        globals()["PRIMARY_RATE_COL"] = "3m30p_cnt_bad_rate"
 
 
 def apply_dataset(dataset_cfg: dict) -> None:

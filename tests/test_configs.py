@@ -51,7 +51,7 @@ class ConfigCompletenessTests(unittest.TestCase):
             if meta is None:
                 continue
             with self.subTest(dataset=key):
-                for model_key in meta.get("models", []) + meta.get("amt_models", []):
+                for model_key in meta.get("models", []):
                     self.assertIn(model_key, models.MODELS, f"数据集 {key} report_meta 引用未登记模型 {model_key}")
                 for pair in meta.get("cross_pairs", []):
                     self.assertIn(pair[0], models.MODELS, f"数据集 {key} cross_pairs 引用未登记模型 {pair[0]}")

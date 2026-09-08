@@ -8,7 +8,7 @@
 信贷风控的**模型分分箱与策略阈值分析**仓库，配置驱动：
 
 - 把模型分（高分高风险方向）在 Train 上 20 等频初分 → 自动合箱为 6~8 档（目标 7 档）→ OOT 验证 → 阈值策略 → 输出 Excel 报告；
-- 支持笔数口径（cnt，主口径）与金额口径（amt）；
+- 支持笔数口径（cnt）分箱与策略阈值分析（1M30+/3M30+ 金额逾期率为报告参考列）；
 - 支持两模型交叉分析（matrix 全局交叉）；
 - **新样本/新模型/新交叉 = 只改 configs/，不改 pipeline/**（除非用户明确要求改管线逻辑）。
 
@@ -20,8 +20,8 @@ res/        # 输入数据（gitignored）：用户把 CSV 放这里，文件名
 out/        # 输出 Excel 与临时文件（gitignored）
 configs/    # datasets.py（样本集）、models.py（模型）——扩展点
 pipeline/   # 核心管线：settings（常量层）/ common / data_loading / risk_metrics / binning_cnt /
-            #   strategy / monthly / reporting / orchestration / bin_amt / cross_analysis
-scripts/    # 入口：bin_model.py、cross_models.py、check_data.py + 4 个快捷壳
+            #   strategy / monthly / reporting / orchestration / cross_analysis
+scripts/    # 入口：bin_model.py、cross_models.py、check_data.py + 3 个快捷壳
 docs/       # 全部报告 md 与参考文档
 scr/        # 数据准备、报告生成与核对工具
 tests/      # 单元测试（28 例）
@@ -48,9 +48,9 @@ tests/      # 单元测试（28 例）
 | application_time / application_month | 申请时间；month 为 YYYY-MM 字符串，Train/OOT 按字符串比较切分 |
 | score 列（模型分） | 数值型；缺失行剔除并计入总览"缺失量" |
 | duedate_1m_30 / duedate_3m_30 | 标签：∈{0,1} 为成熟，=1 为坏（30+ 逾期）；成熟定义=在库满 1/3 个月 |
-| principal | 本金，金额口径敞口分母 |
-| estimate_principal_remaining_mob1 / mob3 | 逾期剩余本金（金额口径坏样本分子） |
-| dpd_days_ever_mob1 / mob3 | ≥30 判定金额逾期（金额口径） |
+| principal | 本金，金额逾期率敞口分母 |
+| estimate_principal_remaining_mob1 / mob3 | 逾期剩余本金（金额逾期率坏样本分子） |
+| dpd_days_ever_mob1 / mob3 | ≥30 判定金额逾期（金额逾期率口径） |
 | status / application_status / assessment_status | 历史实际审批漏斗（通过=首字符 3/4；Auto/Manual Approved；成交=Active_Account/Closed/Blocked） |
 
 新数据若字段名不同，先在 configs 或与用户确认映射；若连标签都没有，先停下说明"无法做有监督分箱评估"。
@@ -62,11 +62,11 @@ tests/      # 单元测试（28 例）
 
 取数一律用 openpyxl 读值（`data_only=True`），不要从控制台输出抄数。
 
-**docs/ 报告地图**（改动/核对前先定位数值来源与维护方式，完整清单见 README.md 十一.6）：
+**docs/ 报告地图**（改动/核对前先定位数值来源与维护方式，完整清单见 README.md 十.6）：
 
 | 报告（docs/） | 数值锚 | 维护方式 |
 | --- | --- | --- |
-| 分箱_老客_mlt_笔数.md / 分箱_老客_mlt_金额.md / 分箱_老客_价值_笔数.md | 老客单模型 Excel（页头锚定日期版本） | `scr/_gen_new_reports.py` 生成（2026-09-07 起由手工迁移至生成器，改文案改生成器重跑）；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py`（980 单元）/ `_verify_report_sync_mlt_amt.py`（1005 单元）复核 |
+| 分箱_老客_mlt_笔数.md / 分箱_老客_价值_笔数.md | 老客单模型 Excel（页头锚定日期版本） | `scr/_gen_new_reports.py` 生成（2026-09-07 起由手工迁移至生成器，改文案改生成器重跑）；mlt cnt 用 `scr/_verify_report_sync_mlt_cnt.py`（980 单元）复核 |
 | 交叉_老客_mlt_价值.md | 老客交叉 Excel + res/old_*.csv 重算 | 同上（收入/自动审批矩阵由生成器内建断言每次渲染现算核对） |
 | 分箱_新客_mlt_笔数.md / 分箱_新客_价值_笔数.md | binning_new_*_strategy_report | 同上（模板与老客同构，生成器内建断言含新客分档边界） |
 | 交叉_新客_mlt_价值.md | binning_new_cross_strategy_report | 同上 |
@@ -99,13 +99,11 @@ python scripts/check_data.py --dataset <d> --model <m>
 
 ```bash
 # 单模型分箱（.venv 为项目虚拟环境，Windows 下用 .venv/Scripts/python.exe）
-python scripts/bin_model.py --dataset laoke --model mlt --metric cnt     # mlt 笔数口径
-python scripts/bin_model.py --dataset laoke --model mlt --metric amt     # mlt 金额口径
-python scripts/bin_model.py --dataset laoke --model worthiness --metric cnt  # 价值模型
-python scripts/bin_model.py --dataset new --model mlt --metric cnt       # 新客（新样本集参照此例）
+python scripts/bin_model.py --dataset laoke --model mlt     # mlt 笔数口径
+python scripts/bin_model.py --dataset laoke --model worthiness  # 价值模型
+python scripts/bin_model.py --dataset new --model new_mlt       # 新客（新样本集参照此例）
 # 快捷壳（等价命令）
 python scripts/bin_mlt_cnt.py
-python scripts/bin_mlt_amt.py
 python scripts/bin_worthiness_cnt.py
 # 交叉分析
 python scripts/cross_models.py --dataset laoke --model-a mlt --model-b worthiness --mode matrix
@@ -114,10 +112,9 @@ python scripts/cross_mlt_wth.py   # 快捷壳（matrix）
 python -m unittest discover tests
 python scripts/check_data.py --dataset <d> --model <m>   # 新数据质量检查（2.3 节协议）
 python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 或改老客笔数 md 后必跑（980 单元）
-python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 或改老客金额 md 后必跑（1005 单元）
 python scr/_gen_new_reports.py                          # 报告生成器：渲染 --dataset 登记的全部组合
-                                                        #   （默认 new；老客加 --dataset laoke，两者覆盖 7 份 md）
-                                                        #   [--metric cnt|amt] [--date YYYYMMDD] [--out-dir]
+                                                        #   （默认 new；老客加 --dataset laoke，两者覆盖 6 份 md）
+                                                        #   [--date YYYYMMDD] [--out-dir]
                                                         #   数值从 Excel/res 现算；跑管线/改模板文案后重跑
 ```
 
@@ -130,7 +127,7 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 3. **跑检查**：数据到位后先写临时配置，跑 `python scripts/check_data.py --dataset <key> --model <model>`，按 2.3 节协议处理 BLOCK/WARN，向用户报告并等确认；
 4. **写配置**：在 configs/datasets.py 复制一份（参照 new 模板）填 data_dir/sample_file/application_file/train_end_month/oot_start_month/incomplete_statuses；
 5. **验方向**：检查脚本已含十分位方向验证；价值类模型把"低分=高价值"语义记入 value_semantics；
-6. **试跑**：`python scripts/bin_model.py --dataset <key> --model <model> --metric cnt`，检查日志（样本量、月份切分、初始箱数、缺失量）与 Excel 01_总览；
+6. **试跑**：`python scripts/bin_model.py --dataset <key> --model <model>`，检查日志（样本量、月份切分、初始箱数、缺失量）与 Excel 01_总览；
 7. **登记并生成报告**：在 datasets.py/models.py 对应配置补 report_meta（报告名/md 名/单模型与交叉清单）与 report_notes（本次运行的叙事事实），跑 `python scr/_gen_new_reports.py --dataset <key>`（未登记组合先 `--out-dir` 临时目录评审）——md 结构与格式按第 7.1 节模板，数值一律从 Excel/res 现算（生成器内建断言核对）。
 
 ## 5. 新增模型操作步骤
@@ -140,10 +137,8 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 3. **跑检查**：`python scripts/check_data.py --dataset <d> --model <m>`（分数文件到位后立即跑），按 2.3 节协议处理 BLOCK/WARN；
 4. **写配置**：在 configs/models.py 复制一份（参照 mlt），填 score_file/raw_score_col/score_col/initial_bin_col/final_bin_col/high_score_high_risk/strategy_config/report_prefix/cross_tag/display_short；列名保持唯一（不同模型不要共用 score_col）；
 5. **验方向**：检查脚本的十分位方向验证结果为准，不一致要停下来问用户；
-6. **跑分箱**：`python scripts/bin_model.py --dataset <d> --model <m> --metric cnt`；评审方案与阈值后把最终方案记入模型配置注释（供交叉分析 `_current_thresholds` 登记），并在该模型 `report_meta`/`report_notes` 登记本次运行叙事（decile/merge/dist/steps/cand_note，逐字对应最终评审结论）；
+6. **跑分箱**：`python scripts/bin_model.py --dataset <d> --model <m>`；评审方案与阈值后把最终方案记入模型配置注释（供交叉分析 `_current_thresholds` 登记），并在该模型 `report_meta`/`report_notes` 登记本次运行叙事（decile/merge/dist/steps/cand_note，逐字对应最终评审结论）；
 7. **交叉**：需要与其它模型交叉时按第 6 节。
-
-> 金额口径（amt）说明：目前只有 mlt 有金额口径（约束上限按老客校准：auto 金额率 ≤0.0054/0.039、accept ≤0.011/0.0597）。**新模型要做 amt 口径时，约束值必须重新校准**（先跑 cnt 定阈值，再取该阈值处的金额累计/边际率做约束），并与用户确认后才能写入配置。
 
 ## 6. 新增交叉组合操作步骤
 
@@ -155,7 +150,7 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 ## 7. 验证纪律（最重要）
 
 1. **任何改动后必跑**：`python -m unittest discover tests`（28 例全绿）；
-2. **碰了 pipeline 或 configs 后必回归**：重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py`（980 个数值单元）、`scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（1005 个单元）；价值模型/交叉场景对比冻结关键值（见第 8 节）；
+2. **碰了 pipeline 或 configs 后必回归**：重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py`（980 个数值单元）；价值模型/交叉场景对比冻结关键值（见第 8 节）；
 3. **报告数值禁止手抄**：md 报告里的数字必须来自 Excel（用 openpyxl 读值或脚本生成），写完与 Excel 逐项核对；
 4. **OOT 纪律**：OOT 不参与任何分箱/合箱/阈值选择；所有方案只在 Train 上定；
 5. **提交纪律**：验证全绿才提交；提交信息用中文、说明改动与验证结果；用户未要求不提交。
@@ -163,9 +158,9 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 **提交前 DoD 清单**：
 
 - [ ] `python -m unittest discover tests` 全绿
-- [ ] 动过 mlt 管线 → cnt 核对 980 单元 + amt 核对 1005 单元通过
+- [ ] 动过 mlt 管线 → cnt 核对 980 单元通过
 - [ ] 动过价值模型/交叉 → 关键值与第 8 节基准一致（不一致要说明原因，且经用户确认）
-- [ ] 动过生成器（scr/_gen_new_reports.py）或管线 → 重跑 `_gen_new_reports.py`（new + laoke 共 7 份）后 git diff 仅目标行；老客笔数/金额 md 另跑 cnt/amt verify 复核
+- [ ] 动过生成器（scr/_gen_new_reports.py）或管线 → 重跑 `_gen_new_reports.py`（new + laoke 共 6 份）后 git diff 仅目标行；老客笔数 md 另跑 cnt verify 复核
 - [ ] 报告 md 数值与 Excel 逐项一致（生成器内建断言全过；新报告按 7.1 模板与格式）
 - [ ] `git status` 无遗漏文件；提交信息中文、含验证结果
 - [ ] 推送前已征得用户明确同意（推送纪律）
@@ -204,7 +199,6 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 | 场景 | 关键值 |
 | --- | --- |
 | mlt cnt | 7 档（手动 final_bin_ranges，2026-09-08 用户确认）`[(1,1),(2,4),(5,8),(9,11),(12,14),(15,18),(19,20)]`，自动 0.0803750459943264，接纳 0.161821271383099，PSI 0.0062 |
-| mlt amt | 7 档 `[(1,1),(2,4),(5,10),(11,13),(14,17),(18,19),(20,20)]`，自动 0.0494555109039948，接纳 0.1411377275703105，PSI 0.0061（金额口径不采用 mlt 的手动 final_bin_ranges，继续自动合箱） |
 | 价值模型 cnt | 7 档 `[(1,1),(2,4),(5,8),(9,13),(14,16),(17,19),(20,20)]`，自动 0.1362170673263007，接纳 0.1863252117841281，PSI 0.0084，缺失 21,914 笔（6.68%） |
 | 交叉 matrix | Pearson 0.5938；AND（mlt ≤ E 且 wth ≤ C）接纳 37.54% / 风险 5.74%；四象限：双低 37.54%、仅 mlt 低 37.86%、仅价值低 2.46%（22.74%）、双高 22.14%。**该行对应 20260904 交叉 Excel（mlt 旧分箱口径）：mlt 2026-09-08 重分箱后交叉未重跑，交叉报告仍锚定旧口径，重跑前先与用户确认（第 8 节基准将随之更新）** |
 
@@ -224,8 +218,7 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 - **Python 路径**：项目用 `.venv/Scripts/python.exe`；scripts/ 下的脚本入口会自行把项目根目录加入 sys.path；
 - **pipeline 的 settings 注入机制**：动态常量（SCORE_COL 等）由 `settings.sync()` 刷入各模块全局；新增函数若使用这些常量，写裸引用即可，但**不要**在函数默认参数里引用动态常量（import 时会被冻结），需要时用 `None + 函数体内解析` 模式（参考 risk_metrics.calc_bin_stats）；
 - **等频初分可能不足 20 箱**：分数唯一值不足时 qcut duplicates=drop，少于 6 箱会报错——遇此情况先与用户确认分数分布；
-- **金额口径与笔数口径不可混用**：bin_amt 的 21 个差异函数按调用传递闭包保留，新增差异函数时注意其内部裸调用的归属模块；
 - **收入口径跨文档区分**：老/新客交叉报告收入矩阵为**平均数**三口径（res 重算，无 Excel 列）；
 - **全部报告 md 由生成器维护（老/新客 7 份同模板）**：scr/_gen_new_reports.py 输出的 md 不要手工改数值/格式——改生成器再重跑（老客 4 份自 2026-09-07 由手工迁移至生成器），提交前确认 git diff 仅目标行（生成器对未改动段落 byte 稳定）；
 - **Excel 日期锚**：md 页头锚定具体日期版本 Excel（如 20260901）；重跑管线产出新日期文件后，需先做新旧两版逐格零漂移证明（openpyxl data_only 逐格比较）再更新 md 锚，不能直接换锚；
-- **报告里不写未经验证的结论**：所有结论必须有对应数值支撑，来源注明（Train/OOT、笔数/金额口径）。
+- **报告里不写未经验证的结论**：所有结论必须有对应数值支撑，来源注明（Train/OOT 与所用指标口径）。

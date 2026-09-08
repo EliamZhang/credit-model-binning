@@ -5,7 +5,7 @@
 维护指南（新增样本集）：
 1. 复制一份已有配置（如 laoke），改 key 与各字段；
 2. 把样本数据文件放入 data_dir（默认 res/）；
-3. 用 scripts/bin_model.py --dataset <key> --model mlt --metric cnt 试跑；
+3. 用 scripts/bin_model.py --dataset <key> --model mlt 试跑；
 4. 输出 Excel 后人工核对样本量、月份切分是否符合预期；
 5. 若需配套报告，参照 docs/ 下既有报告撰写，并用 scr/ 下核对脚本验证数值。
 
@@ -29,7 +29,6 @@ DATASETS = {
         # 报告生成器渲染清单与数据集级叙事（可选字段，供 scr/_gen_new_reports.py 使用）。
         "report_meta": {
             "models": ["mlt", "worthiness"],  # 笔数口径单模型（按此顺序渲染）
-            "amt_models": ["mlt"],  # 金额口径单模型（可选）
             "cross_pairs": [("mlt", "worthiness")],
             "generator": "scr/_gen_new_reports.py",
         },
