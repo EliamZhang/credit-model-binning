@@ -686,6 +686,27 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         A(f"> 表末两列（仅价值模型报告展示）为价值标签统计：3M 实付利息 = `raw_interest_income_3m`，即建模标签 `y_interest_income_3m` 的底层金额（标签 y=1 ⇔ 3 个月实付利息 < {y_th} 元，即\"价值较弱\"，与标签列逐笔一致率核验 100%）；覆盖样本为成交且有 3 个月利息观察的申请——Train {num(_tr_irr_n)} 笔（占该组 {pct(_tr_irr_n / n_train)}）、OOT {num(_oo_irr_n)} 笔（占该组 {pct(_oo_irr_n / n_oot)}），利息缺失样本不计入两列。均值 = 档内全部非缺失实付利息的平均（元，含 0 元与冲销负值样本，负值占比 <0.2%）；<{y_th} 占比 Lift = 档内 y=1 占比 ÷ 该样本组整体 y=1 占比（基准 Train {pct(_tr_irr_y1)}、OOT {pct(_oo_irr_y1)}），整体行恒为 1.0000。各档利息样本覆盖随分数档位升高而明显下降（成交集中于低分档，如 Train {tr_rows[0][bin_col]} 档覆盖率约 {cov_first*100:.0f}%、{tr_rows[-1][bin_col]} 档约 {cov_last*100:.1f}%），比较档级数值时注意样本量差异。")
     A("")
     A("**核心结论**：\n")
+    A("")
+    A("**特殊修改与分箱约束速览**：")
+    A("")
+    tr_mono_bad = [r for r in mono_rows if r["sample_group"] == "train" and not bool(r["is_monotonic_non_decreasing"])]
+    metric_cn = {"1m30p_cnt_bad_rate": "1M30+ 笔数", "3m30p_cnt_bad_rate": "3M30+ 笔数",
+                 "1m30p_amt_bad_rate": "1M30+ 金额", "3m30p_amt_bad_rate": "3M30+ 金额"}
+    if tr_mono_bad:
+        mono_txt = f"Train 最终箱倒挂：{'、'.join(metric_cn.get(r['metric'], r['metric']) + ' ' + str(r['violation_cnt']) + ' 处' for r in tr_mono_bad)}（见五（一））"
+    else:
+        mono_txt = "Train 最终箱四项风险率全部单调（倒挂 0 处）"
+    A(f"- 分箱约束：档位 {settings.MIN_FINAL_BIN_COUNT}~{settings.MAX_FINAL_BIN_COUNT} 档（目标 {settings.TARGET_FINAL_BIN_COUNT}）；单箱 Train 占比：中间箱 ≥ {settings.MIN_MIDDLE_BIN_SAMPLE_PCT*100:.0f}%、首尾箱 ≥ {settings.MIN_TAIL_BIN_SAMPLE_PCT*100:.1f}%、任意档 ≤ {share_cap_pct}；主指标成熟量 ≥ {settings.MIN_FINAL_BIN_MATURE_COUNT:,}、坏 ≥ {settings.MIN_FINAL_BIN_BAD_COUNT}、好 ≥ {settings.MIN_FINAL_BIN_GOOD_COUNT}；默认禁止跨越极端箱边界；{mono_txt}；策略阈值上限：自动通过 累计 1M30+ ≤ {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} / 累计 3M30+ ≤ {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} / 边际 3M30+ ≤ {pct(auto_c['max_marginal_3m30p_cnt_bad_rate'])}，总接纳 累计 1M30+ ≤ {pct(acc_c['max_cum_1m30p_cnt_bad_rate'])} / 累计 3M30+ ≤ {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} / 边际 3M30+ ≤ {pct(acc_c['max_marginal_3m30p_cnt_bad_rate'])}；")
+    if manual:
+        auto_txt = "（候选表未记录）"
+        if selected_candidate is not None:
+            auto_txt = f"{selected_candidate['ranges']}（综合得分 {float(selected_candidate['candidate_score']):.2f}）"
+        A(f"- 特殊修改（档位结构）：人工指定 {n_bins} 档 {plan}，替换自动合箱选中的 {auto_txt}——{notes.get('special_note', '')}；策略阈值不由人工直接指定，由管线在新档位上按原约束自动重选（自动通过 {auto_th}、总接纳 {accept_th}），详见三（二）与四（三）。")
+    else:
+        A("- 特殊修改（档位结构）：无——档位结构与策略阈值均由管线按上述约束自动选出（详见三（二））。")
+    for extra in notes.get("special_notes", []):
+        A(f"- 特殊修改：{extra}")
+    A("")
 
     # 结论 1：Train 风险分层
     A(f"1. **Train 风险分层成立**：1M30+、3M30+ 的笔数和金额逾期率均随风险档位单调上升，3M30+ 笔数逾期率由 {tr_rows[0][bin_col]} 档的 {pct(tr_rows[0]['3m30p_cnt_bad_rate'])} 升至 {tr_rows[-1][bin_col]} 档的 {pct(tr_rows[-1]['3m30p_cnt_bad_rate'])}；")
