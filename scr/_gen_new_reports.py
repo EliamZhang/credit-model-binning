@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""新客三份报告生成器：从 4 份 Excel 读取数值，生成 docs/ 下 3 份 md 报告。
+"""单模型与交叉报告生成器：从 out/ Excel（openpyxl data_only 读值）与 res/*.csv 重算数值，
+生成 docs/ 下登记组合（report_meta）的 md 报告。
 
 数值纪律（CLAUDE.md §7.3）：本脚本数字来自 Excel（openpyxl data_only 读值）或
 res/*.csv 重算（交叉报告三章矩阵内收入 4 指标：total_income/total_expenses/gross_surplus/net_surplus 平均数，分档与矩阵逐格核对一致），不手抄；
@@ -25,6 +26,9 @@ from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
+
+# 交叉矩阵格风险率展示的最小样本量（与附录说明一致；不足只展示样本量）。
+MIN_CELL_N_FOR_RATE = 100
 
 sys.path.insert(0, str(ROOT))
 from configs.datasets import DATASETS  # noqa: E402
@@ -502,8 +506,9 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
             cand_tbl = d
     assert steps_tbl is not None and cand_tbl is not None, "02_分箱详情 缺少步骤表/候选表"
     steps_tbl = sorted(steps_tbl, key=lambda r: int(r["step_no"]))
-    candidates = [r for r in cand_tbl if int(r["final_bin_count"]) in (6, 7, 8)]
+    candidates = [r for r in cand_tbl if int(r["final_bin_count"]) in range(settings.MIN_FINAL_BIN_COUNT, settings.MAX_FINAL_BIN_COUNT + 1)]
     candidates.sort(key=lambda r: (str(r["selected"]) != "True", -float(r["candidate_score"])))
+    selected_candidate = next((c for c in candidates if str(c["selected"]) == "True"), None)
 
     if value_semantics:
         cross_ov = overview(load(ctx.cross_xlsx)["01_总览"])
@@ -773,7 +778,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         ("④", "自动合箱（Train）",
          "四阶段递进：小箱清理（消除单箱硬约束违反）→ 单调合并（PAVA 风格消除主指标倒挂）→ 档位压缩（≤ 8 档）→ 候选生成（8/7/6 档）" if not manual else notes.get("manual_flow4", "")),
         ("⑤", "候选评估与选择",
-         f"硬约束筛选（6–8 档、无倒挂、单箱约束满足、不跨极端箱边界）→ 对单箱 Train 占比超过 {share_cap_pct} 上限的候选做\"均衡拆分 + 相邻再合并\"整形（share_balancing）→ 按倒挂数、IV 保留率、最小相邻差距、档位偏离综合评分 → 选中 7 档方案" if not manual else notes.get("manual_flow5", "")),
+         f"硬约束筛选（{settings.MIN_FINAL_BIN_COUNT}–{settings.MAX_FINAL_BIN_COUNT} 档、无倒挂、单箱约束满足、不跨极端箱边界）→ 对单箱 Train 占比超过 {share_cap_pct} 上限的候选做\"均衡拆分 + 相邻再合并\"整形（share_balancing）→ 按倒挂数、IV 保留率、最小相邻差距、档位偏离综合评分 → 选中 {n_bins} 档方案" if not manual else notes.get("manual_flow5", "")),
         ("⑥", "样本外验证",
          "Train/OOT 对照验证：风险单调性、分布稳定性（PSI）、区分能力（AUC/KS）、月度稳定性、测算分段风险梯度"),
         ("⑦", "策略阈值设定",
@@ -839,6 +844,27 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("")
     A("**合并代价**：由相邻箱风险差距、两比例 Z 检验、IV 损失及保护边界惩罚共同确定。风险差距越大、统计差异越显著、IV 损失越高或涉及保护边界，合并优先级越低。")
     A("")
+    A("**约束条件与自动/人工对照**：")
+    A("")
+    A("| 类别 | 约束内容 | 来源 |")
+    A("| --- | --- | --- |")
+    A(f"| 自动合箱·结构 | 档位 {settings.MIN_FINAL_BIN_COUNT}~{settings.MAX_FINAL_BIN_COUNT} 档（目标 {settings.TARGET_FINAL_BIN_COUNT}）；单箱 Train 占比：中间箱 ≥ {settings.MIN_MIDDLE_BIN_SAMPLE_PCT*100:.0f}%、首尾箱 ≥ {settings.MIN_TAIL_BIN_SAMPLE_PCT*100:.1f}%；主指标成熟量 ≥ {settings.MIN_FINAL_BIN_MATURE_COUNT:,}、坏 ≥ {settings.MIN_FINAL_BIN_BAD_COUNT}、好 ≥ {settings.MIN_FINAL_BIN_GOOD_COUNT}；默认禁止跨越极端箱边界 | 管线自动执行 |")
+    A("| 自动合箱·评分 | 候选按 Train 主指标/全指标倒挂数、IV 保留率、最小相邻风险差距、目标档位偏离综合评分选优 | 管线自动执行 |")
+    A(f"| 自动合箱·整形 | 单箱占比超过 {share_cap_pct} 上限的候选先做均衡拆分 + 相邻再合并（share_balancing），拆不开或合不回去时放弃整形 | 管线自动执行 |")
+    A(f"| 策略阈值 | 自动通过：累计 1M30+ ≤ {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])}、累计 3M30+ ≤ {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])}、边际 3M30+ ≤ {pct(auto_c['max_marginal_3m30p_cnt_bad_rate'])}；总接纳：累计 1M30+ ≤ {pct(acc_c['max_cum_1m30p_cnt_bad_rate'])}、累计 3M30+ ≤ {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])}、边际 3M30+ ≤ {pct(acc_c['max_marginal_3m30p_cnt_bad_rate'])} | 模型配置 strategy_config（默认策略） |")
+    if manual:
+        A(f"| 人工指定·档位结构 | 手动指定 {n_bins} 档 {plan}（模型配置 final_bin_ranges）；管线对手动方案仅校验结构（连续覆盖 1..{init_bins}、档数 {settings.MIN_FINAL_BIN_COUNT}~{settings.MAX_FINAL_BIN_COUNT}、Train 主指标无倒挂），箱级约束与极端边界跨越仅写入日志供评审、不阻断 | 模型配置 final_bin_ranges（用户确认） |")
+    else:
+        A("| 人工指定 | 无——档位结构与策略阈值均由管线按上述约束自动选出 | — |")
+    A("")
+    if manual:
+        auto_txt = "（候选表未记录）"
+        if selected_candidate is not None:
+            auto_txt = f"{selected_candidate['ranges']}（综合得分 {float(selected_candidate['candidate_score']):.2f}）"
+        A(f"**自动与人工的差异**：自动合箱在本口径下选中 {auto_txt}；人工约束仅替换档位结构为 {plan}，其余约束（结构校验口径、策略风险上限）不变；策略阈值不由人工直接指定，而是由管线在新档位上按原约束自动重选——本方案为自动通过 {auto_th}（{auto_bin} 档右边界）、总接纳 {accept_th}（{accept_bin} 档右边界）。")
+    else:
+        A("**自动与人工的差异**：本方案无人工新增约束，档位结构与策略阈值均为管线按上述约束自动选出的结果。")
+    A("")
     A("### （三）合箱执行记录\n")
     A("| 步 | 阶段 | 合并初始箱 | 左→右 3M30+ | 两比例检验 p | IV 损失 | 合并后档位数 |")
     A("| --- | --- | --- | ---: | ---: | ---: | ---: |")
@@ -849,7 +875,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A(steps_note)
     A("")
     A("### （四）候选方案评估")
-    A("候选方案先接受硬约束筛选，包括档位数为 6–8、Train 主指标无倒挂、单箱约束全部满足且未跨越极端箱边界。通过筛选的方案再按 Train 全指标倒挂数、IV 保留率、最小相邻风险差距及目标档位偏离程度综合评分。单箱样本占比超过上限的方案先做分布整形，整形变体（标注\"整形\"）与原方案一同评分。")
+    A(f"候选方案先接受硬约束筛选，包括档位数为 {settings.MIN_FINAL_BIN_COUNT}–{settings.MAX_FINAL_BIN_COUNT}、Train 主指标无倒挂、单箱约束全部满足且未跨越极端箱边界。通过筛选的方案再按 Train 全指标倒挂数、IV 保留率、最小相邻风险差距及目标档位偏离程度综合评分。单箱样本占比超过上限的方案先做分布整形，整形变体（标注\"整形\"）与原方案一同评分。")
     A("")
     A("| 档位数 | 方案 | 来源 | 主指标倒挂 | 全指标倒挂 | IV 保留率 | 最小相邻差距 | 综合得分 |")
     A("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |")
@@ -1571,7 +1597,7 @@ def render_cross(ctx: ReportContext):
         def b(text):
             return f"**{text}**"
 
-        def cell_metric(r, key, fmt, min_n=100):
+        def cell_metric(r, key, fmt, min_n=MIN_CELL_N_FOR_RATE):
             if r is None:
                 return "—"
             if key in ("1m30p_cnt_bad_rate", "3m30p_cnt_bad_rate", "1m30p_amt_bad_rate", "3m30p_amt_bad_rate", "actual_approval_rate", "actual_auto_approval_rate", "actual_deal_rate", "1m30p_cnt_lift", "3m30p_cnt_lift", "1m30p_amt_lift", "3m30p_amt_lift") and r["n"] < min_n:
@@ -1720,7 +1746,7 @@ def render_cross(ctx: ReportContext):
     B("## 一、结论摘要\n")
     B(f"1. **两模型中等相关、互不冗余**：Train 上 Pearson 相关 {rate4(pearson)}、Spearman 相关 {rate4(spearman)}、分档秩相关 {rate4(rank_corr)}。")
     B(f"2. **分数融合不加分**：各组合分的 Train/OOT AUC、KS 均不高于{ds_name} {md_name_a} 单模型分（详见五）。")
-    B("3. **增量信息双向存在，mlt 是主排序器**：mlt 各档内价值增量与价值各档内 mlt 增量并存，mlt 档内跨度远大于价值档内跨度（详见四）。")
+    B(f"3. **增量信息双向存在，{tag_a} 是主排序器**：{tag_a} 各档内{md_name_b}增量与{md_name_b}各档内 {tag_a} 增量并存，{tag_a} 档内跨度远大于{md_name_b}档内跨度（详见四）。")
     B(f"4. **共识人群风险梯度清晰**：对角 3M30+ 由 A-A 低风险格单调升至 G-G 高风险格（详见三）。")
     B(f"5. **AND 规则交叉是唯一有效的交叉方式**：接纳风险 {tag_a} 单模型 {pct(a_row['train_accept_3m30p'])} → AND 组合 {pct(and_row['train_accept_3m30p'])}（OOT {pct(and_row['oot_accept_3m30p'])}），接纳率 {pct(a_row['train_accept_rate'])} → {pct(and_row['train_accept_rate'])}；OR 组合无增益（详见六）。")
     B(f"6. **价值模型单独使用有高风险盲区**：\"仅价值低\"象限（{disp_b} ≤ {acc_b} 但 {tag_a} > {acc_a}）Train {pct(quad[('train','仅wth低')]['sample_pct'])}、3M30+ {pct(quad[('train','仅wth低')]['3m30p_cnt_bad_rate'])}——即\"价值好 & 风险差\"错配客群，价值模型单独决策会把这批高风险人群放进接纳段。")
@@ -1902,13 +1928,13 @@ def render_cross(ctx: ReportContext):
                 B(f"| {grp} | {label} | {num(r['n'])} | {pct(r['sample_pct'])} | {pct(r['1m30p_cnt_bad_rate'])} | {pct(r['3m30p_cnt_bad_rate'])} |")
     B("")
     B(f"- **仅 {tag_a} 低象限**是 AND 组合相对 {tag_a} 单模型多剔除的人群，风险高于双低象限、低于双高象限——AND 正是把这批\"{tag_a} 看着还行、价值看着差\"的人转拒，换来接纳风险的下降；")
-    B("- **仅价值低象限**即\"价值好 & 风险差\"错配客群：价值模型单独决策会把它们放进接纳段，是其单模型策略最危险的部分，mlt 恰好能拦住；该象限适合\"谨慎经营\"（短期、小额产品）而非直接提额。")
+    B(f"- **仅价值低象限**即\"价值好 & 风险差\"错配客群：价值模型单独决策会把它们放进接纳段，是其单模型策略最危险的部分，{tag_a} 恰好能拦住；该象限适合\"谨慎经营\"（短期、小额产品）而非直接提额。")
     B("")
     B("## 七、落地建议\n")
     B("1. **不做分数融合**：价值模型不以\"提升打分能力\"的理由并入 mlt 分数，以规则方式使用。")
     B(f"2. **降险优先选 AND 组合**：接纳风险 {pct(a_row['train_accept_3m30p'])} → {pct(and_row['train_accept_3m30p'])}（OOT {pct(and_row['oot_accept_3m30p'])}），接纳率 {pct(and_row['train_accept_rate'])}；业务需先确认流量代价是否可接受，再在 AND 网格（六（二））中按风险目标选点。")
-    B("3. **流量敏感场景优先评估边界档加严**：mlt 现行策略整体不动，仅对 mlt 边界档（如 C 档）内价值 ≥ D 档的人群转人工审核，用较小流量代价获取大部分降险收益。")
-    B(f"4. **价值模型不要单独上线**：其接纳段内混有 {pct(quad[('train','仅wth低')]['sample_pct'])} 的实际高风险人群（3M30+ {pct(quad[('train','仅wth低')]['3m30p_cnt_bad_rate'])}）；若必须单独上线，需在 C 档以内叠加 mlt 加严条件。")
+    B(f"3. **流量敏感场景优先评估边界档加严**：{tag_a} 现行策略整体不动，仅对 {tag_a} 边界档（如 {auto_a} 档）内{md_name_b} ≥ D 档的人群转人工审核，用较小流量代价获取大部分降险收益。")
+    B(f"4. **价值模型不要单独上线**：其接纳段内混有 {pct(quad[('train','仅wth低')]['sample_pct'])} 的实际高风险人群（3M30+ {pct(quad[('train','仅wth低')]['3m30p_cnt_bad_rate'])}）；若必须单独上线，需在 {acc_b} 档以内叠加 {tag_a} 加严条件。")
     B(f"5. **提额/经营场景用\"双低象限\"**：候选人群为双低象限（{tag_a} ≤ {acc_a} 且 {tag_b} ≤ {acc_b}），风险由 {tag_a} 档位把关、额度由价值（收入代理）支撑；注意排除\"仅价值低\"象限的错配人群。")
     B("6. **上线后按月监控**：组合段风险、两模型分档分布（PSI）、强分歧格占比，重点关注双高格与仅价值低象限的风险漂移。")
     B("")
@@ -1925,11 +1951,11 @@ def render_cross(ctx: ReportContext):
     B("| 配置项 | 值 | 说明 |")
     B("| --- | --- | --- |")
     B(f"| 现行阈值映射 | {tag_a} 自动 ≤{rank(auto_a)} / 接纳 ≤{rank(acc_a)}；{md_name_b} 自动 ≤{rank(auto_b)} / 接纳 ≤{rank(acc_b)} | 取自两模型各自报告的最终策略 |")
-    B(f"| {tag_a} 最终方案 | {plan_a} | 自动合箱 |")
+    B(f"| {tag_a} 最终方案 | {plan_a} | {'手动指定（final_bin_ranges）' if 'final_bin_ranges' in ctx.model_a_cfg else '自动合箱'} |")
     B(f"| {tag_b} 最终方案 | {plan_b} | {'手动指定（final_bin_ranges）' if 'final_bin_ranges' in ctx.model_b_cfg else '自动合箱'} |")
     B("| 组合分 | z 平均 / 7:3 加权 / 档位平均 / 档位取大 | z 用 Train 均值标准差，复用到 OOT |")
-    B("| 强分歧定义 | 两模型档位差 ≥ 3 | 用于分歧人群汇总 |")
-    B("| 矩阵格展示阈值 | 样本量 ≥ 100 | 不足只展示样本量 |")
+    B(f"| 强分歧定义 | 两模型档位差 ≥ {appendix_cfg.get('DISAGREE_RANK_GAP', '3')} | 用于分歧人群汇总 |")
+    B(f"| 矩阵格展示阈值 | 样本量 ≥ {MIN_CELL_N_FOR_RATE} | 不足只展示样本量 |")
     B("")
 
     md_path = resolve_md_path(ctx, "cross")
