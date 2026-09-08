@@ -240,6 +240,24 @@ def resolve_xlsx(prefix: str, date: str | None, out_dir: Path | None = None) -> 
     return sorted(dated)[-1][1]
 
 
+def resolve_xlsx_not_newer_than(prefix: str, ceiling: str, out_dir: Path | None = None) -> Path:
+    """取 out/{prefix}_*.xlsx 中文件名日期不晚于 ceiling 的最新者。
+
+    交叉报告的重算边界（收入/利息矩阵按 res 重算、分档与交叉 Excel 逐格核对）必须使用
+    交叉 Excel 生成时存在的单模型方案：单模型后续重分箱后，直接取最新单模型 Excel 会与
+    冻结的交叉 Excel 分档脱锚、逐格断言失败。按"不晚于交叉 Excel 日期"取最新者保证因果一致。
+    """
+    out_dir = out_dir or ROOT / "out"
+    dated = []
+    for p in out_dir.glob(f"{prefix}_*.xlsx"):
+        m = re.match(rf"^{re.escape(prefix)}_(\d{{8}})\.xlsx$", p.name)
+        if m and m.group(1) <= ceiling:
+            dated.append((m.group(1), p))
+    if not dated:
+        raise ValueError(f"out/ 下未找到不晚于 {ceiling} 的 {prefix}_YYYYMMDD.xlsx 单模型 Excel")
+    return sorted(dated)[-1][1]
+
+
 def resolve_cross_prefix(dataset_key: str, model_a: str, model_b: str) -> str:
     """交叉 Excel 输出前缀：复用 scripts/cross_models.py 的历史登记（双向查询），未登记走通用命名。"""
     from scripts.cross_models import REPORT_PREFIXES
@@ -271,6 +289,12 @@ def build_context(dataset_key: str, model_a_key: str, model_b_key: str | None = 
     if b_cfg:
         cross_xlsx = resolve_xlsx(
             resolve_cross_prefix(dataset_key, model_a_key, model_b_key), date, out_dir_path)
+        if date is None:
+            cross_date = re.match(r".*_(\d{8})\.xlsx$", cross_xlsx.name).group(1)
+            xlsx_a = resolve_xlsx_not_newer_than(
+                model_report_prefix(a_cfg, metric), cross_date, out_dir_path)
+            xlsx_b = resolve_xlsx_not_newer_than(
+                model_report_prefix(b_cfg, metric), cross_date, out_dir_path)
     resolved_date = date or re.match(r".*_(\d{8})\.xlsx$", xlsx_a.name).group(1)
     return ReportContext(
         dataset_key=dataset_key,
@@ -311,7 +335,12 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         cfg, model_key, xlsx = ctx.model_b_cfg, ctx.model_b_key, ctx.xlsx_b
         md_path = resolve_md_path(ctx, "single_b")
     meta = cfg["report_meta"]
+    amt_mode = ctx.metric == "amt"
+    # 金额口径沿用自动合箱叙事（手动 final_bin_ranges 仅笔数口径生效，与管线 resolve_merge_ranges
+    # 的门槛一致）；report_notes_amt 为金额口径专属叙事覆盖（缺省回落到 report_notes）。
     notes = cfg.get("report_notes", {})
+    if amt_mode:
+        notes = {**notes, **cfg.get("report_notes_amt", {})}
     title = model_cn = meta["report_name"]
     score_col = cfg["score_col"]
     final_bin_col = cfg["final_bin_col"]
@@ -319,7 +348,7 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     decile = notes.get("decile", "")
     missing_note = notes.get("missing_note", "")
     merge_note = notes.get("merge_note", "")
-    manual = "final_bin_ranges" in cfg
+    manual = "final_bin_ranges" in cfg and not amt_mode
     value_semantics = bool(meta.get("value_model"))
     dist_note = notes.get("dist_note", "")
     steps_note = notes.get("steps_note", "")
@@ -340,7 +369,6 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     ds_notes = ctx.dataset_cfg.get("report_notes", {})
     sample_file = ctx.dataset_cfg["sample_file"]
     sc = cfg["strategy_config"]
-    amt_mode = ctx.metric == "amt"
     if amt_mode:
         auto_c = settings.AMT_STRATEGY_CONFIG["auto_constraints"]
         acc_c = settings.AMT_STRATEGY_CONFIG["accept_constraints"]
@@ -687,7 +715,16 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     maxbin = max(tr_rows, key=lambda r: r["sample_pct"])
     shares = " / ".join(pct(r["sample_pct"]) for r in tr_rows)
     if manual:
-        A(f"2. **{n_bins} 档方案经手动指定（模型配置 final_bin_ranges，2026-09-01 用户确认）**：自动合箱在该口径下选中 6 档（保留最坏极端箱 B20 单箱），经评审改为手动 {n_bins} 档 {plan} 消除 7/8 档候选的 B20 单箱倒挂（详见三（二））；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限：{dist_note}；")
+        A(notes.get("manual_summary2", "").format(
+            n_bins=n_bins,
+            plan=plan,
+            shares=shares,
+            maxbin=maxbin[bin_col],
+            maxbin_from=f"{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}",
+            maxbin_pct=pct(maxbin['sample_pct']),
+            share_cap_pct=share_cap_pct,
+            dist_note=dist_note,
+        ))
     elif maxbin["sample_pct"] > settings.MAX_FINAL_BIN_SHARE:
         A(f"2. **{n_bins} 档方案经自动合箱选中，Train 主指标倒挂 0 处**：{plan}；人数分布偏中高风险、峰值档超上限——Train 各档占比为 {shares}，最大单箱为 {maxbin[bin_col]} 档（{bin_label(maxbin['source_bin_start'])}–{bin_label(maxbin['source_bin_end'])}）{pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限：{dist_note}；")
     else:
@@ -695,14 +732,25 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
 
     # 结论 3：OOT 主指标
     viol = [r for r in mono_bad if r["sample_group"] == "oot" and r["metric"] == "1m30p_cnt_bad_rate"]
+    viol_bins = []
     if viol:
-        vbn = int(viol[0]["violation_bins"]) - 1
+        viol_bins = [int(x) for x in str(viol[0]["violation_bins"]).split(",") if x.strip()]
+    if viol_bins:
+        vbn = viol_bins[0] - 1
         vrow = oo_rows[vbn]
         prev = oo_rows[vbn - 1]
-        if vbn == len(oo_rows) - 1:
-            inv_txt = f"；OOT 1M30+ 笔数在 {vrow[bin_col]} 档出现尾部倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}，{vrow[bin_col]} 档 1M30+ 成熟量仅 {num(vrow['1m30p_cnt_mature'])}，属尾部小样本噪声）"
+        if len(viol_bins) == 1:
+            if vbn == len(oo_rows) - 1:
+                inv_txt = f"；OOT 1M30+ 笔数在 {vrow[bin_col]} 档出现尾部倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}，{vrow[bin_col]} 档 1M30+ 成熟量仅 {num(vrow['1m30p_cnt_mature'])}，属尾部小样本噪声）"
+            else:
+                inv_txt = f"；OOT 1M30+ 笔数在 {vrow[bin_col]} 档出现 1 处倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}，见五（一））"
         else:
-            inv_txt = f"；OOT 1M30+ 笔数在 {vrow[bin_col]} 档出现 1 处倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}，见五（一））"
+            parts = []
+            for b in viol_bins:
+                r2 = oo_rows[b - 1]
+                p2 = oo_rows[b - 2]
+                parts.append(f"{p2[bin_col]} 档 {pct(p2['1m30p_cnt_bad_rate'])} → {r2[bin_col]} 档 {pct(r2['1m30p_cnt_bad_rate'])}")
+            inv_txt = f"；OOT 1M30+ 笔数在 {'、'.join(oo_rows[b - 1][bin_col] for b in viol_bins)} 档出现 {len(viol_bins)} 处倒挂（{'；'.join(parts)}，见五（一））"
     else:
         vrow = prev = None
         inv_txt = ""
@@ -753,11 +801,9 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         ("③", "初始分箱",
          f"Train 上按`{score_col}` 分位数等频初分为 {init_bins} 箱（B01–B{init_bins:02d}，左开右闭、首尾 ±∞），边界固定后原样复用至 OOT"),
         ("④", "自动合箱（Train）",
-         "四阶段递进：小箱清理（消除单箱硬约束违反）→ 单调合并（PAVA 风格消除主指标倒挂）→ 档位压缩（≤ 8 档）→ 候选生成（8/7/6 档）" if not manual else
-         "四阶段递进：小箱清理（1 步）→ 单调合并（本次无独立步骤）→ 档位压缩 → 候选生成（8/7/6 档）；7/8 档候选残留主指标倒挂 1 处、6 档候选无倒挂（箱级违规 2 项）"),
+         "四阶段递进：小箱清理（消除单箱硬约束违反）→ 单调合并（PAVA 风格消除主指标倒挂）→ 档位压缩（≤ 8 档）→ 候选生成（8/7/6 档）" if not manual else notes.get("manual_flow4", "")),
         ("⑤", "候选评估与选择",
-         f"硬约束筛选（6–8 档、无倒挂、单箱约束满足、不跨极端箱边界）→ 对单箱 Train 占比超过 {share_cap_pct} 上限的候选做\"均衡拆分 + 相邻再合并\"整形（share_balancing）→ 按倒挂数、IV 保留率、最小相邻差距、档位偏离综合评分 → 选中 7 档方案" if not manual else
-         "硬约束筛选（该口径下 6–8 档候选均未完全满足）→ 自动选中 6 档方案，经评审改为手动 7 档（模型配置 final_bin_ranges，2026-09-01 用户确认）"),
+         f"硬约束筛选（6–8 档、无倒挂、单箱约束满足、不跨极端箱边界）→ 对单箱 Train 占比超过 {share_cap_pct} 上限的候选做\"均衡拆分 + 相邻再合并\"整形（share_balancing）→ 按倒挂数、IV 保留率、最小相邻差距、档位偏离综合评分 → 选中 7 档方案" if not manual else notes.get("manual_flow5", "")),
         ("⑥", "样本外验证",
          "Train/OOT 对照验证：风险单调性、分布稳定性（PSI）、区分能力（AUC/KS）、月度稳定性、测算分段风险梯度"),
         ("⑦", "策略阈值设定",
@@ -871,9 +917,11 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
         parts = []
         for bl, sp, is_tail, floor in fails:
             parts.append(f"{bl} 档占比 {sp*100:.4f}% 略低于{'首尾箱' if is_tail else '中间箱'} {floor*100:.1f}% 下限")
-        A(f"单箱约束不满足项：{'；'.join(parts)}；其余各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束。最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限（见三（四））。")
+        cap_txt = "超过" if maxbin["sample_pct"] > settings.MAX_FINAL_BIN_SHARE else "未超过"
+        A(f"单箱约束不满足项：{'；'.join(parts)}；其余各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束。最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，{cap_txt} {share_cap_pct} 的人数分布上限（见三（四））。")
     else:
-        A(f"各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束，无需依赖极端箱放宽；最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，超过 {share_cap_pct} 的人数分布上限（见三（四））。")
+        cap_txt = "超过" if maxbin["sample_pct"] > settings.MAX_FINAL_BIN_SHARE else "未超过"
+        A(f"各档样本占比、成熟量、坏样本量、好样本量均满足普通箱约束，无需依赖极端箱放宽；最大单箱占比为 {maxbin[bin_col]} 档的 {pct(maxbin['sample_pct'])}，{cap_txt} {share_cap_pct} 的人数分布上限（见三（四））。")
     A("")
     A("### （六）最终分箱统计\n")
     A("**Train 最终分箱统计**：\n")
@@ -890,8 +938,8 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     for r in oo_rows:
         A(f"| {r[bin_col]} | {num(r['n'])} | {pct(r['sample_pct'])} | {pct_ci(r['1m30p_cnt_bad_rate'], r['1m30p_cnt_bad_rate_ci_low'], r['1m30p_cnt_bad_rate_ci_high'])} | {pct_ci(r['3m30p_cnt_bad_rate'], r['3m30p_cnt_bad_rate_ci_low'], r['3m30p_cnt_bad_rate_ci_high'])} | {pct(r['3m30p_amt_bad_rate'])} | {pct(r['cum_3m30p_cnt_bad_rate'])} |")
     A("")
-    if viol:
-        A(f"OOT 的 3M30+ 笔数与金额、1M30+ 金额保持单调，1M30+ 笔数存在 1 处倒挂（见五（一）），高风险尾部仍可分离。")
+    if viol_bins:
+        A(f"OOT 的 3M30+ 笔数与金额、1M30+ 金额保持单调，1M30+ 笔数存在 {len(viol_bins)} 处倒挂（见五（一）），高风险尾部仍可分离。")
     else:
         A(f"OOT 的 1M30+ 与 3M30+ 笔数、金额逾期率均保持单调，无局部倒挂；高风险尾部仍可分离。")
     A("")
@@ -963,7 +1011,18 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     else:
         A(f"- 自动通过阈值为 {auto_bin} 档右边界 {auto_th}，累计通过率 {pct(S('Train','测算自动通过率'))}；总接纳阈值为 {accept_bin} 档右边界 {accept_th}，累计接纳率 {pct(S('Train','测算总接纳率'))}；")
         A(f"- 约束核对：自动通过档累计 1M30+ {pct(auto_cum1)}、累计 3M30+ {pct(auto_cum3)}（CI 上界 {pct(auto_cum3_hi)}），边际 {pct(auto_cum['3m30p_cnt_bad_rate'])}；总接纳档累计 1M30+ {pct(acc_cum1)}（CI 上界 {pct(acc_cum1_hi)}）、累计 3M30+ {pct(acc_cum3)}（CI 上界 {pct(acc_cum3_hi)}）、边际 3M30+ {pct(acc_cum['3m30p_cnt_bad_rate'])}（CI 上界 {pct(marg3_hi)}）；")
-        A(f"- 放宽至下一档后约束均不再满足：{auto_bin}→{nxt_auto[bin_col]} 后累计 1M30+ {pct(nxt_auto['cum_1m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} 上限、累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故自动通过止于 {auto_bin}；{accept_bin}→{nxt_acc[bin_col]} 后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])} 上限，故总接纳止于 {accept_bin}。选中档位的累计及边际 3M30+ CI 上界（{pct(auto_cum3_hi)} / {pct(auto_cum['3m30p_cnt_bad_rate_ci_high'])}、{pct(acc_cum3_hi)} / {pct(marg3_hi)}）中，累计上界已达或超过对应上限（{pct(auto_c['max_cum_3m30p_cnt_bad_rate'])} / {pct(acc_c['max_cum_3m30p_cnt_bad_rate'])}），CI 层面余量有限，实施后需按约束口径持续监测。")
+        auto_cap3 = auto_c[f"max_cum_3m30p_{rate_sfx}_bad_rate"]
+        acc_cap3 = acc_c[f"max_cum_3m30p_{rate_sfx}_bad_rate"]
+        auto_over = auto_cum3_hi >= auto_cap3
+        acc_over = acc_cum3_hi >= acc_cap3
+        if auto_over and acc_over:
+            ci_tail = f"累计上界已达或超过对应上限（{pct(auto_cap3)} / {pct(acc_cap3)}）"
+        else:
+            ci_tail = (
+                f"自动累计上界{'已达或超过' if auto_over else '低于'} {pct(auto_cap3)} 上限、"
+                f"总接纳累计上界{'已达或超过' if acc_over else '低于'} {pct(acc_cap3)} 上限"
+            )
+        A(f"- 放宽至下一档后约束均不再满足：{auto_bin}→{nxt_auto[bin_col]} 后累计 1M30+ {pct(nxt_auto['cum_1m30p_cnt_bad_rate'])} 超 {pct(auto_c['max_cum_1m30p_cnt_bad_rate'])} 上限、累计 3M30+ {pct(nxt_auto['cum_3m30p_cnt_bad_rate'])} 超 {pct(auto_cap3)} 上限，故自动通过止于 {auto_bin}；{accept_bin}→{nxt_acc[bin_col]} 后累计 3M30+ {pct(nxt_acc['cum_3m30p_cnt_bad_rate'])} 超 {pct(acc_cap3)} 上限，故总接纳止于 {accept_bin}。选中档位的累计及边际 3M30+ CI 上界（{pct(auto_cum3_hi)} / {pct(auto_cum['3m30p_cnt_bad_rate_ci_high'])}、{pct(acc_cum3_hi)} / {pct(marg3_hi)}）中，{ci_tail}，CI 层面余量有限，实施后需按约束口径持续监测。")
     A("")
     A("### （四）模型策略测算流量与分段风险\n")
     A("```text")
@@ -1032,9 +1091,19 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     for r in mono_rows:
         A(f"| {r['sample_group']} | {r['metric']} | {'是' if r['is_monotonic_non_decreasing'] else '否'} | {r['violation_cnt']} | {r['violation_bins'] or '—'} |")
     A("")
-    if viol:
-        noise = "，属尾部小样本噪声" if vbn == len(oo_rows) - 1 else "，属样本波动"
-        A(f"Train 四类指标均单调；OOT 3M30+ 笔数与金额、1M30+ 金额保持单调，1M30+ 笔数在 {vrow[bin_col]} 档 1 处倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}，{vrow[bin_col]} 档 1M30+ 成熟量 {num(vrow['1m30p_cnt_mature'])}{noise}）；策略三段\"自动通过 < 人工审核 < 拒绝\"的风险梯度稳定，上线后仍按月复核。")
+    if viol_bins:
+        if len(viol_bins) == 1:
+            noise = "，属尾部小样本噪声" if vbn == len(oo_rows) - 1 else "，属样本波动"
+            A(f"Train 四类指标均单调；OOT 3M30+ 笔数与金额、1M30+ 金额保持单调，1M30+ 笔数在 {vrow[bin_col]} 档 1 处倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}，{vrow[bin_col]} 档 1M30+ 成熟量 {num(vrow['1m30p_cnt_mature'])}{noise}）；策略三段\"自动通过 < 人工审核 < 拒绝\"的风险梯度稳定，上线后仍按月复核。")
+        else:
+            parts = []
+            mats = []
+            for b in viol_bins:
+                r2 = oo_rows[b - 1]
+                p2 = oo_rows[b - 2]
+                parts.append(f"{p2[bin_col]} 档 {pct(p2['1m30p_cnt_bad_rate'])} → {r2[bin_col]} 档 {pct(r2['1m30p_cnt_bad_rate'])}")
+                mats.append(f"{r2[bin_col]} 档 1M30+ 成熟量 {num(r2['1m30p_cnt_mature'])}")
+            A(f"Train 四类指标均单调；OOT 3M30+ 笔数与金额、1M30+ 金额保持单调，1M30+ 笔数在 {'、'.join(oo_rows[b - 1][bin_col] for b in viol_bins)} 档 {len(viol_bins)} 处倒挂（{'、'.join(parts)}，{'、'.join(mats)}，属样本波动）；策略三段\"自动通过 < 人工审核 < 拒绝\"的风险梯度稳定，上线后仍按月复核。")
     else:
         A("Train 与 OOT 的四类指标均保持单调，无局部倒挂；策略三段\"自动通过 < 人工审核 < 拒绝\"的风险梯度稳定，上线后仍按月复核。")
     A("")
@@ -1079,8 +1148,16 @@ def render_single_model(ctx: ReportContext, role: str = "a"):
     A("| 维度 | 结果 | 判定 |")
     A("| --- | --- | --- |")
     A("| 主指标排序 | Train/OOT 的 3M30+ 笔数与金额口径均无倒挂 | 通过 |")
-    if viol:
-        A(f"| 辅助指标排序 | Train 的 1M30+ 笔数与金额口径无倒挂；OOT 1M30+ 笔数 {vrow[bin_col]} 档 1 处倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}） | 基本通过 |")
+    if viol_bins:
+        if len(viol_bins) == 1:
+            A(f"| 辅助指标排序 | Train 的 1M30+ 笔数与金额口径无倒挂；OOT 1M30+ 笔数 {vrow[bin_col]} 档 1 处倒挂（{prev[bin_col]} 档 {pct(prev['1m30p_cnt_bad_rate'])} → {vrow[bin_col]} 档 {pct(vrow['1m30p_cnt_bad_rate'])}） | 基本通过 |")
+        else:
+            parts = []
+            for b in viol_bins:
+                r2 = oo_rows[b - 1]
+                p2 = oo_rows[b - 2]
+                parts.append(f"{p2[bin_col]} 档 {pct(p2['1m30p_cnt_bad_rate'])} → {r2[bin_col]} 档 {pct(r2['1m30p_cnt_bad_rate'])}")
+            A(f"| 辅助指标排序 | Train 的 1M30+ 笔数与金额口径无倒挂；OOT 1M30+ 笔数 {len(viol_bins)} 处倒挂（{'、'.join(parts)}） | 基本通过 |")
     else:
         A("| 辅助指标排序 | Train/OOT 的 1M30+ 笔数与金额口径均无倒挂 | 通过 |")
     A(f"| 分布稳定 | Train/OOT PSI = {rate4(psi)} | 通过 |")

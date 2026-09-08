@@ -608,7 +608,7 @@ candidate_score
 按上述排序取第一名的合箱范围作为最终方案。若没有任何候选通过全部硬约束，则退而求其次：忽略硬约束筛选，直接从全部候选中按同样排序取第一名（此时 `hard_constraints_ok` 为 False，需在候选评分表中确认原因）。运行日志会打印实际档位数和方案，例如：
 
 ```text
-3/9 自动合箱完成：7 档，方案=[(1,1), (2,4), (5,8), (9,11), (12,15), (16,19), (20,20)]
+3/9 自动合箱完成：7 档，方案=[(1,1), (2,4), (5,8), (9,11), (12,14), (15,18), (19,20)]
 ```
 
 主要结果：
@@ -1443,7 +1443,7 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 1. 跑完管线出 Excel 后，md 统一由生成器输出：`python scr/_gen_new_reports.py --dataset <key> [--metric cnt|amt] [--model-a/--model-b] [--date YYYYMMDD]`。已在 `configs/datasets.py` 登记 `report_meta` 的数据集（laoke / new）默认渲染其全部单模型+交叉组合；新增组合或未登记数据集先 `--out-dir` 临时目录渲染评审，数值确认后再放 `docs/`（防覆盖护栏）；
 2. 数值必须与 Excel 一致：生成器从 Excel / res 现算（openpyxl 读值 + 内建断言），**禁止手抄**；
-3. 老客场景复核优先复用核对脚本（已适配生成器输出的同构表结构）：mlt 笔数 / 金额口径分别为 `scr/_verify_report_sync_mlt_cnt.py`（966 个数值单元）与 `scr/_verify_report_sync_mlt_amt.py`（991 个）；价值 / 交叉数值由生成器内建断言与 CLAUDE.md 第 8 节冻结基准保证；
+3. 老客场景复核优先复用核对脚本（已适配生成器输出的同构表结构）：mlt 笔数 / 金额口径分别为 `scr/_verify_report_sync_mlt_cnt.py`（980 个数值单元）与 `scr/_verify_report_sync_mlt_amt.py`（1005 个）；价值 / 交叉数值由生成器内建断言与 CLAUDE.md 第 8 节冻结基准保证；
 4. 结构与文案改动只改 `scr/_gen_new_reports.py` 再重跑：重跑后 git diff 应只含目标行，出现多余 diff 说明生成器漂移，停下排查；
 5. 报告 md 放 `docs/`，文件名由生成器按配置推导（`分箱_{数据集}_{md_name}_笔数.md` / `_金额.md` / `交叉_..._..._md`），不改名、不手改。
 
@@ -1451,14 +1451,14 @@ out/binning_amt_strategy_report_YYYYMMDD.xlsx
 
 - 函数级改动只发生在 `pipeline/` 对应模块；
 - 任何改动后必须跑：`python -m unittest discover tests`（28 例全绿）；
-- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（966 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（991 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py`（7 份 md 全部由生成器维护）并核对 git diff 仅目标行。
+- 改动后按场景回归：mlt cnt → 重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py` 核对（980 单元）；mlt amt → `scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（1005 单元）；老客价值模型 / 交叉 → 关键值与 CLAUDE.md 第 8 节冻结基准一致；新客管线 → 重跑 `scr/_gen_new_reports.py`（7 份 md 全部由生成器维护）并核对 git diff 仅目标行。
 
 ### 6. docs/ 报告清单（数值锚与维护方式）
 
 | 报告（docs/） | 数值来源 Excel（out/，日期=重跑当天，md 页头锚定具体版本） | 维护 / 核对方式 |
 | --- | --- | --- |
-| 分箱_老客_mlt_笔数.md | `binning_strategy_report_*.xlsx`（6 sheets） | 生成器输出（改文案改生成器重跑）+ `scr/_verify_report_sync_mlt_cnt.py` 复核（966 单元） |
-| 分箱_老客_mlt_金额.md | `binning_amt_strategy_report_*.xlsx` | 同上（amt 分支，991 单元） |
+| 分箱_老客_mlt_笔数.md | `binning_strategy_report_*.xlsx`（6 sheets） | 生成器输出（改文案改生成器重跑）+ `scr/_verify_report_sync_mlt_cnt.py` 复核（980 单元） |
+| 分箱_老客_mlt_金额.md | `binning_amt_strategy_report_*.xlsx` | 同上（amt 分支，1005 单元） |
 | 分箱_老客_价值_笔数.md | `binning_worthiness_strategy_report_*.xlsx` | 同上（生成器内建断言：价值标签分档计数 vs Excel 03 逐档 n 一致） |
 | 交叉_老客_mlt_价值.md | `binning_cross_strategy_report_*.xlsx`（20260904 起 02/03 含自动审批率列） | 同上（生成器内建断言：收入/自动审批矩阵 res 重算，分档计数 vs Excel 矩阵逐格 n） |
 | 分箱_新客_mlt_笔数.md | `binning_new_mlt_strategy_report_*.xlsx` | `scr/_gen_new_reports.py` 生成（管线重跑后重跑，结构与老客同模板） |

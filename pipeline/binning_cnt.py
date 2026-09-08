@@ -1108,11 +1108,14 @@ def resolve_merge_ranges(
 ) -> List[Tuple[int, int]]:
     """选定最终合箱方案：settings.FINAL_BIN_RANGES 指定时校验后直接采用，否则走自动评分表。
 
-    手动方案（模型配置 final_bin_ranges）硬校验：连续覆盖 1..initial_bin_count、档数在
-    [MIN_FINAL_BIN_COUNT, MAX_FINAL_BIN_COUNT]、Train 主指标（PRIMARY_RATE_COLS）无倒挂；
-    箱级约束与极端边界跨越数仅写入日志供评审（与自动路径的评分口径一致，不阻断）。
+    手动方案（模型配置 final_bin_ranges）仅笔数口径（CURRENT_METRIC == "cnt"）生效；金额口径
+    继续走自动合箱评分（金额口径有自己的候选评分实现与校准约束，不共用笔数口径的手动方案）。
+
+    手动方案硬校验：连续覆盖 1..initial_bin_count、档数在 [MIN_FINAL_BIN_COUNT,
+    MAX_FINAL_BIN_COUNT]、Train 主指标（PRIMARY_RATE_COLS）无倒挂；箱级约束与极端边界跨越数
+    仅写入日志供评审（与自动路径的评分口径一致，不阻断）。
     """
-    if not FINAL_BIN_RANGES:
+    if not FINAL_BIN_RANGES or settings.CURRENT_METRIC != "cnt":
         return selected_ranges_from_candidate_table(candidates)
 
     ranges = (

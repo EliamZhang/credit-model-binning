@@ -33,8 +33,15 @@ class ContextAndNamingTests(unittest.TestCase):
         self.assertEqual(ctx.cross_xlsx.name, "binning_new_cross_strategy_report_20260901.xlsx")
 
     def test_build_context_date_from_file(self):
+        # date 缺省时按 xlsx_a 实际解析到的日期回填（out/ 下最新文件日期可能随重跑变化，
+        # 故期望值从 resolve_xlsx 现取而非固化）。
+        import re
+
         ctx = gen.build_context("new", "new_mlt", date=None)
-        self.assertEqual(ctx.date, "20260901")
+        latest = gen.resolve_xlsx("binning_new_mlt_strategy_report", None)
+        expected = re.match(r".*_(\d{8})\.xlsx$", latest.name).group(1)
+        self.assertEqual(ctx.date, expected)
+        self.assertEqual(ctx.xlsx_a.name, f"binning_new_mlt_strategy_report_{expected}.xlsx")
 
     def test_resolve_md_path_names(self):
         ctx = gen.build_context("new", "new_mlt", "new_worthiness", date="20260901")

@@ -66,7 +66,7 @@ tests/      # 单元测试（28 例）
 
 | 报告（docs/） | 数值锚 | 维护方式 |
 | --- | --- | --- |
-| 分箱_老客_mlt_笔数.md / 分箱_老客_mlt_金额.md / 分箱_老客_价值_笔数.md | 老客单模型 Excel（页头锚定日期版本） | `scr/_gen_new_reports.py` 生成（2026-09-07 起由手工迁移至生成器，改文案改生成器重跑）；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py`（966 单元）/ `_verify_report_sync_mlt_amt.py`（991 单元）复核 |
+| 分箱_老客_mlt_笔数.md / 分箱_老客_mlt_金额.md / 分箱_老客_价值_笔数.md | 老客单模型 Excel（页头锚定日期版本） | `scr/_gen_new_reports.py` 生成（2026-09-07 起由手工迁移至生成器，改文案改生成器重跑）；mlt cnt/amt 用 `scr/_verify_report_sync_mlt_cnt.py`（980 单元）/ `_verify_report_sync_mlt_amt.py`（1005 单元）复核 |
 | 交叉_老客_mlt_价值.md | 老客交叉 Excel + res/old_*.csv 重算 | 同上（收入/自动审批矩阵由生成器内建断言每次渲染现算核对） |
 | 分箱_新客_mlt_笔数.md / 分箱_新客_价值_笔数.md | binning_new_*_strategy_report | 同上（模板与老客同构，生成器内建断言含新客分档边界） |
 | 交叉_新客_mlt_价值.md | binning_new_cross_strategy_report | 同上 |
@@ -113,8 +113,8 @@ python scripts/cross_mlt_wth.py   # 快捷壳（matrix）
 # 测试与核对
 python -m unittest discover tests
 python scripts/check_data.py --dataset <d> --model <m>   # 新数据质量检查（2.3 节协议）
-python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 或改老客笔数 md 后必跑（966 单元）
-python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 或改老客金额 md 后必跑（991 单元）
+python scr/_verify_report_sync_mlt_cnt.py   # 重跑 mlt cnt 或改老客笔数 md 后必跑（980 单元）
+python scr/_verify_report_sync_mlt_amt.py   # 重跑 mlt amt 或改老客金额 md 后必跑（1005 单元）
 python scr/_gen_new_reports.py                          # 报告生成器：渲染 --dataset 登记的全部组合
                                                         #   （默认 new；老客加 --dataset laoke，两者覆盖 7 份 md）
                                                         #   [--metric cnt|amt] [--date YYYYMMDD] [--out-dir]
@@ -155,7 +155,7 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 ## 7. 验证纪律（最重要）
 
 1. **任何改动后必跑**：`python -m unittest discover tests`（28 例全绿）；
-2. **碰了 pipeline 或 configs 后必回归**：重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py`（966 个数值单元）、`scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（991 个单元）；价值模型/交叉场景对比冻结关键值（见第 8 节）；
+2. **碰了 pipeline 或 configs 后必回归**：重跑 `scripts/bin_mlt_cnt.py` + `scr/_verify_report_sync_mlt_cnt.py`（980 个数值单元）、`scripts/bin_mlt_amt.py` + `scr/_verify_report_sync_mlt_amt.py`（1005 个单元）；价值模型/交叉场景对比冻结关键值（见第 8 节）；
 3. **报告数值禁止手抄**：md 报告里的数字必须来自 Excel（用 openpyxl 读值或脚本生成），写完与 Excel 逐项核对；
 4. **OOT 纪律**：OOT 不参与任何分箱/合箱/阈值选择；所有方案只在 Train 上定；
 5. **提交纪律**：验证全绿才提交；提交信息用中文、说明改动与验证结果；用户未要求不提交。
@@ -163,7 +163,7 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 **提交前 DoD 清单**：
 
 - [ ] `python -m unittest discover tests` 全绿
-- [ ] 动过 mlt 管线 → cnt 核对 966 单元 + amt 核对 991 单元通过
+- [ ] 动过 mlt 管线 → cnt 核对 980 单元 + amt 核对 1005 单元通过
 - [ ] 动过价值模型/交叉 → 关键值与第 8 节基准一致（不一致要说明原因，且经用户确认）
 - [ ] 动过生成器（scr/_gen_new_reports.py）或管线 → 重跑 `_gen_new_reports.py`（new + laoke 共 7 份）后 git diff 仅目标行；老客笔数/金额 md 另跑 cnt/amt verify 复核
 - [ ] 报告 md 数值与 Excel 逐项一致（生成器内建断言全过；新报告按 7.1 模板与格式）
@@ -203,12 +203,12 @@ python scr/_gen_new_reports.py                          # 报告生成器：渲�
 
 | 场景 | 关键值 |
 | --- | --- |
-| mlt cnt | 7 档 `[(1,1),(2,4),(5,8),(9,11),(12,15),(16,19),(20,20)]`，自动 0.0803750459943264，接纳 0.1821580944836785，PSI 0.0054 |
-| mlt amt | 7 档 `[(1,1),(2,4),(5,10),(11,13),(14,17),(18,19),(20,20)]`，自动 0.0494555109039948，接纳 0.1411377275703105，PSI 0.0061 |
+| mlt cnt | 7 档（手动 final_bin_ranges，2026-09-08 用户确认）`[(1,1),(2,4),(5,8),(9,11),(12,14),(15,18),(19,20)]`，自动 0.0803750459943264，接纳 0.161821271383099，PSI 0.0062 |
+| mlt amt | 7 档 `[(1,1),(2,4),(5,10),(11,13),(14,17),(18,19),(20,20)]`，自动 0.0494555109039948，接纳 0.1411377275703105，PSI 0.0061（金额口径不采用 mlt 的手动 final_bin_ranges，继续自动合箱） |
 | 价值模型 cnt | 7 档 `[(1,1),(2,4),(5,8),(9,13),(14,16),(17,19),(20,20)]`，自动 0.1362170673263007，接纳 0.1863252117841281，PSI 0.0084，缺失 21,914 笔（6.68%） |
-| 交叉 matrix | Pearson 0.5938；AND（mlt ≤ E 且 wth ≤ C）接纳 37.54% / 风险 5.74%；四象限：双低 37.54%、仅 mlt 低 37.86%、仅价值低 2.46%（22.74%）、双高 22.14% |
+| 交叉 matrix | Pearson 0.5938；AND（mlt ≤ E 且 wth ≤ C）接纳 37.54% / 风险 5.74%；四象限：双低 37.54%、仅 mlt 低 37.86%、仅价值低 2.46%（22.74%）、双高 22.14%。**该行对应 20260904 交叉 Excel（mlt 旧分箱口径）：mlt 2026-09-08 重分箱后交叉未重跑，交叉报告仍锚定旧口径，重跑前先与用户确认（第 8 节基准将随之更新）** |
 
-> 新客（new）关键值不冻结在本表，由生成器内建断言保证：分档边界渲染时读单模型 Excel 03 各档右边界（交叉报告附录 C 行即两模型 C 档右边界 mlt 0.1389779549508124 / 价值 0.1933179021763764，与 Excel 逐值断言一致）、双分样本量 Train 407,134 / OOT 129,382（总 536,516）。
+> 新客（new）关键值不冻结在本表，由生成器内建断言保证：分档边界渲染时读单模型 Excel 03 各档右边界（交叉报告附录 C 行即两模型 C 档右边界 mlt 0.1389779549508124 / 价值 0.1933179021763764，与 Excel 逐值断言一致）、双分样本量 Train 407,134 / OOT 129,382（总 536,516）。新客 mlt 2026-09-08 起为手动 7 档 `[(1,1),(2,4),(5,8),(9,10),(11,13),(14,17),(18,20)]`（E/F/G 尾部重组，PSI 0.0074；自动 0.08716503179896717 / 接纳 0.1389779549508124 阈值不变）；**新客交叉报告（20260901 Excel）仍锚定旧 mlt 分箱口径，交叉未重跑，重跑前先与用户确认**。
 
 ## 9. 关键业务口径提醒
 
